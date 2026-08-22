@@ -75,6 +75,7 @@ pub enum ShellAction {
     ScrollUp(u16),
     ScrollDown(u16),
     SubmitPrompt,
+    PromptNewline,
     PromptKey(KeyEvent),
     PickerKey(KeyEvent),
     PickerMouse(MouseEvent),
@@ -299,6 +300,9 @@ impl AppShell {
                 ShellAction::ClearPrompt
             };
         }
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            return ShellAction::PromptNewline;
+        }
         if prompt_empty {
             match key.code {
                 KeyCode::Char('p') => {
@@ -313,6 +317,9 @@ impl AppShell {
             }
         }
         if key.code == KeyCode::Enter && !prompt_empty {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                return ShellAction::PromptNewline;
+            }
             return ShellAction::SubmitPrompt;
         }
         self.owner = KeyOwner::Prompt;

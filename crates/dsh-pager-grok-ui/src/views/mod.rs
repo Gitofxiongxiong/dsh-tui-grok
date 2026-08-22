@@ -16,3 +16,4 @@ pub mod picker;
 pub mod status_bar;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/timeline.rs"]
 pub mod timeline;
+pub mod transcript;

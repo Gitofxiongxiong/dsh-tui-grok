@@ -5,9 +5,9 @@
 //! stable and must not become a second host-owned view model.
 
 use dsh_pager::{
-    Diagnostic, DshGeneration, DshInteraction, DshPresentationModel, DshQueueItem,
-    DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderKind, DshSeq, DshSessionId,
-    SessionState,
+    ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
+    DshQueueItem, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderKind, DshSeq,
+    DshSessionId, SessionState,
 };
 use dsh_pager_protocol::PromptMode;
 use serde::{Deserialize, Serialize};
@@ -165,6 +165,16 @@ pub struct HostRowOwned {
 
 impl GrokHostSnapshot {
     pub fn from_session(session: &SessionState) -> Self {
+        Self::from_session_with_control_plane(session, None)
+    }
+
+    /// Project the current session and all control-plane roster rows into the
+    /// picker contract. The control-plane store is authoritative for rows;
+    /// the loaded SessionState remains authoritative for the active transcript.
+    pub fn from_session_with_control_plane(
+        session: &SessionState,
+        control_plane: Option<&ControlPlaneStore>,
+    ) -> Self {
         let model = session
             .projection("model")
             .and_then(|value| value.as_str())
@@ -180,16 +190,48 @@ impl GrokHostSnapshot {
             .into_iter()
             .map(TranscriptRow::from)
             .collect();
-        let mut picker_rows = vec![HostRowOwned {
-            id: session.session_id().to_string(),
-            label: title.clone(),
-            detail: if session.running() {
-                "attached · running".into()
-            } else {
-                "attached · idle".into()
-            },
-            expanded: true,
-        }];
+        let mut picker_rows = Vec::new();
+        if let Some(control_plane) = control_plane {
+            for row in control_plane.snapshots() {
+                let row_title = row
+                    .projections
+                    .get("title")
+                    .and_then(|projection| projection.value.as_str())
+                    .unwrap_or(row.session_id.as_str())
+                    .to_string();
+                let state = if row.removed {
+                    "gone"
+                } else if row.archived {
+                    "archived"
+                } else if row.running == Some(true) {
+                    "running"
+                } else {
+                    "idle"
+                };
+                let detail = row.workspace_id.as_deref().map_or_else(
+                    || state.to_string(),
+                    |workspace| format!("{state} · {workspace}"),
+                );
+                picker_rows.push(HostRowOwned {
+                    id: row.session_id.clone(),
+                    label: row_title,
+                    detail,
+                    expanded: row.session_id == session.session_id(),
+                });
+            }
+        }
+        if !picker_rows.iter().any(|row| row.id == session.session_id()) {
+            picker_rows.push(HostRowOwned {
+                id: session.session_id().to_string(),
+                label: title.clone(),
+                detail: if session.running() {
+                    "attached · running".into()
+                } else {
+                    "attached · idle".into()
+                },
+                expanded: true,
+            });
+        }
         if !session.queue().is_empty() {
             picker_rows.push(HostRowOwned {
                 id: format!("{}:queue", session.session_id()),
@@ -333,11 +375,11 @@ impl GrokHostSnapshot {
                     || row.label.to_lowercase().contains(&query)
                     || row.detail.to_lowercase().contains(&query)
             })
-            .map(|(index, row)| {
+            .map(|(_, row)| {
                 crate::views::picker::PickerEntry::Row(crate::views::picker::PickerRow {
                     label: &row.label,
                     right_label: &row.detail,
-                    selected: index == 0,
+                    selected: false,
                     expanded: row.expanded,
                     fields: &[],
                     description_lines: &[],
@@ -350,6 +392,35 @@ impl GrokHostSnapshot {
                     underline_last_desc: false,
                 })
             })
+            .collect()
+    }
+
+    /// Stable target IDs in the exact order used by the filtered picker.
+    /// Non-session helper rows (queue/diagnostic) are intentionally excluded.
+    pub fn picker_session_ids_filtered(&self, query: &str) -> Vec<&str> {
+        let query = query.trim().to_lowercase();
+        self.picker_rows
+            .iter()
+            .filter(|row| {
+                !row.id.contains(':')
+                    && (query.is_empty()
+                        || row.label.to_lowercase().contains(&query)
+                        || row.detail.to_lowercase().contains(&query))
+            })
+            .map(|row| row.id.as_str())
+            .collect()
+    }
+
+    pub fn picker_row_ids_filtered(&self, query: &str) -> Vec<&str> {
+        let query = query.trim().to_lowercase();
+        self.picker_rows
+            .iter()
+            .filter(|row| {
+                query.is_empty()
+                    || row.label.to_lowercase().contains(&query)
+                    || row.detail.to_lowercase().contains(&query)
+            })
+            .map(|row| row.id.as_str())
             .collect()
     }
 }

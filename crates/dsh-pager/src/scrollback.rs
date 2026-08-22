@@ -98,7 +98,12 @@ impl ScrollbackEntry {
         if self.cache.as_ref().is_none_or(|cache| cache.width != width) {
             let mut lines = vec![self.kind.label().to_string()];
             let body_width = width.saturating_sub(2).max(1);
-            for logical_line in self.text.split('\n') {
+            let display_text = if self.content.blocks.is_empty() {
+                self.text.clone()
+            } else {
+                self.content.display_text()
+            };
+            for logical_line in display_text.split('\n') {
                 if logical_line.is_empty() {
                     lines.push(String::new());
                     continue;

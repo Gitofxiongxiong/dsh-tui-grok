@@ -100,6 +100,15 @@ pub enum DshRenderBlock {
         blocks: Vec<DshRenderBlock>,
         is_error: bool,
     },
+    /// A structured edit/diff block. Keeping both sides here lets the Grok
+    /// renderer paint additions/removals and lets copy reconstruct the exact
+    /// source without parsing a flattened tool string.
+    Diff {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        old_text: String,
+        new_text: String,
+    },
     Unknown {
         kind: String,
         raw: String,
@@ -205,28 +214,41 @@ impl DshRenderContent {
     }
 
     fn from_value(content: &Value) -> Self {
-        let blocks = content
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(parse_render_block)
-            .collect();
+        let blocks = match content {
+            Value::Array(values) => values.iter().map(parse_render_block).collect(),
+            Value::Object(_) => vec![parse_render_block(content)],
+            Value::String(text) => vec![DshRenderBlock::Markdown { text: text.clone() }],
+            _ => Vec::new(),
+        };
         Self::from_blocks(blocks)
     }
 
     fn from_blocks(blocks: Vec<DshRenderBlock>) -> Self {
         let fallback = blocks
             .iter()
-            .map(DshRenderBlock::fallback_text)
+            .map(DshRenderBlock::display_text)
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
         Self { blocks, fallback }
     }
+
+    /// Deterministic plain projection for terminals and copy paths. The
+    /// structured blocks remain authoritative; this is only a display-safe
+    /// fallback when a rich renderer is unavailable.
+    pub fn display_text(&self) -> String {
+        self.blocks
+            .iter()
+            .map(DshRenderBlock::display_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl DshRenderBlock {
-    fn fallback_text(&self) -> String {
+    /// Lossless-enough text projection used by non-rich terminals and copy.
+    pub fn display_text(&self) -> String {
         match self {
             Self::Markdown { text } | Self::Reasoning { text } | Self::Plain { text } => {
                 text.clone()
@@ -244,20 +266,41 @@ impl DshRenderBlock {
                 label.map_or_else(|| "[image]".into(), |label| format!("[image: {label}]"))
             }
             Self::ToolCall {
-                name, arguments, ..
+                name,
+                arguments,
+                edit,
+                ..
             } => {
                 if arguments.is_empty() {
-                    name.clone()
+                    edit.as_ref().map_or_else(
+                        || name.clone(),
+                        |edit| format!("{name}\n-{}\n+{}", edit.old_text, edit.new_text),
+                    )
                 } else {
-                    format!("{name} {arguments}")
+                    edit.as_ref().map_or_else(
+                        || format!("{name} {arguments}"),
+                        |edit| {
+                            format!("{name} {arguments}\n-{}\n+{}", edit.old_text, edit.new_text)
+                        },
+                    )
                 }
             }
             Self::ToolResult { blocks, .. } => blocks
                 .iter()
-                .map(Self::fallback_text)
+                .map(Self::display_text)
                 .filter(|text| !text.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n"),
+            Self::Diff {
+                path,
+                old_text,
+                new_text,
+            } => {
+                let header = path
+                    .as_deref()
+                    .map_or_else(|| "diff".to_string(), |path| format!("diff {path}"));
+                format!("{header}\n-{old_text}\n+{new_text}")
+            }
             Self::Unknown { kind, raw } => {
                 format!("[unsupported block: {kind}]\n{raw}")
             }
@@ -320,6 +363,21 @@ fn parse_render_block(value: &Value) -> DshRenderBlock {
                 .get("isError")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+        },
+        "diff" | "patch" => DshRenderBlock::Diff {
+            path: string_field(value, "path")
+                .or_else(|| string_field(value, "file"))
+                .map(str::to_string),
+            old_text: string_field(value, "oldText")
+                .or_else(|| string_field(value, "old_string"))
+                .or_else(|| string_field(value, "old"))
+                .unwrap_or("")
+                .to_string(),
+            new_text: string_field(value, "newText")
+                .or_else(|| string_field(value, "new_string"))
+                .or_else(|| string_field(value, "new"))
+                .unwrap_or("")
+                .to_string(),
         },
         _ => DshRenderBlock::Unknown {
             kind: kind.to_string(),

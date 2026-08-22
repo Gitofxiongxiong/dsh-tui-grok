@@ -13,22 +13,25 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
 use dsh_pager::{
-    PagerError, PagerResult, RpcTransport, SessionState, drain_notifications, repair_tail,
+    PagerError, PagerResult, RpcTransport, SessionState, drain_notifications, load_session_id,
+    repair_tail,
 };
 use dsh_pager_protocol::PromptMode;
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::app::{AppShell, Overlay, ShellAction, ShellEvent};
-use crate::effects::{DshEffectSink, UiContext, UiEffectSink, UiEffectStatus, UiIntent};
-use crate::host_adapter::{GrokHostSnapshot, TranscriptRow};
-use crate::input::line_editor::{LineEditOutcome, LineEditor};
+use crate::effects::{
+    DshEffectSink, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent, compile_intent,
+};
+use crate::host_adapter::GrokHostSnapshot;
+use crate::input::{PromptEditor, line_editor::LineEditOutcome};
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
@@ -90,7 +93,9 @@ fn run_loop(
                 ui.status = Some(format!("notification error: {error}"));
             }
         }
-        terminal.draw_with_links(&[], |frame| ui.render(frame, session))?;
+        terminal.draw_with_links(&[], |frame| {
+            ui.render(frame, session, transport.control_plane())
+        })?;
         if !event::poll(POLL_INTERVAL)? {
             continue;
         }
@@ -131,13 +136,19 @@ struct UiState {
     picker: PickerState,
     picker_entry_count: usize,
     modal: ModalWindowState,
-    prompt: LineEditor,
+    prompt: PromptEditor,
+    picker_selected_id: Option<String>,
     status: Option<String>,
     frame: usize,
 }
 
 impl UiState {
-    fn render(&mut self, frame: &mut Frame<'_>, session: &SessionState) {
+    fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        session: &mut SessionState,
+        control_plane: &dsh_pager::ControlPlaneStore,
+    ) {
         let area = frame.area();
         let theme = Theme::current();
         let background = Block::default().style(Style::default().bg(theme.bg_base));
@@ -149,7 +160,8 @@ impl UiState {
         let input = shell_layout.prompt;
         let footer = shell_layout.footer;
 
-        let snapshot = GrokHostSnapshot::from_session(session);
+        let snapshot =
+            GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
         let connection = format!("{} · {}", snapshot.connection, snapshot.model);
         frame.render_widget(
             StatusBar::new(&snapshot.session_title)
@@ -158,7 +170,7 @@ impl UiState {
             header,
         );
 
-        self.render_transcript(frame, body, &snapshot);
+        self.render_transcript(frame, body, &snapshot, &mut session.scrollback);
         self.render_prompt(frame, input, &snapshot);
         let capability_notice = if !self.capabilities.bracketed_paste {
             Some("Paste unavailable")
@@ -185,7 +197,13 @@ impl UiState {
         self.frame = self.frame.wrapping_add(1);
     }
 
-    fn render_transcript(&self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
+    fn render_transcript(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        snapshot: &GrokHostSnapshot,
+        scrollback: &mut dsh_pager::scrollback::Scrollback,
+    ) {
         let theme = Theme::current();
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -201,13 +219,21 @@ impl UiState {
                 Style::default().fg(theme.gray),
             )));
         } else {
-            for row in &snapshot.transcript {
-                lines.extend(transcript_lines(row, theme));
-                lines.push(Line::from(""));
+            let total_height = scrollback.total_height(content.width as usize);
+            let max_scroll = total_height.saturating_sub(content.height as usize);
+            self.scroll = self.scroll.min(max_scroll);
+            let scroll_top = max_scroll.saturating_sub(self.scroll);
+            for paint in
+                scrollback.visible_lines(content.width as usize, scroll_top, content.height)
+            {
+                let style = if paint.header {
+                    Style::default().fg(theme.gray_bright)
+                } else {
+                    Style::default().fg(theme.text_primary)
+                };
+                lines.push(Line::from(Span::styled(paint.text, style)));
             }
         }
-        let max_scroll = lines.len().saturating_sub(content.height as usize);
-        let scroll = self.scroll.min(max_scroll) as u16;
         let block = Block::default()
             .borders(Borders::LEFT)
             .border_style(Style::default().fg(theme.bg_light))
@@ -217,7 +243,7 @@ impl UiState {
                 .block(block)
                 .style(Style::default().bg(theme.bg_base))
                 .wrap(Wrap { trim: false })
-                .scroll((scroll, 0)),
+                .scroll((0, 0)),
             content,
         );
 
@@ -242,42 +268,63 @@ impl UiState {
         let theme = Theme::current();
         let label = if snapshot.running { " > " } else { " · " };
         let available = area.width.saturating_sub(label.len() as u16 + 1) as usize;
-        let viewport = self.prompt.viewport(available);
-        let visible = if self.prompt.text().is_empty() {
+        let viewport = self
+            .prompt
+            .viewport(available, area.height.saturating_sub(1) as usize);
+        let placeholder = if self.prompt.is_empty() {
             truncate_str("Ask DeepSeek anything…", available)
         } else {
-            self.prompt.text()[viewport.visible_byte_range].to_string()
+            String::new()
         };
-        let text = format!("{label}{visible}");
-        let style = if self.prompt.text().is_empty() {
+        let style = if self.prompt.is_empty() {
             Style::default().fg(theme.gray_dim)
         } else {
             Style::default().fg(theme.text_primary)
         };
         frame.render_widget(
-            Paragraph::new(text)
-                .style(style)
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(Style::default().fg(theme.bg_light)),
+            Paragraph::new(if placeholder.is_empty() {
+                Text::from(
+                    viewport
+                        .lines
+                        .iter()
+                        .map(|line| Line::from(format!("{label}{line}")))
+                        .collect::<Vec<_>>(),
                 )
-                .wrap(Wrap { trim: false }),
+            } else {
+                Text::from(Line::from(format!("{label}{placeholder}")))
+            })
+            .style(style)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(theme.bg_light)),
+            )
+            .wrap(Wrap { trim: false }),
             area,
         );
-        if !self.prompt.text().is_empty() && area.height > 0 && area.width > 0 {
+        if !self.prompt.is_empty() && area.height > 0 && area.width > 0 {
             let cursor_x = area
                 .x
                 .saturating_add(label.len() as u16)
-                .saturating_add(viewport.cursor_display_column as u16)
+                .saturating_add(viewport.cursor_x as u16)
                 .min(area.right().saturating_sub(1));
-            frame.set_cursor_position(Position::new(cursor_x, area.y));
+            let cursor_y = area
+                .y
+                .saturating_add(viewport.cursor_y as u16)
+                .min(area.bottom().saturating_sub(1));
+            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
         }
     }
 
     fn render_picker(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
         let theme = Theme::current();
         let mut entries = snapshot.picker_entries_filtered(self.picker.query());
+        let row_ids = snapshot.picker_row_ids_filtered(self.picker.query());
+        if let Some(selected_id) = self.picker_selected_id.as_deref()
+            && let Some(index) = row_ids.iter().position(|id| *id == selected_id)
+        {
+            self.picker.selected = index;
+        }
         self.picker_entry_count = entries.len();
         for (index, entry) in entries.iter_mut().enumerate() {
             if let PickerEntry::Row(row) = entry {
@@ -325,14 +372,23 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<bool> {
-        let prompt_empty = self.prompt.text().is_empty();
+        let prompt_empty = self.prompt.is_empty();
         let action = self.shell.dispatch(event, prompt_empty);
         match action {
             ShellAction::Quit => Ok(true),
             ShellAction::OpenPicker => {
+                if let Err(error) = dsh_pager::list_sessions(transport) {
+                    self.status = Some(format!("Session refresh failed: {error}"));
+                }
                 self.picker = PickerState::input_active();
                 self.picker.mode = PickerMode::Floating;
-                self.picker_entry_count = 1;
+                self.picker_selected_id = Some(session.session_id().to_string());
+                self.picker_entry_count = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                )
+                .picker_row_ids_filtered("")
+                .len();
                 self.status = Some("Session picker opened".into());
                 Ok(false)
             }
@@ -366,12 +422,17 @@ impl UiState {
                 }
                 Ok(false)
             }
+            ShellAction::PromptNewline => {
+                let _ = self.prompt.insert_newline();
+                self.status = None;
+                Ok(false)
+            }
             ShellAction::PickerKey(key) => {
-                let _ = self.handle_picker_event(Event::Key(key));
+                let _ = self.handle_picker_event(Event::Key(key), transport, session);
                 Ok(false)
             }
             ShellAction::PickerMouse(mouse) => {
-                let _ = self.handle_picker_event(Event::Mouse(mouse));
+                let _ = self.handle_picker_event(Event::Mouse(mouse), transport, session);
                 Ok(false)
             }
             ShellAction::PromptPaste(text) => {
@@ -382,7 +443,7 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::PickerPaste(text) => {
-                let _ = self.handle_picker_event(Event::Paste(text));
+                let _ = self.handle_picker_event(Event::Paste(text), transport, session);
                 Ok(false)
             }
             ShellAction::Resized(area) => {
@@ -414,21 +475,28 @@ impl UiState {
             },
             &context,
         )?;
-        self.prompt.reset();
-        self.status = Some(if matches!(receipt.status, UiEffectStatus::Accepted) {
-            "Prompt queued".into()
+        if matches!(
+            receipt.status,
+            UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+        ) {
+            self.prompt.reset();
+            self.status = Some("Prompt queued".into());
         } else {
-            receipt
-                .diagnostic
-                .unwrap_or_else(|| "Prompt rejected by host".into())
-        });
+            self.status = Some(
+                receipt
+                    .diagnostic
+                    .unwrap_or_else(|| "Prompt rejected by host; draft retained".into()),
+            );
+        }
         Ok(())
     }
 
-    fn handle_picker_event(&mut self, event: Event) -> bool {
-        // Keep the picker input state machine from Grok intact.  The host
-        // adapter currently presents the loaded session as the first row;
-        // session switching is wired in the next vertical slice.
+    fn handle_picker_event(
+        &mut self,
+        event: Event,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> bool {
         let config = PickerConfig {
             title: Some("Sessions"),
             show_search_hint: false,
@@ -457,9 +525,55 @@ impl UiState {
             self.picker_entry_count.max(1),
             &config,
         ) {
-            PickerOutcome::Closed | PickerOutcome::Selected(_) => {
+            PickerOutcome::Closed => {
                 self.shell.close_overlay();
                 self.status = Some("Session picker closed".into());
+                false
+            }
+            PickerOutcome::Selected(index) => {
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                let ids = snapshot.picker_row_ids_filtered(self.picker.query());
+                let Some(target) = ids.get(index).copied() else {
+                    self.status = Some("Selected session is no longer available".into());
+                    return false;
+                };
+                self.picker_selected_id = Some(target.to_string());
+                let effect = compile_intent(
+                    UiIntent::AttachSession {
+                        session_id: dsh_pager::DshSessionId::new(target),
+                    },
+                    &UiContext::from_session(session),
+                );
+                let UiEffect::AttachSession { session_id, .. } = effect else {
+                    self.status = Some("Unable to compile attach operation".into());
+                    return false;
+                };
+                if session_id.as_str() == session.session_id() {
+                    self.shell.close_overlay();
+                    self.status = Some("Already attached".into());
+                    return false;
+                }
+                self.status = Some(format!("Attaching {}…", session_id.as_str()));
+                match load_session_id(
+                    transport,
+                    session.generation(),
+                    session_id.as_str().to_string(),
+                ) {
+                    Ok(next) => {
+                        *session = next;
+                        self.scroll = 0;
+                        self.picker.reset();
+                        self.picker_selected_id = None;
+                        self.shell.close_overlay();
+                        self.status = Some("Session attached".into());
+                    }
+                    Err(error) => {
+                        self.status = Some(format!("Attach failed: {error}"));
+                    }
+                }
                 false
             }
             PickerOutcome::QueryChanged | PickerOutcome::Changed => {
@@ -469,36 +583,6 @@ impl UiState {
             _ => false,
         }
     }
-}
-
-fn transcript_lines(row: &TranscriptRow, theme: &Theme) -> Vec<Line<'static>> {
-    let color = match row.kind {
-        dsh_pager::DshRenderKind::User => theme.accent_user,
-        dsh_pager::DshRenderKind::Assistant => theme.text_primary,
-        dsh_pager::DshRenderKind::Thinking => theme.fuzzy_accent,
-        dsh_pager::DshRenderKind::ToolCall | dsh_pager::DshRenderKind::ToolResult => {
-            theme.gray_bright
-        }
-        _ => theme.gray,
-    };
-    let header = Line::from(vec![
-        Span::styled(
-            format!("{} ", row.label),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("#{}", row.source_seq),
-            Style::default().fg(theme.gray_dim),
-        ),
-    ]);
-    let mut lines = vec![header];
-    lines.extend(row.text.lines().map(|line| {
-        Line::from(Span::styled(
-            format!("  {line}"),
-            Style::default().fg(color),
-        ))
-    }));
-    lines
 }
 
 #[cfg(test)]
