@@ -541,6 +541,10 @@ impl UiState {
                     return false;
                 };
                 self.picker_selected_id = Some(target.to_string());
+                if target.contains(':') {
+                    self.status = Some("Selected row is not attachable".into());
+                    return false;
+                }
                 let effect = compile_intent(
                     UiIntent::AttachSession {
                         session_id: dsh_pager::DshSessionId::new(target),
