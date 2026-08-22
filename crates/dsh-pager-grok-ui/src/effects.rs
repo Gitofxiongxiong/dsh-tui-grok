@@ -43,6 +43,7 @@ pub enum UiIntent {
 pub struct UiContext {
     pub session_id: DshSessionId,
     pub generation: DshGeneration,
+    pub request_id: DshRequestId,
 }
 
 impl UiContext {
@@ -50,6 +51,15 @@ impl UiContext {
         Self {
             session_id: DshSessionId::new(session.session_id()),
             generation: DshGeneration::new(session.generation()),
+            request_id: DshRequestId::new("pending"),
+        }
+    }
+
+    pub fn for_operation(session: &SessionState, request_id: DshRequestId) -> Self {
+        Self {
+            session_id: DshSessionId::new(session.session_id()),
+            generation: DshGeneration::new(session.generation()),
+            request_id,
         }
     }
 }
@@ -149,7 +159,7 @@ impl DshEffectSink<'_> {
 
 impl UiEffectSink for DshEffectSink<'_> {
     fn submit(&mut self, intent: UiIntent, context: &UiContext) -> PagerResult<UiEffectReceipt> {
-        self.dispatch(compile_intent(intent, context))
+        self.dispatch_effect(compile_intent(intent, context))
     }
 }
 
@@ -186,10 +196,16 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::ForkSession { at_seq } => format!("{action_name}:{at_seq:?}"),
         UiIntent::ArchiveSession => action_name.to_string(),
     };
+    let request_id = context.request_id.clone();
+    let dedupe_key = if request_id.as_str() == "pending" {
+        dedupe_key
+    } else {
+        format!("{action_name}:{request_id}")
+    };
     let operation = OperationKey {
         session_id: target_session_id,
         generation: context.generation,
-        request_id: DshRequestId::new("pending"),
+        request_id,
         action: action_name.to_string(),
         dedupe_key,
     };
@@ -223,7 +239,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
 }
 
 impl DshEffectSink<'_> {
-    fn dispatch(&mut self, effect: UiEffect) -> PagerResult<UiEffectReceipt> {
+    pub fn dispatch_effect(&mut self, effect: UiEffect) -> PagerResult<UiEffectReceipt> {
         let (operation, result) = match effect {
             UiEffect::SubmitPrompt {
                 mut operation,
@@ -419,6 +435,7 @@ mod tests {
         let context = UiContext {
             session_id: DshSessionId::new("s"),
             generation: DshGeneration::new(4),
+            request_id: DshRequestId::new("pending"),
         };
         let first = compile_intent(
             UiIntent::SubmitPrompt {
@@ -463,6 +480,24 @@ mod tests {
         assert_eq!(first.dedupe_key, second.dedupe_key);
         assert_ne!(first.dedupe_key, different.dedupe_key);
         assert_eq!(first.request_id, second.request_id);
+    }
+
+    #[test]
+    fn explicit_operation_identity_controls_retry_dedupe() {
+        let session = SessionState::new("s".into(), 4);
+        let context = UiContext::for_operation(&session, DshRequestId::new("op-1"));
+        let effect = compile_intent(
+            UiIntent::SubmitPrompt {
+                text: "same".into(),
+                mode: PromptMode::Queue,
+            },
+            &context,
+        );
+        let UiEffect::SubmitPrompt { operation, .. } = effect else {
+            panic!()
+        };
+        assert_eq!(operation.request_id.as_str(), "op-1");
+        assert_eq!(operation.dedupe_key, "submit:op-1");
     }
 
     #[test]
