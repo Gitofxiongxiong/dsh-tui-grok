@@ -567,6 +567,42 @@ where
         })
     }
 
+    /// Draw a frame while diffing the semantic hyperlink layer with the cell
+    /// buffer.  Link spans use absolute viewport coordinates and are cleared
+    /// automatically when the next frame supplies an empty list.
+    pub fn draw_with_links<F>(
+        &mut self,
+        render_callback: F,
+        links: &[LinkSpan],
+    ) -> io::Result<CompletedFrame<'_>>
+    where
+        F: FnOnce(&mut Frame<'_>),
+        B: Write,
+    {
+        self.autoresize()?;
+        let mut frame = self.get_frame();
+        render_callback(&mut frame);
+        let cursor_position = OurFrame::from(frame).cursor_position;
+        self.set_frame_links(links);
+        self.flush_with_links()?;
+        match cursor_position {
+            None => self.hide_cursor()?,
+            Some(position) => {
+                self.show_cursor()?;
+                self.set_cursor_position(position)?;
+            }
+        }
+        self.swap_buffers();
+        Backend::flush(&mut self.backend)?;
+        let completed_frame = CompletedFrame {
+            buffer: &self.buffers[1 - self.current],
+            area: self.last_known_area,
+            count: self.frame_count,
+        };
+        self.frame_count = self.frame_count.wrapping_add(1);
+        Ok(completed_frame)
+    }
+
     /// Tries to draw a single frame to the terminal.
     ///
     /// Returns [`Result::Ok`] containing a [`CompletedFrame`] if successful, otherwise

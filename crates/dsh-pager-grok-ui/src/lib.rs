@@ -4,6 +4,7 @@
 //! upstream module paths.  DSH-specific knowledge lives in `host_adapter` and
 //! `runtime`, so the same view layer can later be attached to another harness.
 
+pub mod app;
 pub mod appearance;
 pub mod clipboard;
 pub mod glyphs;
@@ -18,6 +19,11 @@ pub mod effects;
 pub mod host_adapter;
 pub mod runtime;
 
+pub use app::{
+    AppShell, KeyOwner, Overlay, REPLACEMENT_MAP, ReplacementEntry, ShellAction, ShellEvent,
+    ShellLayout, ShellSnapshot,
+};
+pub use dsh_pager_render::{TerminalCapabilities, Theme};
 pub use effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectReceipt, UiEffectSink,
     UiEffectStatus, UiIntent, compile_intent,
