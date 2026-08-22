@@ -1,0 +1,10 @@
+{
+  "name": "user-assistant",
+  "sessionId": "chat-session",
+  "generation": 1,
+  "events": [
+    { "type": "user/message", "seq": 0, "data": { "source": { "kind": "user" }, "content": [{ "type": "text", "text": "hello" }] } },
+    { "type": "assistant/message", "seq": 1, "data": { "message": { "content": [{ "type": "text", "text": "hi" }] } } }
+  ],
+  "expected": { "entryIds": ["event:0", "event:1"], "queueIds": [], "interaction": null }
+}

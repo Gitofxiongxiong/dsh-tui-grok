@@ -7,6 +7,7 @@
 pub mod control_plane;
 pub mod dashboard;
 pub mod error;
+pub mod identity;
 pub mod loader;
 pub mod presentation;
 pub mod scrollback;
@@ -23,6 +24,9 @@ pub use dashboard::{
     DashboardViewState, DashboardWorkspace,
 };
 pub use error::{PagerError, PagerResult};
+pub use identity::{
+    DshGeneration, DshInteractionId, DshQueueItemId, DshRequestId, DshSeq, DshSessionId,
+};
 pub use loader::{
     archive_session, cancel_session, cancel_session_id, detach_session, dispatch_session,
     dispatch_session_with_id, drain_notifications, fork_session, fork_session_id,

@@ -7,6 +7,22 @@ cargo check --workspace
 cargo test --workspace
 ```
 
+M0/M1 的可重建基线使用仓库脚本：
+
+```bash
+scripts/baseline.sh
+```
+
+它会校验 DSH wire fixture、Grok source manifest，运行 fmt/check/test/all-features
+clippy，并用 checked-in mock backend 做 PTY 终端恢复 smoke。`scripts/test-fast.sh`
+仍用于不编译 all-features 的快速循环。
+
+固定来源、协议和工具版本见 [M0_BASELINE.md](M0_BASELINE.md)。
+
+当前 `fixtures/parity/fallback-screen-80x24.json` 与
+`fallback-screen-40x12.json` 是 M0 的简化 UI semantic baseline，明确标记为
+fallback；它们不是 Grok reference golden，M10 reference runner 会替换它们。
+
 ## 分层测试
 
 - Grok vendor 模块：保留上游已有单元测试，确认复制时行为不漂移。

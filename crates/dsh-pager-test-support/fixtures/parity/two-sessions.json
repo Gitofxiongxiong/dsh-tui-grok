@@ -1,0 +1,9 @@
+{
+  "name": "two-sessions",
+  "generation": 6,
+  "sessions": [
+    { "id": "session-a", "title": "First", "running": true },
+    { "id": "session-b", "title": "Second", "running": false }
+  ],
+  "expected": { "rosterIds": ["session-a", "session-b"], "attachTarget": "session-b" }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "streaming-tool",
+  "sessionId": "stream-session",
+  "generation": 2,
+  "events": [
+    { "type": "assistant/chunk", "seq": 0, "data": { "turn": 1, "step": 1, "chunk": { "type": "text-delta", "index": 0, "text": "draft" } } },
+    { "type": "tool/call", "seq": 1, "data": { "name": "read", "callId": "call-1", "arguments": "{\"path\":\"a.rs\"}" } },
+    { "type": "tool/result", "seq": 2, "data": { "message": { "content": [{ "type": "text", "text": "ok" }] } } }
+  ],
+  "expected": { "partialId": "partial:1:1", "entryIds": ["event:1", "event:2"], "toolCallId": "call-1" }
+}

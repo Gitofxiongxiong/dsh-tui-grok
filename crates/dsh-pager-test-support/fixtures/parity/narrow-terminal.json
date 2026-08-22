@@ -1,0 +1,8 @@
+{
+  "name": "narrow-terminal",
+  "sessionId": "narrow-session",
+  "generation": 9,
+  "terminal": { "width": 40, "height": 12 },
+  "events": [{ "type": "assistant/message", "seq": 0, "text": "CJK \u754c\u9762 and wrapping" }],
+  "expected": { "minimumBodyRows": 3, "modalMustFit": true, "noHorizontalOverflow": true }
+}

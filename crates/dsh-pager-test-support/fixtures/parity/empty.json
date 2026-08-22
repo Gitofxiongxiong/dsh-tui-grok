@@ -1,0 +1,7 @@
+{
+  "name": "empty",
+  "sessionId": "empty-session",
+  "generation": 1,
+  "events": [],
+  "expected": { "entryIds": [], "queueIds": [], "interaction": null, "fallbackLabel": "No transcript events yet" }
+}

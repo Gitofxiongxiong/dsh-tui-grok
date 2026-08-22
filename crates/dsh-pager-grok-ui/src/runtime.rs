@@ -3,6 +3,11 @@
 //! This is intentionally a thin shell.  It owns focus and viewport state,
 //! turns key events into DSH effects, and leaves all visual chrome to the
 //! imported Grok modules.
+//!
+//! Migration note (M0.8): this file is the frozen fallback shell. New parity
+//! behavior belongs in the Grok AppView/AgentView migration and must not grow
+//! a second layout or dispatch system here. Removal exits when M3 production
+//! shell and its focus/dispatch fixtures replace this entry path.
 
 use std::time::Duration;
 
@@ -20,7 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::effects::{DshEffectSink, UiEffect, UiEffectSink};
+use crate::effects::{DshEffectSink, UiContext, UiEffectSink, UiEffectStatus, UiIntent};
 use crate::host_adapter::{GrokHostSnapshot, TranscriptRow};
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::modal_window_state::ModalWindowState;
@@ -306,19 +311,22 @@ impl UiState {
                 if text.is_empty() {
                     self.status = Some("Prompt is empty".into());
                 } else {
-                    let mut sink = DshEffectSink { transport };
-                    let receipt = sink.dispatch(
-                        UiEffect::SubmitPrompt {
+                    let mut sink = DshEffectSink::new(transport);
+                    let context = UiContext::from_session(session);
+                    let receipt = sink.submit(
+                        UiIntent::SubmitPrompt {
                             text,
                             mode: PromptMode::Queue,
                         },
-                        session,
+                        &context,
                     )?;
                     self.prompt.reset();
-                    self.status = Some(if receipt.accepted {
+                    self.status = Some(if matches!(receipt.status, UiEffectStatus::Accepted) {
                         "Prompt queued".into()
                     } else {
-                        "Prompt rejected by host".into()
+                        receipt
+                            .diagnostic
+                            .unwrap_or_else(|| "Prompt rejected by host".into())
                     });
                 }
             }

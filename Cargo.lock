@@ -260,6 +260,8 @@ dependencies = [
  "dsh-pager-render",
  "pretty_assertions",
  "ratatui",
+ "serde",
+ "serde_json",
  "serial_test",
  "textwrap",
  "unicode-width 0.2.0",

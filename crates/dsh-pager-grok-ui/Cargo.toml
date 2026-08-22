@@ -13,6 +13,8 @@ dsh-pager = { path = "../dsh-pager" }
 dsh-pager-protocol = { path = "../dsh-pager-protocol" }
 dsh-pager-render = { path = "../dsh-pager-render" }
 ratatui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 textwrap = { workspace = true }
 unicode-width = { workspace = true }
 

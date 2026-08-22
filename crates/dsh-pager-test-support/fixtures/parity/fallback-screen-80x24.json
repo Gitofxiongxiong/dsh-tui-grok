@@ -1,0 +1,12 @@
+{
+  "name": "fallback-screen-80x24",
+  "status": "fallback-baseline",
+  "terminal": { "width": 80, "height": 24 },
+  "semanticRows": [
+    { "role": "header", "text": "DSH · GROK UI" },
+    { "role": "body-empty", "text": "No transcript events yet" },
+    { "role": "prompt", "text": "Ask DeepSeek anything" },
+    { "role": "footer", "text": "Enter send" }
+  ],
+  "focusOwner": "prompt"
+}

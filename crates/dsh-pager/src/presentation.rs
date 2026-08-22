@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 
 use dsh_pager_protocol::{HistoryEntry, QueuePlacement, SessionQueueItem};
+
+use crate::identity::{DshSeq, DshSessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -17,6 +19,15 @@ use serde_json::Value;
 pub enum DshRenderEntryId {
     Event { seq: i64 },
     Partial { turn: i64, step: i64 },
+}
+
+impl DshRenderEntryId {
+    pub fn source_seq(self) -> DshSeq {
+        match self {
+            Self::Event { seq } => DshSeq::new(seq),
+            Self::Partial { step, .. } => DshSeq::new(step),
+        }
+    }
 }
 
 /// Presentation category used by the DSH renderer.
@@ -134,6 +145,13 @@ pub struct DshRenderEntry {
     pub source_seq: i64,
     pub kind: DshRenderKind,
     pub text: String,
+    /// True while the host is still streaming this surface. A final message
+    /// uses the same stable surface lineage with this bit cleared.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
+    /// Source event ids that caused this surface replacement or projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<i64>,
     #[serde(default)]
     pub content: DshRenderContent,
 }
@@ -176,12 +194,18 @@ impl DshRenderEntry {
             source_seq,
             kind,
             text: text.clone(),
+            partial: false,
+            lineage: Vec::new(),
             content: DshRenderContent {
                 blocks: vec![block],
                 fallback: text,
             },
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl DshRenderContent {
@@ -592,6 +616,10 @@ impl DshPresentationModel {
             ..Self::default()
         }
     }
+
+    pub fn session_identity(&self) -> DshSessionId {
+        DshSessionId::new(self.session_id.clone())
+    }
 }
 
 /// Incremental changes produced by [`DshPresentationAdapter`].
@@ -652,6 +680,15 @@ impl DshPresentationAdapter {
             }
             "compaction/prune" => self.adapt_compaction_prune(event.seq, &event.data, &mut updates),
             _ => {}
+        }
+        let lineage = event
+            .source_event_seqs
+            .clone()
+            .unwrap_or_else(|| vec![event.seq]);
+        for update in &mut updates {
+            if let DshRenderUpdate::Upsert(render) = update {
+                render.lineage = lineage.clone();
+            }
         }
         updates
     }
@@ -778,6 +815,8 @@ impl DshPresentationAdapter {
                 source_seq: seq,
                 kind,
                 text: content.fallback.clone(),
+                partial: true,
+                lineage: vec![seq],
                 content,
             }));
         }
@@ -1095,6 +1134,8 @@ fn upsert_event_content(
         source_seq: seq,
         kind,
         text: content.fallback.clone(),
+        partial: false,
+        lineage: vec![seq],
         content,
     })
 }

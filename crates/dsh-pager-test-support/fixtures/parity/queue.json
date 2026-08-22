@@ -1,0 +1,11 @@
+{
+  "name": "queue",
+  "sessionId": "queue-session",
+  "generation": 3,
+  "queueRevision": 4,
+  "queue": [
+    { "id": "q-steer", "placement": "steering", "message": { "content": [{ "type": "text", "text": "steer" }] } },
+    { "id": "q-queued", "placement": "queued", "message": { "content": [{ "type": "text", "text": "later" }] } }
+  ],
+  "expected": { "queueIds": ["q-steer", "q-queued"], "authoritativeRevision": 4 }
+}

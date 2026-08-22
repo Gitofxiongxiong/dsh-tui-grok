@@ -18,5 +18,8 @@ pub mod effects;
 pub mod host_adapter;
 pub mod runtime;
 
-pub use effects::{DshEffectSink, UiEffect, UiEffectResult, UiEffectSink};
+pub use effects::{
+    DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectReceipt, UiEffectSink,
+    UiEffectStatus, UiIntent, compile_intent,
+};
 pub use runtime::run_interactive;

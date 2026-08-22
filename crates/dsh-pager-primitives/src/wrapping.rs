@@ -767,6 +767,45 @@ mod tests {
             .collect::<String>()
     }
 
+    /// Self-contained markdown fixture used when the optional upstream
+    /// markdown crate is not present in this successor checkout. It retains
+    /// the link-style invariant these tests cover without adding Grok runtime
+    /// dependencies to the production workspace.
+    #[cfg(feature = "upstream-markdown-tests")]
+    fn fixture_markdown(text: &str) -> ratatui::text::Text<'static> {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::Span;
+
+        let mut lines = Vec::new();
+        for source in text.lines() {
+            let mut spans = Vec::new();
+            let mut rest = source;
+            while let Some(open) = rest.find('[') {
+                let Some(close) = rest[open + 1..].find("](") else {
+                    spans.push(Span::raw(rest.to_string()));
+                    rest = "";
+                    break;
+                };
+                let close = open + 1 + close;
+                spans.push(Span::raw(rest[..open].to_string()));
+                spans.push(Span::styled(
+                    rest[open + 1..close].to_string(),
+                    Style::default().add_modifier(Modifier::UNDERLINED),
+                ));
+                let Some(url_end) = rest[close + 2..].find(')') else {
+                    rest = "";
+                    break;
+                };
+                rest = &rest[close + 2 + url_end + 1..];
+            }
+            if !rest.is_empty() {
+                spans.push(Span::raw(rest.to_string()));
+            }
+            lines.push(Line::from(spans));
+        }
+        ratatui::text::Text::from(lines)
+    }
+
     #[test]
     fn trivial_unstyled_no_indents_wide_width() {
         let line = Line::from("hello");
@@ -807,9 +846,8 @@ mod tests {
         use ratatui::widgets::Widget;
 
         // Use the real theme's markdown style to produce spans.
-        let md_style = ratatui::style::Style::default();
         let md = "uses [Buildkite](https://buildkite.com/) here\n";
-        let (out, _) = xai_grok_markdown::render_markdown_ratatui_full(md, md_style, true, None);
+        let out = fixture_markdown(md);
         assert!(!out.lines.is_empty());
 
         // Wrap at narrow width.
@@ -848,7 +886,6 @@ mod tests {
         use ratatui::layout::Rect;
         use ratatui::style::Modifier;
 
-        let md_style = ratatui::style::Style::default();
         let md = "This project uses [Bazel](https://bazel.build/) as its build system, \
             with [uv](https://docs.astral.sh/uv/) for Python package management. \
             The Rust crates are built with [Cargo](https://doc.rust-lang.org/cargo/). \
@@ -856,7 +893,7 @@ mod tests {
             [Kubernetes](https://kubernetes.io/) clusters. Source code is hosted on \
             [GitHub](https://github.com/) and CI/CD runs via \
             [Buildkite](https://buildkite.com/).\n";
-        let (out, _) = xai_grok_markdown::render_markdown_ratatui_full(md, md_style, true, None);
+        let out = fixture_markdown(md);
         let labels = [
             "Bazel",
             "uv",
@@ -873,7 +910,10 @@ mod tests {
             let area = Rect::new(0, 0, width, wrapped.len() as u16);
             let mut buf = Buffer::empty(area);
             for (row, wline) in wrapped.iter().enumerate() {
-                buf.set_line_safe(0, row as u16, wline, width);
+                use ratatui::widgets::Widget;
+                wline
+                    .clone()
+                    .render(Rect::new(0, row as u16, width, 1), &mut buf);
             }
 
             let mut underlined = String::new();

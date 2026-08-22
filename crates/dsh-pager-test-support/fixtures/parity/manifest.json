@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "source": "DSH-neutral M0/M1 contract",
+  "status": "fallback-baseline",
+  "scenarios": [
+    { "name": "empty", "fixture": "empty.json", "terminal": [80, 24] },
+    { "name": "user-assistant", "fixture": "user-assistant.json", "terminal": [80, 24] },
+    { "name": "streaming-tool", "fixture": "streaming-tool.json", "terminal": [80, 24] },
+    { "name": "queue", "fixture": "queue.json", "terminal": [80, 24] },
+    { "name": "approval-question", "fixture": "approval-question.json", "terminal": [80, 24] },
+    { "name": "two-sessions", "fixture": "two-sessions.json", "terminal": [80, 24] },
+    { "name": "reconnect", "fixture": "reconnect.json", "terminal": [80, 24] },
+    { "name": "narrow-terminal", "fixture": "narrow-terminal.json", "terminal": [40, 12] }
+  ]
+}

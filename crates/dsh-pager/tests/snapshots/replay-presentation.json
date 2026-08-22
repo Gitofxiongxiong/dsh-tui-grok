@@ -10,6 +10,7 @@
       "source_seq": 1,
       "kind": "user",
       "text": "fixture prompt",
+      "lineage": [1],
       "content": {
         "blocks": [
           {
@@ -29,6 +30,7 @@
       "source_seq": 2,
       "kind": "assistant",
       "text": "fixture answer",
+      "lineage": [2],
       "content": {
         "blocks": [
           {

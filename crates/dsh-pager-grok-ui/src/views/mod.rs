@@ -1,3 +1,5 @@
+#![allow(clippy::needless_borrow)]
+
 pub mod file_search {
     pub mod line_viewer;
 }

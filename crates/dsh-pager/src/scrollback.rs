@@ -34,6 +34,8 @@ pub struct ScrollbackEntry {
     pub source_seq: i64,
     pub kind: EntryKind,
     pub text: String,
+    pub partial: bool,
+    pub lineage: Vec<i64>,
     pub content: DshRenderContent,
     cache: Option<LineCache>,
     measured: Option<MeasuredHeight>,
@@ -45,6 +47,8 @@ impl ScrollbackEntry {
         source_seq: i64,
         kind: EntryKind,
         text: String,
+        partial: bool,
+        lineage: Vec<i64>,
         content: DshRenderContent,
     ) -> Self {
         Self {
@@ -52,6 +56,8 @@ impl ScrollbackEntry {
             source_seq,
             kind,
             text,
+            partial,
+            lineage,
             content,
             cache: None,
             measured: None,
@@ -63,11 +69,15 @@ impl ScrollbackEntry {
         source_seq: i64,
         kind: EntryKind,
         text: String,
+        partial: bool,
+        lineage: Vec<i64>,
         content: DshRenderContent,
     ) -> bool {
         if self.source_seq == source_seq
             && self.kind == kind
             && self.text == text
+            && self.partial == partial
+            && self.lineage == lineage
             && self.content == content
         {
             return false;
@@ -75,6 +85,8 @@ impl ScrollbackEntry {
         self.source_seq = source_seq;
         self.kind = kind;
         self.text = text;
+        self.partial = partial;
+        self.lineage = lineage;
         self.content = content;
         self.cache = None;
         self.measured = None;
@@ -149,6 +161,8 @@ impl From<DshRenderEntry> for ScrollbackEntry {
             entry.source_seq,
             entry.kind,
             entry.text,
+            entry.partial,
+            entry.lineage,
             entry.content,
         )
     }
@@ -367,6 +381,8 @@ impl Scrollback {
                 source_seq: entry.source_seq,
                 kind: entry.kind,
                 text: entry.text.clone(),
+                partial: entry.partial,
+                lineage: entry.lineage.clone(),
                 content: entry.content.clone(),
             })
             .collect()
@@ -672,7 +688,14 @@ impl Scrollback {
 
     fn upsert(&mut self, entry: ScrollbackEntry) {
         if let Some(&index) = self.positions.get(&entry.id) {
-            if !self.entries[index].set(entry.source_seq, entry.kind, entry.text, entry.content) {
+            if !self.entries[index].set(
+                entry.source_seq,
+                entry.kind,
+                entry.text,
+                entry.partial,
+                entry.lineage,
+                entry.content,
+            ) {
                 return;
             }
             if self.layout_width > 0
