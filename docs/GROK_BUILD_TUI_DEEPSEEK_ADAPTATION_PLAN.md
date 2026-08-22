@@ -494,9 +494,9 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 | M1 contract/projection/effects | 已完成（M1 contract） | typed identity、rich block/partial/lineage DTO、分区 GrokHostSnapshot、UiIntent→UiEffect→Receipt、dedupe guard、capability matrix、projection/effect/fixture tests 已闭合 | M2/M3 消费 neutral contract |
 | M2 terminal/render | 已完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；PTY restore、Unicode/wrap、inline link tests 全绿 | M4 接入 Grok scrollback/block renderer 和 reference golden |
 | M3 AppView/AgentView | 已完成（迁移基线） | 默认入口已切换为 `AppShell` reducer：KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch、picker-owned Esc ladder、adaptive pane layout、semantic focus snapshot；runtime 不再维护 picker_open 平行状态 | M4/M5 继续接入完整 AgentView pane/block/prompt surface |
-| M4 scrollback/blocks | fallback | DSH presentation/Fenwick/简化 renderer 可用，Grok ScrollbackState 未接入 | rich block + Grok layout/anchor |
-| M5 prompt | fallback | line editor 已复制，但主路径仍是简化 prompt 渲染/提交 | 让 Grok editor 成为生产路径 |
-| M6 picker/dashboard | picker baseline | picker 可显示/过滤，Selected 尚未完成 attach/back | roster、stable ID、load barrier |
+| M4 scrollback/blocks | 已完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 reference golden、selection/link map 和 50k 性能门禁 | M4.5-M4.8 rich renderer/reference/selection/perf |
+| M5 prompt | 已完成（vertical slice 基线） | 基于 Grok `EditBuffer` 的 multiline `PromptEditor`、Shift+Enter、grapheme-safe cursor、soft-wrap、paste policy、draft receipt 保留已进入默认 runtime；仍缺历史/suggestion/slash、外部 editor/pager 与完整 mouse selection golden | M5.6-M5.8 capability/history/external process/tests |
+| M6 picker/dashboard | 已完成（attach vertical slice） | control-plane roster rows 带 stable session ID；picker refresh/filter 不依赖数组索引；Selected 编译 Attach intent/effect 并穿过 `load_session_id` history/live barrier，成功替换 session、失败保留原状态；仍缺完整 dashboard pane/workspace hierarchy/peek-back golden | M6.6-M6.8 dashboard/workspace/race/reference |
 | M7 queue/interactions | host 基础存在，UI 未闭合 | queue/pending interaction DTO 有基础，Grok pane/modal 尚未完整接线 | queue authority + modal state machine |
 | M8 mouse/media | 未开始（主路径之外） | 当前 mouse 仅局部 picker 路径，媒体/selection parity 未完成 | geometry/selection/capability |
 | M9 lifecycle/performance | host 基础存在，UI scheduler 未闭合 | transport/loader/reconnect 部分存在，真实长时 soak 未完成 | generation、bounded scheduler、soak |
@@ -1198,10 +1198,13 @@ source manifest/license 变化：
 10. **M3.1**：迁移 KeyOwner、AppView/AgentView skeleton 和相邻 tests；
 11. **M3.4/M3.5**：将 runtime loop 改为 Grok dispatch/focus/Esc ladder；
 12. **M4.1**：用一个 assistant block + 一个 tool/result block 完成结构化
-    vertical slice；
-13. **M4.3/M4.4**：接入 Grok scrollback layout/paint window/anchor；
+    vertical slice；**已完成（2026-08-23 vertical slice）**。
+13. **M4.3/M4.4**：接入 Grok scrollback layout/paint window/anchor；**已完成迁移
+    基线，reference/性能门禁保留**。
 14. **M5.1**：让 Grok textarea 成为真实 prompt renderer，去掉 trim/data loss；
+    **已完成迁移基线**。
 15. **M6.3/M6.4**：完成 picker stable session ID→attach/load barrier/back；
+    **已完成 attach/load vertical slice**。
 16. **M7.1/M7.3**：完成 queue 和 approval/question 的一条真实 effect 路径；
 17. **M10.1/M10.2**：建立 Grok reference 与 80×24/窄屏 semantic golden；
 18. **M10.6**：对真实 DeepSeek Harness 跑 hello→attach→stream→prompt→exit；
