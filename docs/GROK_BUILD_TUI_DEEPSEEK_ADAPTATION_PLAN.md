@@ -490,10 +490,10 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 
 | 里程碑 | 当前状态 | 证据/说明 | 下一步 |
 |---|---|---|---|
-| M0 治理/基线 | 已完成（M0 baseline） | Git 根/初始提交、source manifest checker、baseline.sh、fallback semantic fixtures、协议 fixture、all-features clippy 和 mock PTY 已闭合；baseline 仍明确不是 Grok reference matrix | M2 重新验收终端/render parity |
+| M0 治理/基线 | 已完成（M0 baseline） | Git 根/初始提交、source manifest checker、baseline.sh、fallback semantic fixtures、协议 fixture、all-features clippy 和 mock PTY 已闭合；baseline 仍明确不是 Grok reference matrix | M4 继续 reference parity |
 | M1 contract/projection/effects | 已完成（M1 contract） | typed identity、rich block/partial/lineage DTO、分区 GrokHostSnapshot、UiIntent→UiEffect→Receipt、dedupe guard、capability matrix、projection/effect/fixture tests 已闭合 | M2/M3 消费 neutral contract |
-| M2 terminal/render | 部分完成 | dsh-grok-inline、textarea、primitives 已 vendored；UI 仍有重复 Theme/shim | 统一 draw/theme/resize/paste |
-| M3 AppView/AgentView | 未开始（生产迁移） | 当前 runtime 是手工 layout + 简化 key loop | 迁移 Grok shell/focus/dispatch |
+| M2 terminal/render | 已完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；PTY restore、Unicode/wrap、inline link tests 全绿 | M4 接入 Grok scrollback/block renderer 和 reference golden |
+| M3 AppView/AgentView | 已完成（迁移基线） | 默认入口已切换为 `AppShell` reducer：KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch、picker-owned Esc ladder、adaptive pane layout、semantic focus snapshot；runtime 不再维护 picker_open 平行状态 | M4/M5 继续接入完整 AgentView pane/block/prompt surface |
 | M4 scrollback/blocks | fallback | DSH presentation/Fenwick/简化 renderer 可用，Grok ScrollbackState 未接入 | rich block + Grok layout/anchor |
 | M5 prompt | fallback | line editor 已复制，但主路径仍是简化 prompt 渲染/提交 | 让 Grok editor 成为生产路径 |
 | M6 picker/dashboard | picker baseline | picker 可显示/过滤，Selected 尚未完成 attach/back | roster、stable ID、load barrier |
