@@ -1,0 +1,729 @@
+use dsh_pager_protocol::{
+    AcceptedResult, ApiResult, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
+    SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
+    SessionListValue, SessionPromptParams, SessionPromptResult, SessionRenameParams,
+    SessionRenameResult, SessionSearchValue, SessionUpdateQueueParams, SubagentAddress,
+    SubagentHistoryValue, SubagentInterruptParams, SubagentInterruptResult, SubagentListValue,
+    SubagentMode, SubagentPromptParams, SubagentPromptResult, TuiAttachParams, TuiAttachResult,
+    TuiDetachParams, TuiHelloResult, TuiInteractionResponse, TuiRespondParams, TuiRespondResult,
+    TuiSubscribeParams, TuiSubscribeResult, TuiSubscribeScope, WorkspaceArchiveSessionParams,
+    WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
+    WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
+};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::error::{PagerError, PagerResult};
+use crate::session::{SessionState, SessionUpdate};
+use crate::transport::RpcTransport;
+
+const PAGE_MESSAGES: u64 = 50;
+const MAX_INITIAL_REPAIRS: usize = 2;
+static DISPATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// How the first session is chosen after hello.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionChoice {
+    RecentOrCreate,
+    New,
+    Id(String),
+    Search(String),
+}
+
+/// Fetch the current session directory without choosing one.
+pub fn list_sessions(transport: &mut RpcTransport) -> PagerResult<SessionListValue> {
+    let result: SessionListValue = api_call(transport, "session.list", json!({}))?;
+    transport
+        .control_plane_mut()
+        .store
+        .seed_session_list(&result);
+    // Workspace membership and archive state are a separate reconnect
+    // baseline.  Keep it beside session.list so a standalone Dashboard has
+    // grouping information before the first host change arrives.
+    let _: Value = list_workspaces(transport)?;
+    Ok(result)
+}
+
+/// Fetch the independent workspace/archive baseline. The generic value is
+/// intentionally kept host-owned so newer workspace fields remain forward
+/// compatible with the control-plane store.
+pub fn list_workspaces(transport: &mut RpcTransport) -> PagerResult<Value> {
+    api_call(transport, "workspace.list", json!({}))
+}
+
+/// Archive a session in the host registry.  Archiving is idempotent and does
+/// not delete its history or workspace accounting slot.
+pub fn archive_session(
+    transport: &mut RpcTransport,
+    session_id: &str,
+) -> PagerResult<WorkspaceArchiveSessionValue> {
+    api_call(
+        transport,
+        "workspace.archiveSession",
+        serde_json::to_value(WorkspaceArchiveSessionParams {
+            session_id: session_id.to_string(),
+        })?,
+    )
+}
+
+/// Move one workspace in the host-owned display order.  The returned order is
+/// complete, so callers can replace local ordering without guessing a delta.
+pub fn reorder_workspace(
+    transport: &mut RpcTransport,
+    workspace_id: &str,
+    before_workspace_id: Option<&str>,
+) -> PagerResult<WorkspaceOrderValue> {
+    api_call(
+        transport,
+        "workspace.insertBefore",
+        serde_json::to_value(WorkspaceInsertBeforeParams {
+            workspace_id: workspace_id.to_string(),
+            before_workspace_id: before_workspace_id.map(str::to_string),
+        })?,
+    )
+}
+
+/// Move one accounted session within a workspace's durable order.
+pub fn reorder_session(
+    transport: &mut RpcTransport,
+    workspace_id: &str,
+    session_id: &str,
+    before_session_id: Option<&str>,
+) -> PagerResult<WorkspaceInsertSessionBeforeValue> {
+    api_call(
+        transport,
+        "workspace.insertSessionBefore",
+        serde_json::to_value(WorkspaceInsertSessionBeforeParams {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+            before_session_id: before_session_id.map(str::to_string),
+        })?,
+    )
+}
+
+/// Search session content through the host-owned search projection.
+pub fn search_sessions(
+    transport: &mut RpcTransport,
+    query: &str,
+) -> PagerResult<SessionSearchValue> {
+    api_call(transport, "session.search", json!({ "query": query }))
+}
+
+/// Complete the create/list -> attach -> history -> buffered-live barrier.
+pub fn load_session(
+    transport: &mut RpcTransport,
+    hello: &TuiHelloResult,
+    choice: SessionChoice,
+    cwd: &str,
+) -> PagerResult<SessionState> {
+    let session_id = choose_session(transport, choice, cwd)?;
+    load_session_id(transport, hello.generation, session_id)
+}
+
+/// Attach to a known session id and cross the same history/live load barrier
+/// used by initial startup.  The picker uses this entry point when switching
+/// sessions without restarting the backend process.
+pub fn load_session_id(
+    transport: &mut RpcTransport,
+    generation: u64,
+    session_id: String,
+) -> PagerResult<SessionState> {
+    let _: Value = list_workspaces(transport)?;
+    subscribe_control_plane(transport, generation)?;
+    let attach: TuiAttachResult = transport.call(
+        "tui.attach",
+        &TuiAttachParams {
+            session_id: session_id.clone(),
+            generation,
+        },
+    )?;
+    if !attach.attached {
+        return Err(PagerError::new("tui.attach did not attach the session"));
+    }
+
+    let mut state = SessionState::new(session_id, generation);
+    state.install_initial(fetch_tail(transport, state.session_id())?)?;
+    drain_notifications(transport, &mut state)?;
+    if matches!(
+        state.connection_phase(),
+        crate::session::ConnectionPhase::Reconnecting
+            | crate::session::ConnectionPhase::Disconnected
+    ) {
+        return Err(PagerError::new("event stream failed during session load"));
+    }
+
+    for _ in 0..MAX_INITIAL_REPAIRS {
+        if !state.needs_repair() {
+            return Ok(state);
+        }
+        let page = fetch_tail(transport, state.session_id())?;
+        state.repair_tail(page)?;
+        drain_notifications(transport, &mut state)?;
+        if matches!(
+            state.connection_phase(),
+            crate::session::ConnectionPhase::Reconnecting
+                | crate::session::ConnectionPhase::Disconnected
+        ) {
+            return Err(PagerError::new(
+                "event stream failed during session load repair",
+            ));
+        }
+    }
+    if state.needs_repair() {
+        return Err(PagerError::new(format!(
+            "session {} could not cross the load barrier without an event gap",
+            state.session_id()
+        )));
+    }
+    Ok(state)
+}
+
+/// Subscribe the connection to every session's control-plane frames before
+/// selecting a presentation session. Older gateways returned `{}` here, so
+/// the typed receipt keeps all fields optional for wire compatibility.
+pub fn subscribe_control_plane(
+    transport: &mut RpcTransport,
+    generation: u64,
+) -> PagerResult<TuiSubscribeResult> {
+    transport.call(
+        "tui.subscribe",
+        &TuiSubscribeParams {
+            generation,
+            session_id: None,
+            scope: Some(TuiSubscribeScope::All),
+            since: None,
+        },
+    )
+}
+
+/// Drop a session subscription on a live connection.  A failed detach is
+/// intentionally returned to the caller so it can surface a diagnostic; the
+/// old session state remains locally usable until a replacement is loaded.
+pub fn detach_session(transport: &mut RpcTransport, state: &SessionState) -> PagerResult<()> {
+    let _: Value = transport.call(
+        "tui.detach",
+        &TuiDetachParams {
+            session_id: state.session_id().to_string(),
+            generation: state.generation(),
+        },
+    )?;
+    Ok(())
+}
+
+/// Re-open a connection and rebuild the loaded session from a fresh baseline.
+///
+/// This is deliberately baseline-based: v1 does not claim lossless stream
+/// resume, so every reconnect refetches the tail and then drains buffered live
+/// frames through the same load barrier used at startup.
+pub fn reconnect_session(
+    transport: &mut RpcTransport,
+    state: &mut SessionState,
+    cwd: &str,
+) -> PagerResult<TuiHelloResult> {
+    transport.reconnect()?;
+    let hello = transport.hello(cwd.to_string())?;
+    state.set_generation(hello.generation);
+    subscribe_control_plane(transport, hello.generation)?;
+    let attach: TuiAttachResult = transport.call(
+        "tui.attach",
+        &TuiAttachParams {
+            session_id: state.session_id().to_string(),
+            generation: hello.generation,
+        },
+    )?;
+    if !attach.attached {
+        return Err(PagerError::new("tui.attach did not attach after reconnect"));
+    }
+
+    state.repair_tail(fetch_tail(transport, state.session_id())?)?;
+    drain_notifications(transport, state)?;
+    if matches!(
+        state.connection_phase(),
+        crate::session::ConnectionPhase::Reconnecting
+            | crate::session::ConnectionPhase::Disconnected
+    ) {
+        return Err(PagerError::new(
+            "event stream failed during reconnect baseline",
+        ));
+    }
+    for _ in 0..MAX_INITIAL_REPAIRS {
+        if !state.needs_repair() {
+            state.mark_connected();
+            return Ok(hello);
+        }
+        state.repair_tail(fetch_tail(transport, state.session_id())?)?;
+        drain_notifications(transport, state)?;
+        if matches!(
+            state.connection_phase(),
+            crate::session::ConnectionPhase::Reconnecting
+                | crate::session::ConnectionPhase::Disconnected
+        ) {
+            return Err(PagerError::new(
+                "event stream failed during reconnect repair",
+            ));
+        }
+    }
+    if state.needs_repair() {
+        return Err(PagerError::new(format!(
+            "session {} could not cross the reconnect load barrier",
+            state.session_id()
+        )));
+    }
+    state.mark_connected();
+    Ok(hello)
+}
+
+pub fn repair_tail(
+    transport: &mut RpcTransport,
+    state: &mut SessionState,
+) -> PagerResult<SessionUpdate> {
+    let page = fetch_tail(transport, state.session_id())?;
+    state.repair_tail(page)?;
+    let mut update = SessionUpdate {
+        changed: true,
+        gap_detected: false,
+    };
+    let drained = drain_notifications(transport, state)?;
+    update.changed |= drained.changed;
+    update.gap_detected = state.needs_repair();
+    Ok(update)
+}
+
+pub fn load_older(transport: &mut RpcTransport, state: &mut SessionState) -> PagerResult<bool> {
+    let Some(before_seq) = state.base_seq() else {
+        return Ok(false);
+    };
+    if !state.has_more() {
+        return Ok(false);
+    }
+    if before_seq <= 0 {
+        return Ok(false);
+    }
+    let page: SessionHistoryValue = api_call(
+        transport,
+        "session.history",
+        json!({
+            "sessionId": state.session_id(),
+            "beforeSeq": before_seq,
+            "maxMessages": PAGE_MESSAGES,
+        }),
+    )?;
+    let changed = state.prepend_older(page)?;
+    drain_notifications(transport, state)?;
+    Ok(changed)
+}
+
+/// Fetch only the history tail for Dashboard peek. This never attaches or
+/// resumes the target session; the caller owns the presentation load barrier.
+pub fn peek_session_tail(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    max_messages: u64,
+) -> PagerResult<SessionHistoryValue> {
+    let max_messages = max_messages.clamp(1, 100);
+    api_call(
+        transport,
+        "session.history",
+        json!({
+            "sessionId": session_id,
+            "maxMessages": max_messages,
+        }),
+    )
+}
+
+/// List direct children without attaching or resuming the parent/child pair.
+pub fn list_subagents(
+    transport: &mut RpcTransport,
+    parent_session_id: &str,
+) -> PagerResult<SubagentListValue> {
+    api_call(
+        transport,
+        "subagent.list",
+        json!({ "parentSessionId": parent_session_id }),
+    )
+}
+
+/// Read one child tail without activating its Agent.
+pub fn peek_subagent_history(
+    transport: &mut RpcTransport,
+    address: &SubagentAddress,
+    max_messages: u64,
+) -> PagerResult<SubagentHistoryValue> {
+    let max_messages = max_messages.clamp(1, 100);
+    api_call(
+        transport,
+        "subagent.history",
+        json!({
+            "parentSessionId": address.parent_session_id,
+            "childSessionId": address.child_session_id,
+            "mode": address.mode,
+            "maxMessages": max_messages,
+        }),
+    )
+}
+
+/// Follow up a continuable child. A successful receipt means admission into
+/// the child inbox, not completion of its next turn.
+pub fn prompt_subagent(
+    transport: &mut RpcTransport,
+    address: &SubagentAddress,
+    text: String,
+) -> PagerResult<SubagentPromptResult> {
+    if address.mode != SubagentMode::Continuable {
+        return Err(PagerError::new(
+            "one-shot subagents do not accept follow-up prompts",
+        ));
+    }
+    api_call(
+        transport,
+        "subagent.prompt",
+        serde_json::to_value(SubagentPromptParams {
+            parent_session_id: address.parent_session_id.clone(),
+            child_session_id: address.child_session_id.clone(),
+            mode: address.mode,
+            content: vec![PromptContentPart::Text { text }],
+            client_time_zone: None,
+        })?,
+    )
+}
+
+/// Admit an interrupt signal. The receipt deliberately does not claim that
+/// the child has reached a stopped state; the next formal job/event snapshot
+/// is the convergence surface.
+pub fn interrupt_subagent(
+    transport: &mut RpcTransport,
+    address: &SubagentAddress,
+) -> PagerResult<SubagentInterruptResult> {
+    if address.mode != SubagentMode::Continuable {
+        return Err(PagerError::new(
+            "one-shot subagents do not accept interrupts",
+        ));
+    }
+    api_call(
+        transport,
+        "subagent.interrupt",
+        serde_json::to_value(SubagentInterruptParams {
+            parent_session_id: address.parent_session_id.clone(),
+            child_session_id: address.child_session_id.clone(),
+            mode: address.mode,
+        })?,
+    )
+}
+
+/// Submit one text prompt through the session API.
+pub fn submit_prompt(
+    transport: &mut RpcTransport,
+    state: &SessionState,
+    text: String,
+    mode: PromptMode,
+) -> PagerResult<SessionPromptResult> {
+    submit_prompt_for_session(transport, state.session_id(), text, mode)
+}
+
+/// Submit a prompt to an arbitrary existing session without attaching it.
+/// The host remains the admission authority; this helper only forwards the
+/// typed request and returns its accepted/queued receipt.
+pub fn submit_prompt_for_session(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    text: String,
+    mode: PromptMode,
+) -> PagerResult<SessionPromptResult> {
+    api_call(
+        transport,
+        "session.prompt",
+        serde_json::to_value(SessionPromptParams {
+            session_id: session_id.to_string(),
+            mode,
+            content: vec![PromptContentPart::Text { text }],
+        })?,
+    )
+}
+
+/// Receipt for the two-phase Dashboard dispatch operation.  `session_id` is
+/// allocated before the first prompt so a failed prompt leaves a recoverable
+/// blank session rather than losing the user's target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispatchSessionReceipt {
+    pub session_id: String,
+    pub prompt: SessionPromptResult,
+}
+
+/// Create a blank session with a preallocated id and then admit its first
+/// prompt.  The preallocated id makes retries of the create phase idempotent
+/// under the Host contract; the Host remains the authority for prompt
+/// admission.  If prompt admission fails, the error names the already-created
+/// blank session so the caller can retry explicitly.
+pub fn dispatch_session(
+    transport: &mut RpcTransport,
+    cwd: &str,
+    text: String,
+    mode: PromptMode,
+) -> PagerResult<DispatchSessionReceipt> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = DISPATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let session_id = format!("tui-dispatch-{stamp:x}-{sequence:x}");
+    dispatch_session_with_id(transport, cwd, text, mode, session_id)
+}
+
+/// Idempotent-id variant used by callers that persist a retry token (and by
+/// tests).  `session_id` is sent to `session.create`; a repeated create with
+/// the same cwd is a Host no-op, while a conflicting cwd is surfaced.
+pub fn dispatch_session_with_id(
+    transport: &mut RpcTransport,
+    cwd: &str,
+    text: String,
+    mode: PromptMode,
+    session_id: String,
+) -> PagerResult<DispatchSessionReceipt> {
+    if session_id.trim().is_empty() {
+        return Err(PagerError::new("dispatch session id must not be empty"));
+    }
+    let created: SessionCreateValue = api_call(
+        transport,
+        "session.create",
+        json!({ "cwd": cwd, "sessionId": session_id }),
+    )?;
+    let id = created.session_id.clone();
+    let prompt = match submit_prompt_for_session(transport, &id, text, mode) {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            return Err(PagerError::new(format!(
+                "session {id} created as a blank session; initial prompt failed: {error}"
+            )));
+        }
+    };
+    Ok(DispatchSessionReceipt {
+        session_id: id,
+        prompt,
+    })
+}
+
+/// Answer the currently displayed server-owned approval or question.
+pub fn respond(
+    transport: &mut RpcTransport,
+    state: &SessionState,
+    request_id: String,
+    interaction: TuiInteractionResponse,
+) -> PagerResult<TuiRespondResult> {
+    transport.call(
+        "tui.respond",
+        &TuiRespondParams {
+            session_id: state.session_id().to_string(),
+            generation: state.generation(),
+            request_id,
+            interaction,
+        },
+    )
+}
+
+/// Mutate one authoritative pending queue item.
+pub fn update_queue(
+    transport: &mut RpcTransport,
+    state: &SessionState,
+    item_id: String,
+    action: QueueAction,
+) -> PagerResult<AcceptedResult> {
+    api_call(
+        transport,
+        "session.updateQueue",
+        serde_json::to_value(SessionUpdateQueueParams {
+            session_id: state.session_id().to_string(),
+            item_id,
+            action,
+        })?,
+    )
+}
+
+/// Cancel the active turn while preserving pending queue work on the host.
+pub fn cancel_session(
+    transport: &mut RpcTransport,
+    state: &SessionState,
+) -> PagerResult<AcceptedResult> {
+    cancel_session_id(transport, state.session_id())
+}
+
+pub fn cancel_session_id(
+    transport: &mut RpcTransport,
+    session_id: &str,
+) -> PagerResult<AcceptedResult> {
+    api_call(
+        transport,
+        "session.cancel",
+        serde_json::to_value(SessionCancelParams {
+            session_id: session_id.to_string(),
+        })?,
+    )
+}
+
+/// Persist a manual title through the host session-title service.
+///
+/// The request is tied to the current session/generation baseline. A caller
+/// that switched sessions while the RPC was in flight must not apply the
+/// receipt to the new view, so the generation guard is checked before the
+/// result leaves this boundary.
+pub fn rename_session(
+    transport: &mut RpcTransport,
+    state: &mut SessionState,
+    title: String,
+) -> PagerResult<SessionRenameResult> {
+    let token = state.operation_token(None);
+    let result = rename_session_id(transport, state.session_id(), title)?;
+    if !state.accepts_operation(&token) {
+        return Err(PagerError::new(
+            "session rename response became stale after the view changed",
+        ));
+    }
+    if result.seq < 0 {
+        return Err(PagerError::new(
+            "session rename response contained a negative projection sequence",
+        ));
+    }
+    state.set_projection("title", result.seq, Value::String(result.title.clone()));
+    Ok(result)
+}
+
+pub fn rename_session_id(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    title: String,
+) -> PagerResult<SessionRenameResult> {
+    api_call(
+        transport,
+        "session.rename",
+        serde_json::to_value(SessionRenameParams {
+            session_id: session_id.to_string(),
+            title,
+        })?,
+    )
+}
+
+/// Fork a completed-turn prefix without mutating the currently attached view.
+pub fn fork_session(
+    transport: &mut RpcTransport,
+    state: &SessionState,
+    at_seq: Option<i64>,
+) -> PagerResult<SessionForkResult> {
+    if at_seq.is_some_and(|seq| seq < 0) {
+        return Err(PagerError::new("session fork anchor must be non-negative"));
+    }
+    let token = state.operation_token(None);
+    let result = fork_session_id(transport, state.session_id(), at_seq)?;
+    if !state.accepts_operation(&token) {
+        return Err(PagerError::new(
+            "session fork response became stale after the view changed",
+        ));
+    }
+    Ok(result)
+}
+
+pub fn fork_session_id(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    at_seq: Option<i64>,
+) -> PagerResult<SessionForkResult> {
+    if at_seq.is_some_and(|seq| seq < 0) {
+        return Err(PagerError::new("session fork anchor must be non-negative"));
+    }
+    api_call(
+        transport,
+        "session.fork",
+        serde_json::to_value(SessionForkParams {
+            session_id: session_id.to_string(),
+            at_seq,
+        })?,
+    )
+}
+
+pub fn drain_notifications(
+    transport: &mut RpcTransport,
+    state: &mut SessionState,
+) -> PagerResult<SessionUpdate> {
+    let mut combined = SessionUpdate::default();
+    while let Some(note) = transport.try_notification()? {
+        let update = transport.route_notification(state, note)?;
+        combined.changed |= update.changed;
+        combined.gap_detected |= update.gap_detected;
+    }
+    combined.gap_detected |= state.needs_repair();
+    Ok(combined)
+}
+
+fn choose_session(
+    transport: &mut RpcTransport,
+    choice: SessionChoice,
+    cwd: &str,
+) -> PagerResult<String> {
+    match choice {
+        SessionChoice::Id(session_id) => Ok(session_id),
+        SessionChoice::New => create_session(transport, cwd),
+        SessionChoice::Search(query) => {
+            let result = search_sessions(transport, &query)?;
+            result
+                .items
+                .first()
+                .map(|item| item.session_id.clone())
+                .ok_or_else(|| PagerError::new(format!("no session matched query {query:?}")))
+        }
+        SessionChoice::RecentOrCreate => {
+            let list = list_sessions(transport)?;
+            let recent = list
+                .items
+                .iter()
+                .filter(|item| {
+                    !item.blank && item.parent_session_id.is_none() && item.origin.is_none()
+                })
+                .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at))
+                .or_else(|| {
+                    list.items
+                        .iter()
+                        .filter(|item| !item.blank)
+                        .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at))
+                });
+            match recent {
+                Some(item) => Ok(item.session_id.clone()),
+                None => create_session(transport, cwd),
+            }
+        }
+    }
+}
+
+fn create_session(transport: &mut RpcTransport, cwd: &str) -> PagerResult<String> {
+    let created: SessionCreateValue = api_call(transport, "session.create", json!({ "cwd": cwd }))?;
+    Ok(created.session_id)
+}
+
+fn fetch_tail(transport: &mut RpcTransport, session_id: &str) -> PagerResult<SessionHistoryValue> {
+    api_call(
+        transport,
+        "session.history",
+        json!({
+            "sessionId": session_id,
+            "maxMessages": PAGE_MESSAGES,
+        }),
+    )
+}
+
+fn api_call<T: DeserializeOwned>(
+    transport: &mut RpcTransport,
+    method: &str,
+    params: Value,
+) -> PagerResult<T> {
+    let raw = transport.call_value(method, params)?;
+    let control_value = raw.clone();
+    let envelope: ApiResult<T> = serde_json::from_value(raw)?;
+    if envelope.ok && method == "workspace.list" {
+        if let Some(value) = control_value.get("value") {
+            transport
+                .control_plane_mut()
+                .store
+                .seed_workspace_list(value)?;
+        }
+    }
+    envelope.into_result().map_err(PagerError::from)
+}

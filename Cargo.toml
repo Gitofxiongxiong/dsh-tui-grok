@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dsh-pager",
+    "crates/dsh-pager-test-support",
+    "crates/dsh-grok-inline",
+    "crates/dsh-grok-textarea",
+    "crates/dsh-pager-bin",
+    "crates/dsh-pager-grok-ui",
+    "crates/dsh-pager-protocol",
+    "crates/dsh-pager-primitives",
+    "crates/dsh-pager-render",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+crossterm = "0.28.1"
+anstyle-parse = "0.2"
+ratatui = "0.29.0"
+ratatui-core = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2.7"
+textwrap = "0.16.1"
+tui-scrollbar = "0.2"
+unicode-segmentation = "1.12.0"
+unicode-width = "0.2"

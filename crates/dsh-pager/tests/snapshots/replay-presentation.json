@@ -1,0 +1,46 @@
+{
+  "session_id": "fixture-session",
+  "generation": 3,
+  "entries": [
+    {
+      "id": {
+        "kind": "event",
+        "seq": 1
+      },
+      "source_seq": 1,
+      "kind": "user",
+      "text": "fixture prompt",
+      "content": {
+        "blocks": [
+          {
+            "Markdown": {
+              "text": "fixture prompt"
+            }
+          }
+        ],
+        "fallback": "fixture prompt"
+      }
+    },
+    {
+      "id": {
+        "kind": "event",
+        "seq": 2
+      },
+      "source_seq": 2,
+      "kind": "assistant",
+      "text": "fixture answer",
+      "content": {
+        "blocks": [
+          {
+            "Markdown": {
+              "text": "fixture answer"
+            }
+          }
+        ],
+        "fallback": "fixture answer"
+      }
+    }
+  ],
+  "queue": [],
+  "queue_revision": 0
+}

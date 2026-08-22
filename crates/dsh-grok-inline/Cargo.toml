@@ -1,0 +1,19 @@
+[package]
+name = "dsh-grok-inline"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "Apache-2.0 inline terminal primitive derived from Grok Build's xai-ratatui-inline"
+
+[dependencies]
+anstyle-parse = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+default = []
+scrolling-regions = ["ratatui/scrolling-regions"]

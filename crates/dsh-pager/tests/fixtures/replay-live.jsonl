@@ -1,0 +1,4 @@
+{"event":{"type":"turn/start","seq":0,"time":1.0,"data":{"turn":1}},"view":null}
+{"event":{"type":"user/message","seq":1,"time":2.0,"data":{"source":{"kind":"user"},"content":[{"type":"text","text":"fixture prompt"}]}},"view":null}
+{"event":{"type":"assistant/message","seq":2,"time":3.0,"data":{"turn":1,"step":0,"message":{"content":[{"type":"text","text":"fixture answer"}]}}},"view":null}
+{"event":{"type":"step/end","seq":3,"time":4.0,"data":{"turn":1,"step":0}},"view":null}

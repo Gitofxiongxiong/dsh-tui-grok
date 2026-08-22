@@ -1,0 +1,10 @@
+[package]
+name = "dsh-pager-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON-RPC line codec for the DeepSeek Harness native TUI protocol"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

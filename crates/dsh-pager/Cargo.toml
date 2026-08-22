@@ -1,0 +1,17 @@
+[package]
+name = "dsh-pager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek Harness session/runtime facade for pluggable terminal UIs"
+
+[dependencies]
+dsh-pager-primitives = { path = "../dsh-pager-primitives" }
+dsh-pager-protocol = { path = "../dsh-pager-protocol" }
+ratatui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+dsh-pager-test-support = { path = "../dsh-pager-test-support" }

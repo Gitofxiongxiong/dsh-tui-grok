@@ -1,0 +1,21 @@
+[package]
+name = "dsh-pager-primitives"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "DSH adapters for Grok-derived wrapping and scrollbar primitives"
+
+[dependencies]
+ratatui = { workspace = true }
+ratatui-core = { workspace = true }
+textwrap = { workspace = true }
+tui-scrollbar = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+
+[features]
+default = []
+upstream-markdown-tests = []
+
+[dev-dependencies]
+pretty_assertions = "1"

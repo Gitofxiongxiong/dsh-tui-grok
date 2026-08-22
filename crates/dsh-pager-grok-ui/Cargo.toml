@@ -1,0 +1,21 @@
+[package]
+name = "dsh-pager-grok-ui"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Grok Build-derived DeepSeek Harness terminal UI and host adapter"
+
+[dependencies]
+crossterm = { workspace = true }
+xai-ratatui-textarea = { package = "dsh-grok-textarea", path = "../dsh-grok-textarea" }
+dsh-pager = { path = "../dsh-pager" }
+dsh-pager-protocol = { path = "../dsh-pager-protocol" }
+dsh-pager-render = { path = "../dsh-pager-render" }
+ratatui = { workspace = true }
+textwrap = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+serial_test = "3.2"

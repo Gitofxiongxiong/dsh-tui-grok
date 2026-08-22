@@ -1,0 +1,19 @@
+[package]
+name = "dsh-pager-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek Harness client with the Grok-derived native TUI"
+
+[[bin]]
+name = "dsh-pager"
+path = "src/main.rs"
+
+[dependencies]
+dsh-pager = { path = "../dsh-pager" }
+dsh-pager-grok-ui = { path = "../dsh-pager-grok-ui" }
+dsh-pager-protocol = { path = "../dsh-pager-protocol" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+dsh-pager-test-support = { path = "../dsh-pager-test-support" }

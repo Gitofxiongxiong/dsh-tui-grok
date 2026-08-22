@@ -1,0 +1,137 @@
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Owns all filesystem and environment state used by a test.
+#[derive(Debug)]
+pub struct TestSandbox {
+    temp: PathBuf,
+    root: PathBuf,
+    home: PathBuf,
+    workspace: PathBuf,
+    tmp: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+}
+
+impl TestSandbox {
+    pub fn new() -> io::Result<Self> {
+        let base = std::env::temp_dir();
+        let process = std::process::id();
+        let mut root = None;
+        for attempt in 0..100u32 {
+            let candidate = base.join(format!("dsh-pager-test-{process}-{attempt}"));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => {
+                    root = Some(candidate);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        let root = root.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not allocate a unique dsh-pager test sandbox",
+            )
+        })?;
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let tmp = root.join("tmp");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::create_dir_all(&tmp)?;
+
+        let mut environment = BTreeMap::new();
+        // Preserve only executable discovery. Tests may add explicit values,
+        // but never inherit credentials or ambient DSH server configuration.
+        if let Some(path) = std::env::var_os("PATH") {
+            environment.insert("PATH".into(), path);
+        }
+        environment.insert("HOME".into(), home.clone().into_os_string());
+        environment.insert("TMPDIR".into(), tmp.clone().into_os_string());
+        environment.insert("DSH_TEST_SANDBOX".into(), root.clone().into_os_string());
+        environment.insert("NO_COLOR".into(), OsString::from("1"));
+        environment.insert("LC_ALL".into(), OsString::from("C"));
+        Ok(Self {
+            temp: root.clone(),
+            root,
+            home,
+            workspace,
+            tmp,
+            environment,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    pub fn tmp(&self) -> &Path {
+        &self.tmp
+    }
+
+    pub fn set_env(&mut self, key: impl Into<OsString>, value: impl Into<OsString>) {
+        self.environment.insert(key.into(), value.into());
+    }
+
+    pub fn remove_env(&mut self, key: impl AsRef<OsStr>) {
+        self.environment.remove(key.as_ref());
+    }
+
+    pub fn env(&self) -> &BTreeMap<OsString, OsString> {
+        &self.environment
+    }
+
+    /// Build a hermetic command with the sandbox cwd and environment.
+    pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = Command::new(program);
+        command
+            .env_clear()
+            .envs(self.environment.iter())
+            .current_dir(&self.workspace);
+        command
+    }
+
+    /// Keep the owner alive explicitly in tests that need to inspect paths
+    /// after a child exits. The sandbox removes its private root on drop.
+    pub fn keep_alive(&self) -> &Path {
+        &self.temp
+    }
+}
+
+impl Drop for TestSandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.temp);
+    }
+}
+
+impl Default for TestSandbox {
+    fn default() -> Self {
+        Self::new().expect("create test sandbox")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_has_isolated_directories_and_no_ambient_backend() {
+        let sandbox = TestSandbox::new().expect("sandbox");
+        assert!(sandbox.home().is_dir());
+        assert!(sandbox.workspace().is_dir());
+        assert!(sandbox.tmp().is_dir());
+        assert!(!sandbox.env().contains_key(OsStr::new("DSH_TUI_SERVER")));
+    }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "dsh-pager-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal lifecycle and theme primitives for dsh-pager"
+
+[dependencies]
+crossterm = { workspace = true }
+dsh-grok-inline = { path = "../dsh-grok-inline" }
+ratatui = { workspace = true }

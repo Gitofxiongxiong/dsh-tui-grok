@@ -1,0 +1,11 @@
+[package]
+name = "dsh-pager-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared deterministic test support for the native DSH pager"
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

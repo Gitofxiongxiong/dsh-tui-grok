@@ -1,0 +1,18 @@
+dsh-pager includes presentation code derived from Grok Build (Apache-2.0).
+
+Source snapshot:
+  mirror commit: 19d42e35c07a9c9244f03f6df0c4c353f970d4f9
+  SOURCE_REV:    7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa
+
+Derived modules:
+  crates/dsh-grok-textarea  <- xai-ratatui-textarea
+  crates/dsh-grok-inline    <- xai-ratatui-inline
+  crates/dsh-pager-primitives <- xai-grok-pager-render primitives
+  crates/dsh-pager-grok-ui/vendor/grok <- xai-grok-pager view/input modules
+
+The full upstream pager, ACP adapters, Grok shell/agent/tools, config,
+workspace, persistence, and telemetry code are not included. DSH-native crates
+remain MIT; derived crates declare Apache-2.0 in their package manifests.
+
+Copyright and license details for each extracted source are retained in the
+corresponding crate NOTICE file. See LICENSE-APACHE for the Apache License 2.0.
