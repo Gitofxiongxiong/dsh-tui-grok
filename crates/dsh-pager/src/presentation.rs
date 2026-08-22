@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use dsh_pager_protocol::{HistoryEntry, QueuePlacement, SessionQueueItem};
 
-use crate::identity::{DshSeq, DshSessionId};
+use crate::identity::DshSessionId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,15 +19,6 @@ use serde_json::Value;
 pub enum DshRenderEntryId {
     Event { seq: i64 },
     Partial { turn: i64, step: i64 },
-}
-
-impl DshRenderEntryId {
-    pub fn source_seq(self) -> DshSeq {
-        match self {
-            Self::Event { seq } => DshSeq::new(seq),
-            Self::Partial { step, .. } => DshSeq::new(step),
-        }
-    }
 }
 
 /// Presentation category used by the DSH renderer.
