@@ -23,10 +23,10 @@ use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
-    layout::{Position, Rect},
+    layout::Rect,
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
 
 use crate::app::{AppShell, Overlay, ShellAction, ShellEvent};
@@ -265,15 +265,19 @@ impl UiState {
         let background = Block::default().style(Style::default().bg(theme.bg_base));
         frame.render_widget(background, area);
 
-        let agent_layout = AgentView::layout(&mut self.shell, area);
-        let header = agent_layout.header;
-        let input = agent_layout.prompt;
-        let footer = agent_layout.footer;
-
         let snapshot =
             GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
         self.sync_dashboard(control_plane);
         self.reconcile_snapshot(&snapshot);
+        let agent_layout = AgentView::layout_with_prompt(
+            &mut self.shell,
+            area,
+            self.prompt.text(),
+            snapshot.running,
+            self.status.is_some() || snapshot.status.is_some(),
+        );
+        let header = agent_layout.header;
+        let input = agent_layout.prompt;
         let connection = format!(
             "{} · {} · q{} · {}",
             snapshot.connection,
@@ -281,10 +285,21 @@ impl UiState {
             snapshot.queue_revision,
             if snapshot.running { "running" } else { "idle" }
         );
+        let compact_header = agent_layout.compact || header.width < 70;
+        let header_center = if compact_header {
+            "GROK UI"
+        } else {
+            "DSH · GROK UI"
+        };
+        let header_right = if compact_header {
+            if snapshot.running { "running" } else { "idle" }.to_string()
+        } else {
+            format!(" · {connection}")
+        };
         frame.render_widget(
             StatusBar::new(&snapshot.session_title)
-                .center("DSH · GROK UI")
-                .right(&connection),
+                .center(header_center)
+                .right(&header_right),
             header,
         );
 
@@ -295,7 +310,38 @@ impl UiState {
             &snapshot,
             &mut session.scrollback,
         );
-        self.render_prompt(frame, input, &snapshot);
+        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+        let prompt_width = input.width.saturating_sub(6).max(1) as usize;
+        let viewport = self
+            .prompt
+            .viewport(prompt_width, input.height.saturating_sub(3).max(1) as usize);
+        AgentView::render_prompt(
+            frame,
+            input,
+            crate::views::agent::PromptRenderState {
+                mode,
+                running: snapshot.running,
+                title: &snapshot.session_title,
+                model: &snapshot.model,
+                viewport: &viewport,
+                empty: self.prompt.is_empty(),
+            },
+            theme,
+        );
+        self.hit_map.insert(crate::geometry::HitRegion {
+            target: HitTarget::Prompt,
+            rect: input,
+            label: "prompt".into(),
+            link: None,
+            priority: 15,
+        });
+        AgentView::render_turn_status(
+            frame,
+            agent_layout.turn_status,
+            snapshot.running,
+            snapshot.status.as_deref(),
+            theme,
+        );
         let capability_notice = if !self.capabilities.bracketed_paste {
             Some("Paste unavailable")
         } else if !self.capabilities.mouse {
@@ -305,11 +351,8 @@ impl UiState {
         };
         let task_status = task_status_line(&snapshot);
         let footer_text = self.status_line(&snapshot, capability_notice, &task_status);
-        frame.render_widget(
-            Paragraph::new(footer_text)
-                .style(Style::default().fg(theme.gray_dim).bg(theme.bg_base)),
-            footer,
-        );
+        AgentView::render_status_line(frame, agent_layout.status_line, &footer_text, theme);
+        AgentView::render_shortcuts(frame, agent_layout.shortcuts, agent_layout.compact);
 
         if self.shell.overlay() == Overlay::Picker {
             self.render_picker(frame, area, &snapshot);
@@ -573,68 +616,6 @@ impl UiState {
         ) {
             let buf = frame.buffer_mut();
             render_rail(buf, &rail_geometry, None, theme);
-        }
-    }
-
-    fn render_prompt(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
-        let theme = Theme::current();
-        let mode_value = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
-        let label = AgentView::prompt_label(mode_value, snapshot.running);
-        let available = area.width.saturating_sub(label.len() as u16 + 1) as usize;
-        let viewport = self
-            .prompt
-            .viewport(available, area.height.saturating_sub(1) as usize);
-        let placeholder = if self.prompt.is_empty() {
-            truncate_str("Ask DeepSeek anything…", available)
-        } else {
-            String::new()
-        };
-        let style = if self.prompt.is_empty() {
-            Style::default().fg(theme.gray_dim)
-        } else {
-            Style::default().fg(theme.text_primary)
-        };
-        let mode = AgentView::mode_label(mode_value);
-        frame.render_widget(
-            Paragraph::new(if placeholder.is_empty() {
-                Text::from(
-                    viewport
-                        .lines
-                        .iter()
-                        .map(|line| Line::from(format!("{label}{line}")))
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                Text::from(Line::from(format!("{label}{placeholder}")))
-            })
-            .style(style)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .title(format!(" {mode} "))
-                    .border_style(Style::default().fg(theme.bg_light)),
-            )
-            .wrap(Wrap { trim: false }),
-            area,
-        );
-        self.hit_map.insert(crate::geometry::HitRegion {
-            target: HitTarget::Prompt,
-            rect: area,
-            label: "prompt".into(),
-            link: None,
-            priority: 15,
-        });
-        if !self.prompt.is_empty() && area.height > 0 && area.width > 0 {
-            let cursor_x = area
-                .x
-                .saturating_add(label.len() as u16)
-                .saturating_add(viewport.cursor_x as u16)
-                .min(area.right().saturating_sub(1));
-            let cursor_y = area
-                .y
-                .saturating_add(viewport.cursor_y as u16)
-                .min(area.bottom().saturating_sub(1));
-            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
         }
     }
 
