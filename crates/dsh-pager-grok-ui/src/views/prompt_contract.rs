@@ -263,8 +263,10 @@ mod tests {
 
     #[test]
     fn accent_and_inline_surfaces_reclaim_the_expected_columns() {
-        let mut accented = PromptStyleContract::default();
-        accented.show_accent_line = true;
+        let accented = PromptStyleContract {
+            show_accent_line: true,
+            ..PromptStyleContract::default()
+        };
         let geometry = PromptGeometry::compute(Rect::new(0, 0, 20, 3), &accented, true, 2);
         assert_eq!(geometry.content, Rect::new(3, 0, 16, 3));
 

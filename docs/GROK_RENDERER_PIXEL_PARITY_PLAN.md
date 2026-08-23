@@ -58,11 +58,12 @@ DSH SessionState / ControlPlaneStore
 | StatusBar | `vendor/grok/xai-grok-pager/src/views/status_bar.rs` | 已 vendor |
 | Timeline | `vendor/grok/xai-grok-pager/src/views/timeline.rs` | 已 vendor |
 
-以下核心视觉模块尚未直接进入生产路径：
+以下核心视觉模块尚未完整进入生产路径；PromptWidget 的纯 draw core 已先进入
+production，其 controller 闭包仍按 P6.1 门禁继续迁移：
 
 | 模块 | 当前替代物 | 对齐目标 |
 |---|---|---|
-| `PromptWidget` | `views/agent.rs` 自建 Prompt chrome | 直接复用上游 `PromptWidget::draw` |
+| `PromptWidget` | upstream-derived `views/prompt_widget.rs` draw core + Grok `TextArea` 已用于 production | 接入 file-search/suggestion/history/image controller 闭包并完成 reference cell diff |
 | `AgentViewLayout` | DSH 手写 row stack | 直接复用上游 `LayoutConfig`/`ScrollbarConfig`/layout solver |
 | 完整 Theme | `dsh-pager-render::Theme` 简化字段 | 引入 Grok 完整语义 token |
 | Appearance | DSH 常量和局部参数 | 引入 Grok prompt/scrollback/layout 配置的只读投影 |
@@ -75,8 +76,9 @@ DSH SessionState / ControlPlaneStore
 | Workspace / dashboard | DSH `DashboardModel` + 简化 modal | 复用 Grok workspace/list/tree/focus/peek 组件，DSH 提供 authority |
 | Agent / task / subagent | status/task DTO + 简化文案 | 迁移 Grok AgentView/status/task/subagent pane，DSH 提供 lifecycle 和 effect |
 
-因此，当前界面“接近但不一致”的根因不是缺少 ratatui 能力，而是核心 renderer
-仍然是 DSH 自建实现。
+因此，当前界面“接近但不一致”的剩余根因不是缺少 ratatui 能力，而是 Scrollback、
+完整 AgentView/pane solver 和 capability controller 仍有 DSH 简化 renderer。
+Prompt 的 chrome/TextArea/info/cursor 已不再由 `views/agent.rs` 平行实现。
 
 ### 2.1 2026-08-23 执行状态
 
@@ -84,6 +86,7 @@ DSH SessionState / ControlPlaneStore
 
 | 能力 | Host/Effect 状态 | Renderer 状态 | 下一出口 |
 |---|---|---|---|
+| Prompt core | draft、mode、model/title projection 已接入 | 固定 Grok TextArea + upstream-derived draw core 已用于 production；height/draw/cursor/mouse 共用同一状态 | reference cell oracle；接 controller 闭包 |
 | Markdown / Diff | 结构化 block、stable ID、copy/link 已保留 | 仍是 `RichTranscript` 简化实现 | vendor Grok markdown/diff + scrollback block 闭包 |
 | File Search | `fileReferences.list` 正式 ApiProxy/TUI 方法；query revision、stable row、unsupported/error 已接入 | overlay 仍是过渡 renderer | vendor Grok file-search controller/list，并接同一 result DTO |
 | Suggestion / history | host projection、候选 viewport、accept/dismiss、prompt history 已接入 | 仍是 runtime 简化 banner/controller | vendor Grok suggestion/history 状态机 |
@@ -332,7 +335,8 @@ width/grapheme/hit-map 规则，不能另造 line viewer 几何。
 
 删除或降级为测试 oracle：
 
-- 当前 `views/agent.rs` 自建 Prompt chrome；
+- ~~当前 `views/agent.rs` 自建 Prompt chrome~~（已删除；production/parity 共用
+  `views/prompt_widget.rs::GrokPromptRenderer`）；
 - 当前 `RichTranscript` 生产绘制路径；
 - runtime 中重复的 status/header 文案拼接和尺寸计算；
 - 与 Grok 等价的 DSH Theme、spacing、glyph 和 scrollbar 算法。
@@ -377,8 +381,11 @@ P6.1 进一步拆成以下可审计门禁，避免把“字段 contract 已存�
    follow-ups/voice/status/scrollbar/timeline），让绘制与 hit map 共用一个 snapshot；
 5. File Search、Suggestion/history 和 Image controller 接入后，P6.1 才可标记完成。
 
-当前仅第 1 项完成；生产路径仍使用 fallback prompt renderer，因此 Renderer 状态
-保持未完成。
+当前第 1-3 项完成：`PromptEditor` 已由 Grok `TextArea` 持有编辑/selection/
+viewport/cursor/mouse 状态，production 与 semantic runner 共用 upstream-derived
+`GrokPromptRenderer`，`views/agent.rs::render_prompt_buffer` 和 `PromptViewport` 已
+删除。第 4-5 项仍未完成，因此这里只声明 prompt draw core 收敛，不把 P6.1、完整
+TUI 或像素级 Renderer 标记为完成。
 
 ## 4A. 能力状态和 host contract
 

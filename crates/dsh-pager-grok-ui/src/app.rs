@@ -239,6 +239,12 @@ impl AppShell {
         self.overlay
     }
 
+    pub fn focus_prompt(&mut self) {
+        if self.overlay == Overlay::None {
+            self.owner = KeyOwner::Prompt;
+        }
+    }
+
     pub fn snapshot(&self) -> ShellSnapshot {
         ShellSnapshot {
             owner: self.owner,

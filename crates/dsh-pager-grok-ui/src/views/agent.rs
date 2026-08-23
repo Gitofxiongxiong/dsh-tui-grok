@@ -10,8 +10,7 @@ use std::borrow::Cow;
 use crossterm::event::KeyCode;
 use dsh_pager_protocol::PromptMode;
 use ratatui::Frame;
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -19,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AppShell, ShellLayout};
 use crate::appearance::GrokAppearanceSnapshot;
-use crate::input::{PromptViewport, key::KeyShortcut};
+use crate::input::key::KeyShortcut;
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
 
@@ -202,55 +201,37 @@ pub struct AgentViewLayoutParams {
     pub compact: bool,
 }
 
-pub(crate) struct PromptRenderState<'a> {
-    pub mode: PromptMode,
-    pub running: bool,
-    pub focused: bool,
-    pub title: &'a str,
-    pub model: &'a str,
-    pub viewport: &'a PromptViewport,
-    pub empty: bool,
-}
-
 pub struct AgentView;
 
 impl AgentView {
     /// Keep AppShell's revision/invalidation accounting while making AgentView
     /// the owner of the production geometry.
     pub fn layout(shell: &mut AppShell, area: Rect) -> AgentViewLayout {
-        Self::layout_with_prompt(shell, area, "", false, false)
+        Self::layout_with_prompt(shell, area, 3, false, false)
     }
 
     pub fn layout_with_prompt(
         shell: &mut AppShell,
         area: Rect,
-        prompt_text: &str,
+        prompt_height: u16,
         running: bool,
         status_visible: bool,
     ) -> AgentViewLayout {
-        Self::layout_with_prompt_and_banner(shell, area, prompt_text, running, status_visible, 0)
+        Self::layout_with_prompt_and_banner(shell, area, prompt_height, running, status_visible, 0)
     }
 
     pub fn layout_with_prompt_and_banner(
         shell: &mut AppShell,
         area: Rect,
-        prompt_text: &str,
+        prompt_height: u16,
         running: bool,
         status_visible: bool,
         banner_rows: u16,
     ) -> AgentViewLayout {
         let _ = shell.layout(area);
         let compact = effective_compact(false, area.height);
-        let inner_width = area.width.saturating_sub(if compact { 2 } else { 4 });
-        let prompt_width = inner_width.saturating_sub(6).max(1) as usize;
-        let wrapped = wrapped_prompt_lines(prompt_text, prompt_width);
-        // Grok's prompt is vpad_top + textarea rows + one info/divider row.
-        // The one-line empty prompt is therefore three rows in every mode.
-        let prompt_floor: u16 = 3;
         let prompt_cap: u16 = if compact { 6 } else { 8 };
-        let prompt_height = prompt_floor
-            .saturating_add(wrapped.saturating_sub(1) as u16)
-            .min(prompt_cap);
+        let prompt_height = prompt_height.clamp(3, prompt_cap);
         let short = area.height <= SHORT_TERMINAL_ROWS;
         AgentViewLayout::compute(AgentViewLayoutParams {
             area,
@@ -272,168 +253,6 @@ impl AgentView {
         match mode {
             PromptMode::Queue => "queue",
             PromptMode::Steer => "steer",
-        }
-    }
-
-    /// Render Grok's prompt chrome around the DSH editor viewport.
-    pub(crate) fn render_prompt(
-        frame: &mut Frame<'_>,
-        area: Rect,
-        state: PromptRenderState<'_>,
-        theme: &Theme,
-    ) {
-        if area.width < 4 || area.height == 0 {
-            return;
-        }
-        let focused = state.focused;
-        let cursor = Self::render_prompt_buffer(frame.buffer_mut(), area, state, theme);
-        if focused && let Some((x, y)) = cursor {
-            frame.set_cursor_position(Position::new(x, y));
-        }
-    }
-
-    /// Buffer-level prompt renderer. Keeping this separate from `Frame` makes
-    /// the exact cell contract testable without a terminal backend.
-    pub(crate) fn render_prompt_buffer(
-        buf: &mut Buffer,
-        area: Rect,
-        state: PromptRenderState<'_>,
-        theme: &Theme,
-    ) -> Option<(u16, u16)> {
-        let bg = theme.bg_base;
-        let border = if state.focused {
-            theme.prompt_border_active
-        } else {
-            theme.prompt_border
-        };
-        buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
-
-        let content = Rect::new(
-            area.x.saturating_add(2),
-            area.y,
-            area.width.saturating_sub(4),
-            area.height,
-        );
-        let info_block = u16::from(area.height >= 3);
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(info_block),
-        ])
-        .split(content);
-        let text_area = chunks[1];
-
-        if area.height >= 3 {
-            draw_horizontal_divider(buf, area, area.y, '╭', '╮', border, bg);
-            let title = state.title.trim();
-            if !title.is_empty() && area.width >= 12 {
-                let label = format!(" {title} ");
-                let max_width = area.width.saturating_sub(6) as usize;
-                let label = fit_text(&label, max_width);
-                let x = area.right().saturating_sub(3 + label.width() as u16);
-                buf.set_string(
-                    x,
-                    area.y,
-                    label,
-                    Style::default().fg(theme.accent_model).bg(bg),
-                );
-            }
-        }
-
-        let prefix = Self::prompt_label(state.mode, state.running);
-        let prefix_width = prefix.width() as u16;
-        if text_area.width > prefix_width {
-            buf.set_string(
-                text_area.x,
-                text_area.y,
-                prefix,
-                Style::default().fg(theme.accent_user).bg(bg),
-            );
-        }
-        let input = Rect::new(
-            text_area.x.saturating_add(prefix_width),
-            text_area.y,
-            text_area.width.saturating_sub(prefix_width),
-            text_area.height,
-        );
-        let placeholder = "Build anything";
-        for (row, line) in state.viewport.lines.iter().enumerate() {
-            let y = input.y.saturating_add(row as u16);
-            if y >= input.bottom() {
-                break;
-            }
-            let text = fit_text(line, input.width as usize);
-            if !text.is_empty() {
-                buf.set_string(
-                    input.x,
-                    y,
-                    text,
-                    Style::default().fg(theme.text_primary).bg(bg),
-                );
-            }
-        }
-        if state.empty && !state.focused && input.height > 0 {
-            buf.set_string(
-                input.x,
-                input.y,
-                fit_text(placeholder, input.width as usize),
-                Style::default().fg(theme.gray).bg(bg),
-            );
-        }
-
-        if area.height >= 3 {
-            let divider_y = area.bottom().saturating_sub(1);
-            draw_horizontal_divider(buf, area, divider_y, '╰', '╯', border, bg);
-            let left = fit_text(
-                &format!(" {} · {} ", state.model, Self::mode_label(state.mode)),
-                content.width as usize,
-            );
-            buf.set_string(
-                content.x,
-                divider_y,
-                left,
-                Style::default().fg(theme.accent_model).bg(bg),
-            );
-            if state.viewport.lines.len() > 1 {
-                let right = " multiline ";
-                let right_x = content.right().saturating_sub(right.width() as u16);
-                buf.set_string(
-                    right_x,
-                    divider_y,
-                    right,
-                    Style::default().fg(theme.gray).bg(bg),
-                );
-            }
-        }
-
-        for y in text_area.y..text_area.bottom() {
-            set_cell(buf, area.x, y, '│', border, bg);
-            set_cell(buf, area.right().saturating_sub(1), y, '│', border, bg);
-        }
-
-        if !state.focused {
-            // Grok dims unfocused content while retaining the chrome geometry.
-            for y in input.y..input.bottom() {
-                for x in input.x..input.right() {
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.fg = theme.gray_dim;
-                    }
-                }
-            }
-        }
-
-        if state.focused {
-            let cursor_x = input
-                .x
-                .saturating_add(state.viewport.cursor_x as u16)
-                .min(input.right().saturating_sub(1));
-            let cursor_y = input
-                .y
-                .saturating_add(state.viewport.cursor_y as u16)
-                .min(input.bottom().saturating_sub(1));
-            Some((cursor_x, cursor_y))
-        } else {
-            None
         }
     }
 
@@ -503,44 +322,6 @@ impl AgentView {
     }
 }
 
-fn set_cell(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    symbol: char,
-    fg: ratatui::style::Color,
-    bg: ratatui::style::Color,
-) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        cell.set_char(symbol);
-        cell.set_style(Style::default().fg(fg).bg(bg));
-    }
-}
-
-fn draw_horizontal_divider(
-    buf: &mut Buffer,
-    area: Rect,
-    y: u16,
-    left: char,
-    right: char,
-    fg: ratatui::style::Color,
-    bg: ratatui::style::Color,
-) {
-    if area.width == 0 {
-        return;
-    }
-    for x in area.x..area.right() {
-        let symbol = if x == area.x {
-            left
-        } else if x == area.right().saturating_sub(1) {
-            right
-        } else {
-            '─'
-        };
-        set_cell(buf, x, y, symbol, fg, bg);
-    }
-}
-
 fn inset(area: Rect, hpad: u16, vpad: u16) -> Rect {
     Rect::new(
         area.x.saturating_add(hpad),
@@ -558,20 +339,6 @@ fn split_transcript(body: Rect) -> (Rect, Rect) {
         Rect::new(body.x, body.y, body.width.saturating_sub(2), body.height),
         Rect::new(body.right().saturating_sub(2), body.y, 2, body.height),
     )
-}
-
-fn wrapped_prompt_lines(text: &str, width: usize) -> usize {
-    let width = width.max(1);
-    text.split('\n')
-        .map(|line| {
-            if line.is_empty() {
-                1
-            } else {
-                line.width().saturating_add(width).saturating_sub(1) / width
-            }
-        })
-        .sum::<usize>()
-        .max(1)
 }
 
 fn fit_text(text: &str, width: usize) -> String {
@@ -604,7 +371,7 @@ mod tests {
     fn layout_keeps_grok_outer_chrome_and_transcript_floor() {
         let mut shell = AppShell::default();
         let layout =
-            AgentView::layout_with_prompt(&mut shell, Rect::new(0, 0, 80, 24), "", true, true);
+            AgentView::layout_with_prompt(&mut shell, Rect::new(0, 0, 80, 24), 3, true, true);
         assert_eq!(layout.outer_hpad, 2);
         assert_eq!(layout.outer_vpad, 1);
         assert!(layout.transcript.height >= SCROLLBACK_MIN_ROWS);
@@ -616,13 +383,8 @@ mod tests {
     #[test]
     fn short_terminal_suppresses_optional_rows_without_losing_prompt() {
         let mut shell = AppShell::default();
-        let layout = AgentView::layout_with_prompt(
-            &mut shell,
-            Rect::new(0, 0, 40, 12),
-            "a multiline prompt that wraps",
-            true,
-            true,
-        );
+        let layout =
+            AgentView::layout_with_prompt(&mut shell, Rect::new(0, 0, 40, 12), 6, true, true);
         assert!(layout.compact);
         assert_eq!(layout.outer_vpad, 0);
         assert_eq!(layout.turn_status.height, 0);
@@ -636,14 +398,9 @@ mod tests {
     fn prompt_budget_grows_for_multiline_text_but_is_capped() {
         let mut shell = AppShell::default();
         let short =
-            AgentView::layout_with_prompt(&mut shell, Rect::new(0, 0, 120, 40), "one", false, true);
-        let long = AgentView::layout_with_prompt(
-            &mut shell,
-            Rect::new(0, 0, 120, 40),
-            &"x".repeat(800),
-            false,
-            true,
-        );
+            AgentView::layout_with_prompt(&mut shell, Rect::new(0, 0, 120, 40), 3, false, true);
+        let long =
+            AgentView::layout_with_prompt(&mut shell, Rect::new(0, 0, 120, 40), 20, false, true);
         assert!(long.prompt.height > short.prompt.height);
         assert!(long.prompt.height <= 8);
         assert!(long.transcript.height >= SCROLLBACK_MIN_ROWS);
@@ -655,7 +412,7 @@ mod tests {
         let layout = AgentView::layout_with_prompt_and_banner(
             &mut shell,
             Rect::new(0, 0, 80, 24),
-            "/",
+            3,
             false,
             false,
             3,
@@ -673,44 +430,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_uses_grok_box_geometry_and_arrow_prefix() {
-        let area = Rect::new(0, 0, 32, 3);
-        let mut buffer = Buffer::empty(area);
-        let viewport = PromptViewport {
-            lines: vec![String::new()],
-            cursor_x: 0,
-            cursor_y: 0,
-        };
-        AgentView::render_prompt_buffer(
-            &mut buffer,
-            area,
-            PromptRenderState {
-                mode: PromptMode::Queue,
-                running: false,
-                focused: true,
-                title: "Session 1",
-                model: "deepseek",
-                viewport: &viewport,
-                empty: true,
-            },
-            Theme::current(),
-        );
-        assert_eq!(buffer[(0, 0)].symbol(), "╭");
-        assert_eq!(buffer[(31, 0)].symbol(), "╮");
-        assert_eq!(buffer[(0, 1)].symbol(), "│");
-        assert_eq!(buffer[(2, 1)].symbol(), "❯");
-        assert_eq!(buffer[(0, 2)].symbol(), "╰");
-        assert_eq!(buffer[(31, 2)].symbol(), "╯");
-    }
-
-    #[test]
     fn reference_sizes_keep_all_rows_inside_the_terminal() {
         let mut shell = AppShell::default();
         for (width, height) in [(40, 12), (80, 24), (120, 40)] {
             let layout = AgentView::layout_with_prompt(
                 &mut shell,
                 Rect::new(0, 0, width, height),
-                "hello",
+                3,
                 true,
                 true,
             );

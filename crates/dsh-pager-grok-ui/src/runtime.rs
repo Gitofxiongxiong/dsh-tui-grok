@@ -30,6 +30,7 @@ use ratatui::{
 };
 
 use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
+use crate::appearance::GrokAppearanceSnapshot;
 use crate::clipboard::{self, ClipboardBackend};
 use crate::effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent,
@@ -50,7 +51,7 @@ use crate::scheduler::SchedulerStats;
 use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
-    agent::AgentView,
+    agent::{AgentView, effective_compact},
     dashboard::{DashboardPeek, render_dashboard_content},
     interaction::{render_interaction_content, response_for},
     modal_window::{
@@ -61,12 +62,17 @@ use crate::views::{
         PickerConfig, PickerEntry, PickerMode, PickerOutcome, PickerState, handle_picker_input,
         picker_shortcuts, render_picker_in_modal,
     },
+    prompt_contract::{
+        PromptFlagContract, PromptGeometry, PromptInfoContract, PromptStyleContract,
+    },
+    prompt_widget::GrokPromptRenderer,
     queue::{QueueRenderState, moved_selection, render_queue_content},
     status_bar::StatusBar,
     timeline::{RailViewport, compute_rail, render_rail},
     transcript::RichTranscript,
 };
 use serde_json::json;
+use xai_ratatui_textarea::MouseAction;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NOTIFICATION_BUDGET: usize = 256;
@@ -233,6 +239,7 @@ struct UiState {
     picker_entry_count: usize,
     modal: ModalWindowState,
     prompt: PromptEditor,
+    prompt_renderer: GrokPromptRenderer,
     prompt_mode: Option<PromptMode>,
     picker_selected_id: Option<String>,
     queue_selected_id: Option<String>,
@@ -307,10 +314,53 @@ impl UiState {
         } else {
             0
         };
+        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+        let focused = self.shell.owner() == KeyOwner::Prompt;
+        let compact = effective_compact(false, area.height);
+        let appearance = GrokAppearanceSnapshot::for_area(area, compact);
+        let prompt_outer_width = area
+            .width
+            .saturating_sub(appearance.outer_hpad.saturating_mul(2));
+        let prompt_style = PromptStyleContract {
+            focused,
+            compact,
+            title: Some(snapshot.session_title.clone()),
+            show_prefix: appearance.prompt_show_prefix,
+            show_borders: appearance.prompt_show_borders,
+            show_accent_line: appearance.prompt_show_accent_line,
+            ..PromptStyleContract::default()
+        };
+        let prompt_cap = if compact { 6 } else { 8 };
+        let prompt_geometry = PromptGeometry::compute(
+            Rect::new(0, 0, prompt_outer_width, prompt_cap),
+            &prompt_style,
+            true,
+            2,
+        );
+        let textarea_rows = self
+            .prompt
+            .desired_height(prompt_geometry.textarea.width.max(1));
+        let prompt_info = PromptInfoContract {
+            model_name: snapshot.model.clone(),
+            flags: vec![PromptFlagContract {
+                text: AgentView::mode_label(mode).into(),
+                color: None,
+                bold: false,
+            }],
+            multiline: textarea_rows > 1,
+            ..PromptInfoContract::default()
+        };
+        let prompt_height = GrokPromptRenderer::desired_height(
+            self.prompt.textarea(),
+            prompt_outer_width,
+            &prompt_style,
+            Some(&prompt_info),
+            prompt_cap,
+        );
         let agent_layout = AgentView::layout_with_prompt_and_banner(
             &mut self.shell,
             area,
-            self.prompt.text(),
+            prompt_height,
             snapshot.running,
             self.status.is_some() || snapshot.status.is_some(),
             suggestion_rows,
@@ -346,25 +396,17 @@ impl UiState {
             &snapshot,
             &mut session.scrollback,
         );
-        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
-        let prompt_width = input.width.saturating_sub(6).max(1) as usize;
-        let viewport = self
-            .prompt
-            .viewport(prompt_width, input.height.saturating_sub(2).max(1) as usize);
-        AgentView::render_prompt(
-            frame,
+        let prompt_result = self.prompt_renderer.draw(
+            frame.buffer_mut(),
             input,
-            crate::views::agent::PromptRenderState {
-                mode,
-                running: snapshot.running,
-                focused: self.shell.owner() == KeyOwner::Prompt,
-                title: &snapshot.session_title,
-                model: &snapshot.model,
-                viewport: &viewport,
-                empty: self.prompt.is_empty(),
-            },
+            self.prompt.textarea_mut(),
+            &prompt_style,
+            Some(&prompt_info),
             theme,
         );
+        if let Some((x, y)) = prompt_result.cursor_pos {
+            frame.set_cursor_position((x, y));
+        }
         self.render_suggestions(frame, agent_layout.banner, &snapshot);
         self.hit_map.insert(crate::geometry::HitRegion {
             target: HitTarget::Prompt,
@@ -974,6 +1016,34 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<bool> {
+        if self.shell.overlay() == Overlay::None
+            && let ShellEvent::Mouse(mouse) = &event
+        {
+            let prompt_hit = self
+                .hit_map
+                .hit_test(mouse.column, mouse.row)
+                .is_some_and(|region| region.target == HitTarget::Prompt);
+            let action = if prompt_hit
+                || matches!(
+                    mouse.kind,
+                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                ) {
+                self.prompt_renderer
+                    .handle_mouse(self.prompt.textarea_mut(), *mouse)
+            } else {
+                MouseAction::Nothing
+            };
+            if prompt_hit || action != MouseAction::Nothing {
+                if prompt_hit && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.shell.focus_prompt();
+                }
+                if let Some(text) = self.prompt.textarea_mut().take_clipboard() {
+                    self.pending_copy = Some(text);
+                }
+                self.status = None;
+                return Ok(false);
+            }
+        }
         let prompt_empty = self.prompt.is_empty();
         let action = self.shell.dispatch(event, prompt_empty);
         match action {
@@ -1231,13 +1301,13 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::FileSearchPaste(text) => {
-                if !text.is_empty() {
-                    if !matches!(
+                if !text.is_empty()
+                    && !matches!(
                         self.file_search_editor.insert_paste(&text),
                         LineEditOutcome::Unhandled
-                    ) {
-                        self.request_file_search(transport, session)?;
-                    }
+                    )
+                {
+                    self.request_file_search(transport, session)?;
                 }
                 Ok(false)
             }
@@ -1482,7 +1552,7 @@ impl UiState {
             })
             .unwrap_or(0);
         let next = if delta < 0 {
-            current.saturating_sub(delta.unsigned_abs() as usize)
+            current.saturating_sub(delta.unsigned_abs())
         } else {
             current
                 .saturating_add(delta as usize)

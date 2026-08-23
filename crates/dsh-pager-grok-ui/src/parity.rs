@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::app::{AppShell, KeyOwner, Overlay};
 use crate::geometry::{HitMap, HitTarget, insert_text_line};
 use crate::host_adapter::GrokHostSnapshot;
-use crate::input::PromptViewport;
+use crate::input::PromptEditor;
 use crate::theme::Theme;
-use crate::views::agent::PromptRenderState;
 use crate::views::agent::{AgentView, AgentViewLayout};
+use crate::views::prompt_contract::{PromptFlagContract, PromptInfoContract, PromptStyleContract};
+use crate::views::prompt_widget::GrokPromptRenderer;
 use crate::views::transcript::RichTranscript;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,23 +444,28 @@ pub fn render_semantic(
         priority: 15,
     });
     let mut prompt_buffer = Buffer::empty(area);
-    let viewport = PromptViewport {
-        lines: vec![String::new()],
-        cursor_x: 0,
-        cursor_y: 0,
+    let mut prompt = PromptEditor::default();
+    let prompt_style = PromptStyleContract {
+        focused: shell.owner() == KeyOwner::Prompt,
+        compact: layout.compact,
+        title: Some(snapshot.session_title.clone()),
+        ..PromptStyleContract::default()
     };
-    AgentView::render_prompt_buffer(
+    let prompt_info = PromptInfoContract {
+        model_name: snapshot.model.clone(),
+        flags: vec![PromptFlagContract {
+            text: AgentView::mode_label(snapshot.prompt.default_mode).into(),
+            color: None,
+            bold: false,
+        }],
+        ..PromptInfoContract::default()
+    };
+    let prompt_result = GrokPromptRenderer::default().draw(
         &mut prompt_buffer,
         layout.prompt,
-        PromptRenderState {
-            mode: snapshot.prompt.default_mode,
-            running: snapshot.running,
-            focused: shell.owner() == KeyOwner::Prompt,
-            title: &snapshot.session_title,
-            model: &snapshot.model,
-            viewport: &viewport,
-            empty: true,
-        },
+        prompt.textarea_mut(),
+        &prompt_style,
+        Some(&prompt_info),
         Theme::current(),
     );
     SemanticFrame {
@@ -468,8 +474,9 @@ pub fn render_semantic(
         rows,
         focus_owner: format_key_owner(shell.owner()),
         overlay: format_overlay(shell.overlay()),
-        cursor: (shell.owner() == KeyOwner::Prompt)
-            .then(|| Position::new(layout.prompt.x, layout.prompt.y).into()),
+        cursor: prompt_result
+            .cursor_pos
+            .map(|(x, y)| Position::new(x, y).into()),
         layout_revision: shell.layout_revision(),
         hit_map_revision: map.revision(),
         hits: map
