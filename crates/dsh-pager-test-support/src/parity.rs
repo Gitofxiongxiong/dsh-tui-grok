@@ -99,7 +99,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity");
         let manifest = ParityManifest::from_path(root.join("manifest.json")).unwrap();
         let report = manifest.validate(&root).unwrap();
-        assert_eq!(report.case_count, 648);
+        assert_eq!(report.case_count, 972);
         assert_eq!(report.scenario_count, 8);
     }
 }

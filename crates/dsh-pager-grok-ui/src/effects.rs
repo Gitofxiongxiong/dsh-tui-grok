@@ -6,7 +6,7 @@ use dsh_pager::{
     DshGeneration, DshQueueItemId, DshRequestId, DshSeq, DshSessionId, PagerResult, RpcTransport,
     SessionState,
 };
-use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
+use dsh_pager_protocol::{PromptMode, QueueAction, SubagentAddress, TuiInteractionResponse};
 use serde::{Deserialize, Serialize};
 
 /// Semantic user intent emitted by a Grok view. It has no transport or
@@ -35,6 +35,9 @@ pub enum UiIntent {
         at_seq: Option<DshSeq>,
     },
     ArchiveSession,
+    InterruptSubagent {
+        address: SubagentAddress,
+    },
 }
 
 /// Minimal host context supplied by the runtime adapter. Keeping this small
@@ -162,6 +165,10 @@ pub enum UiEffect {
     ArchiveSession {
         operation: OperationKey,
     },
+    InterruptSubagent {
+        operation: OperationKey,
+        address: SubagentAddress,
+    },
 }
 
 /// Boundary a non-DSH host (for example Codex CLI) can implement later.
@@ -198,6 +205,9 @@ impl UiEffectSink for DshEffectSink<'_> {
 pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
     let target_session_id = match &intent {
         UiIntent::AttachSession { session_id } => session_id.clone(),
+        UiIntent::InterruptSubagent { address } => {
+            DshSessionId::new(address.parent_session_id.clone())
+        }
         _ => context.session_id.clone(),
     };
     let action_name = match &intent {
@@ -208,6 +218,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { .. } => "rename",
         UiIntent::ForkSession { .. } => "fork",
         UiIntent::ArchiveSession => "archive",
+        UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
     };
     let dedupe_key = match &intent {
         UiIntent::SubmitPrompt { text, mode } => {
@@ -225,6 +236,12 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { title } => format!("{action_name}:{}", prompt_digest(title)),
         UiIntent::ForkSession { at_seq } => format!("{action_name}:{at_seq:?}"),
         UiIntent::ArchiveSession => action_name.to_string(),
+        UiIntent::InterruptSubagent { address } => {
+            format!(
+                "{action_name}:{}:{}",
+                address.child_session_id, address.mode as u8
+            )
+        }
     };
     // Interaction request ids are host-owned correlation ids. Preserve them
     // even when a caller did not pre-seed an operation context; generation is
@@ -275,6 +292,9 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { title } => UiEffect::RenameSession { operation, title },
         UiIntent::ForkSession { at_seq } => UiEffect::ForkSession { operation, at_seq },
         UiIntent::ArchiveSession => UiEffect::ArchiveSession { operation },
+        UiIntent::InterruptSubagent { address } => {
+            UiEffect::InterruptSubagent { operation, address }
+        }
     }
 }
 
@@ -382,6 +402,17 @@ impl DshEffectSink<'_> {
                         "attach requires loader/session swap",
                     )),
                 )
+            }
+            UiEffect::InterruptSubagent {
+                mut operation,
+                address,
+            } => {
+                self.prepare_operation(&mut operation);
+                if self.completed.contains(&operation) {
+                    return Ok(self.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::interrupt_subagent(self.transport, &address);
+                (operation, result.map(|value| value.accepted))
             }
         };
         match result {
@@ -491,6 +522,28 @@ mod tests {
         assert_eq!(operation.action, "submit");
         assert!(operation.dedupe_key.starts_with("submit:"));
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn interrupt_subagent_effect_preserves_parent_child_identity() {
+        let session = SessionState::new("parent".into(), 9);
+        let effect = compile_intent(
+            UiIntent::InterruptSubagent {
+                address: SubagentAddress {
+                    parent_session_id: "parent".into(),
+                    child_session_id: "child".into(),
+                    mode: dsh_pager_protocol::SubagentMode::Continuable,
+                },
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::InterruptSubagent { operation, address } = effect else {
+            panic!("expected interrupt effect");
+        };
+        assert_eq!(operation.action, "subagent-interrupt");
+        assert_eq!(operation.session_id.as_str(), "parent");
+        assert_eq!(address.parent_session_id, "parent");
+        assert_eq!(address.child_session_id, "child");
     }
 
     #[test]

@@ -1469,8 +1469,16 @@ impl UiState {
                         child_session_id: row.id.clone(),
                         mode: dsh_pager_protocol::SubagentMode::Continuable,
                     };
-                    self.status = match dsh_pager::interrupt_subagent(transport, &address) {
-                        Ok(_) => Some(format!("Interrupt requested for {}", row.id)),
+                    let child_id = row.id.clone();
+                    let mut sink = DshEffectSink::new(transport);
+                    self.status = match sink.submit(
+                        UiIntent::InterruptSubagent { address },
+                        &UiContext::from_session(session),
+                    ) {
+                        Ok(receipt) => Some(receipt_status_message(
+                            &receipt,
+                            &format!("Interrupt {child_id}"),
+                        )),
                         Err(error) => Some(format!("Interrupt unavailable: {error}")),
                     };
                 }
