@@ -12,9 +12,11 @@
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use dsh_pager::dashboard::DashboardModel;
 use dsh_pager::{
     DshGeneration, DshInteraction, DshQueueItemId, DshRequestId, PagerError, PagerResult,
-    RpcTransport, SessionState, drain_notifications, load_session_id, repair_tail,
+    RpcTransport, SessionState, drain_notifications, load_session_id, peek_session_tail,
+    repair_tail,
 };
 use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
@@ -29,7 +31,7 @@ use ratatui::{
 use crate::app::{AppShell, Overlay, ShellAction, ShellEvent};
 use crate::effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent,
-    compile_intent,
+    compile_intent, receipt_status_message,
 };
 use crate::host_adapter::GrokHostSnapshot;
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
@@ -37,6 +39,7 @@ use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::{
+    dashboard::{DashboardPeek, render_dashboard_content},
     interaction::{render_interaction_content, response_for},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
@@ -161,6 +164,13 @@ struct UiState {
     interaction_request_id: Option<DshRequestId>,
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
+    dashboard: DashboardModel,
+    dashboard_revision: Option<u64>,
+    dashboard_query: PromptEditor,
+    dashboard_query_active: bool,
+    dashboard_peek: Option<DashboardPeek>,
+    prompt_history_index: Option<usize>,
+    local_prompt_history: Vec<String>,
     next_operation: u64,
     status: Option<String>,
     frame: usize,
@@ -186,6 +196,7 @@ impl UiState {
 
         let snapshot =
             GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
+        self.sync_dashboard(control_plane);
         self.reconcile_snapshot(&snapshot);
         let connection = format!(
             "{} · {} · q{} · {}",
@@ -224,6 +235,8 @@ impl UiState {
             self.render_queue(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::Interaction {
             self.render_interaction(frame, area, &snapshot);
+        } else if self.shell.overlay() == Overlay::Dashboard {
+            self.render_dashboard(frame, area);
         }
         self.frame = self.frame.wrapping_add(1);
     }
@@ -305,6 +318,54 @@ impl UiState {
                 .queue
                 .first()
                 .map(|item| DshQueueItemId::new(item.id.clone()).to_string());
+        }
+    }
+
+    fn sync_dashboard(&mut self, control_plane: &dsh_pager::ControlPlaneStore) {
+        let revision = control_plane.revision();
+        if self.dashboard_revision == Some(revision) {
+            return;
+        }
+        self.dashboard.replace_control_plane_with_workspaces(
+            control_plane.snapshots().cloned().collect(),
+            control_plane.workspaces().cloned().collect(),
+            control_plane.workspace_order().to_vec(),
+        );
+        self.dashboard_revision = Some(revision);
+    }
+
+    fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let theme = Theme::current();
+        let shortcuts = [
+            Shortcut {
+                label: "Enter attach",
+                clickable: true,
+                id: 1,
+            },
+            Shortcut {
+                label: "Esc back",
+                clickable: true,
+                id: 2,
+            },
+        ];
+        let config = ModalWindowConfig {
+            title: "Dashboard · DSH control plane",
+            tabs: Some(&["sessions", "workspaces", "jobs"]),
+            shortcuts: &shortcuts,
+            sizing: ModalSizing::large(),
+            fold_info: None,
+        };
+        let buf = frame.buffer_mut();
+        if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
+            render_dashboard_content(
+                buf,
+                content.content,
+                &self.dashboard,
+                self.dashboard_peek.as_ref(),
+                self.dashboard_query_active,
+                self.dashboard_query.text(),
+                theme,
+            );
         }
     }
 
@@ -619,6 +680,19 @@ impl UiState {
                 }
                 Ok(false)
             }
+            ShellAction::OpenDashboard => {
+                if let Err(error) = dsh_pager::list_sessions(transport) {
+                    self.status = Some(format!("Dashboard refresh failed: {error}"));
+                }
+                self.dashboard_revision = None;
+                self.dashboard_query_active = false;
+                self.dashboard_query.reset();
+                self.dashboard_peek = None;
+                self.sync_dashboard(transport.control_plane());
+                self.dashboard.select_first();
+                self.status = Some("Dashboard opened".into());
+                Ok(false)
+            }
             ShellAction::CloseOverlay => {
                 self.status = Some("Session picker closed".into());
                 Ok(false)
@@ -641,11 +715,22 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::PromptKey(key) => {
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                if self.handle_prompt_command(&key, &snapshot) {
+                    return Ok(false);
+                }
                 match self.prompt.handle_key(&key) {
                     LineEditOutcome::Unhandled => {}
-                    LineEditOutcome::HandledNoChange
-                    | LineEditOutcome::CursorChanged
-                    | LineEditOutcome::TextChanged => self.status = None,
+                    LineEditOutcome::HandledNoChange | LineEditOutcome::CursorChanged => {
+                        self.status = None
+                    }
+                    LineEditOutcome::TextChanged => {
+                        self.prompt_history_index = None;
+                        self.status = None;
+                    }
                 }
                 Ok(false)
             }
@@ -665,6 +750,7 @@ impl UiState {
             ShellAction::PromptPaste(text) => {
                 if !text.is_empty() {
                     let _ = self.prompt.insert_paste(&text);
+                    self.prompt_history_index = None;
                     self.status = None;
                 }
                 Ok(false)
@@ -701,6 +787,21 @@ impl UiState {
                 }
                 Ok(false)
             }
+            ShellAction::DashboardKey(key) => {
+                self.handle_dashboard_key(key, transport, session)?;
+                Ok(false)
+            }
+            ShellAction::DashboardMouse(mouse) => {
+                self.handle_dashboard_mouse(mouse, transport, session)?;
+                Ok(false)
+            }
+            ShellAction::DashboardPaste(text) => {
+                if self.dashboard_query_active && !text.is_empty() {
+                    let _ = self.dashboard_query.insert_paste(&text);
+                    self.dashboard.set_query(self.dashboard_query.text());
+                }
+                Ok(false)
+            }
             ShellAction::Resized(area) => {
                 let _ = self.shell.layout(area);
                 self.modal = ModalWindowState::default();
@@ -725,7 +826,7 @@ impl UiState {
         let context = UiContext::from_session(session);
         let receipt = sink.submit(
             UiIntent::SubmitPrompt {
-                text,
+                text: text.clone(),
                 mode: PromptMode::Queue,
             },
             &context,
@@ -734,14 +835,253 @@ impl UiState {
             receipt.status,
             UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
         ) {
+            self.record_prompt_history(&text);
             self.prompt.reset();
             self.status = Some("Prompt queued".into());
         } else {
-            self.status = Some(
-                receipt
-                    .diagnostic
-                    .unwrap_or_else(|| "Prompt rejected by host; draft retained".into()),
-            );
+            self.status = Some(receipt_status_message(&receipt, "Prompt"));
+        }
+        Ok(())
+    }
+
+    fn handle_prompt_command(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+        snapshot: &GrokHostSnapshot,
+    ) -> bool {
+        use crossterm::event::KeyModifiers;
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
+            self.status = if snapshot.capabilities.external_editor {
+                Some("External editor capability negotiated; terminal handoff is pending".into())
+            } else {
+                Some("External editor unavailable".into())
+            };
+            return true;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('p')
+            && snapshot.capabilities.external_pager
+        {
+            self.status =
+                Some("External pager capability negotiated; terminal handoff is pending".into());
+            return true;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            return self.navigate_prompt_history(snapshot, -1);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
+            return self.navigate_prompt_history(snapshot, 1);
+        }
+        if key.code == KeyCode::Tab
+            && self.prompt.text().starts_with('/')
+            && snapshot.capabilities.prompt_suggestions
+        {
+            let prefix = self.prompt.text();
+            if let Some(suggestion) = snapshot
+                .prompt
+                .suggestions
+                .iter()
+                .find(|suggestion| suggestion.starts_with(prefix))
+            {
+                let _ = self.prompt.replace_text(suggestion);
+                self.status = None;
+            } else {
+                self.status = Some("No matching slash command".into());
+            }
+            return true;
+        }
+        false
+    }
+
+    fn combined_prompt_history(&self, snapshot: &GrokHostSnapshot) -> Vec<String> {
+        let mut history = if snapshot.capabilities.prompt_history {
+            snapshot.prompt.history.clone()
+        } else {
+            Vec::new()
+        };
+        history.extend(self.local_prompt_history.iter().cloned());
+        history.dedup();
+        history
+    }
+
+    fn navigate_prompt_history(&mut self, snapshot: &GrokHostSnapshot, direction: isize) -> bool {
+        let history = self.combined_prompt_history(snapshot);
+        if history.is_empty() {
+            self.status = Some("Prompt history unavailable".into());
+            return true;
+        }
+        let next = match (self.prompt_history_index, direction) {
+            (None, -1) => history.len().saturating_sub(1),
+            (Some(index), -1) => index.saturating_sub(1),
+            (Some(index), 1) if index + 1 < history.len() => index + 1,
+            (Some(_), 1) => {
+                self.prompt_history_index = None;
+                self.prompt.reset();
+                return true;
+            }
+            (None, 1) => return true,
+            _ => return true,
+        };
+        self.prompt_history_index = Some(next);
+        let _ = self.prompt.replace_text(&history[next]);
+        self.status = None;
+        true
+    }
+
+    fn record_prompt_history(&mut self, text: &str) {
+        self.local_prompt_history.retain(|item| item != text);
+        self.local_prompt_history.push(text.to_string());
+        if self.local_prompt_history.len() > 100 {
+            let drop_count = self.local_prompt_history.len() - 100;
+            self.local_prompt_history.drain(..drop_count);
+        }
+        self.prompt_history_index = None;
+    }
+
+    fn handle_dashboard_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        if self.dashboard_peek.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('b') => self.dashboard_peek = None,
+                KeyCode::Enter => {
+                    let target = self
+                        .dashboard_peek
+                        .as_ref()
+                        .map(|peek| peek.session_id.clone());
+                    if let Some(target) = target {
+                        self.attach_session(transport, session, &target)?;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        if self.dashboard_query_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.dashboard_query_active = false;
+                    self.dashboard_query.reset();
+                    self.dashboard.set_query("");
+                }
+                KeyCode::Enter => self.dashboard_query_active = false,
+                _ => {
+                    let _ = self.dashboard_query.handle_key(&key);
+                    self.dashboard.set_query(self.dashboard_query.text());
+                }
+            }
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.shell.close_overlay();
+                self.status = Some("Dashboard closed".into());
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.dashboard.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.dashboard.move_selection(1),
+            KeyCode::Char('/') => {
+                self.dashboard_query_active = true;
+                let _ = self.dashboard_query.replace_text(self.dashboard.query());
+            }
+            KeyCode::Char('g') => self.dashboard.toggle_group_by_workspace(),
+            KeyCode::Char('a') => self.dashboard.toggle_show_archived(),
+            KeyCode::Char('c') => self.dashboard.toggle_collapse_inactive(),
+            KeyCode::Char('v') => self.peek_dashboard_selection(transport)?,
+            KeyCode::Char('r') => {
+                dsh_pager::list_sessions(transport)?;
+                self.dashboard_revision = None;
+                self.sync_dashboard(transport.control_plane());
+                self.status = Some("Dashboard refreshed".into());
+            }
+            KeyCode::Enter => {
+                if let Some(row) = self.dashboard.selected() {
+                    let target = row.session_id.clone();
+                    self.attach_session(transport, session, &target)?;
+                } else {
+                    self.status = Some("No session selected".into());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_dashboard_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp => self.dashboard.move_selection(-1),
+            crossterm::event::MouseEventKind::ScrollDown => self.dashboard.move_selection(1),
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if self.dashboard_peek.is_some() {
+                    return Ok(());
+                }
+                if let Some(row) = self.dashboard.selected() {
+                    let target = row.session_id.clone();
+                    self.attach_session(transport, session, &target)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn peek_dashboard_selection(&mut self, transport: &mut RpcTransport) -> PagerResult<()> {
+        let Some(row) = self.dashboard.selected() else {
+            self.status = Some("No session selected".into());
+            return Ok(());
+        };
+        let session_id = row.session_id.clone();
+        let title = row.title.clone();
+        let page = peek_session_tail(transport, &session_id, 20)?;
+        let lines = page
+            .events
+            .into_iter()
+            .map(|entry| {
+                let kind = entry.event.event_type;
+                let data = serde_json::to_string(&entry.event.data).unwrap_or_default();
+                truncate_str(&format!("[{kind}] {data}"), 240)
+            })
+            .collect();
+        self.dashboard_peek = Some(DashboardPeek {
+            session_id,
+            title,
+            lines,
+        });
+        self.status = Some("Dashboard peek loaded; no session was attached".into());
+        Ok(())
+    }
+
+    fn attach_session(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        target: &str,
+    ) -> PagerResult<()> {
+        if target == session.session_id() {
+            self.dashboard_peek = None;
+            self.shell.close_overlay();
+            self.status = Some("Already attached".into());
+            return Ok(());
+        }
+        self.status = Some(format!("Attaching {target}…"));
+        match load_session_id(transport, session.generation(), target.to_string()) {
+            Ok(next) => {
+                *session = next;
+                self.scroll = 0;
+                self.dashboard_peek = None;
+                self.dashboard_query_active = false;
+                self.dashboard_revision = None;
+                self.shell.close_overlay();
+                self.status = Some("Session attached".into());
+            }
+            Err(error) => self.status = Some(format!("Attach failed: {error}")),
         }
         Ok(())
     }
@@ -941,11 +1281,7 @@ impl UiState {
                 ));
             }
             _ => {
-                self.status = Some(
-                    receipt
-                        .diagnostic
-                        .unwrap_or_else(|| "Queue update rejected; local queue unchanged".into()),
-                );
+                self.status = Some(receipt_status_message(&receipt, "Queue update"));
             }
         }
         Ok(())
@@ -1099,11 +1435,7 @@ impl UiState {
                     Some("Interaction response accepted; waiting for host resolution".into());
             }
             _ => {
-                self.status = Some(
-                    receipt
-                        .diagnostic
-                        .unwrap_or_else(|| "Interaction response rejected".into()),
-                );
+                self.status = Some(receipt_status_message(&receipt, "Interaction response"));
             }
         }
         Ok(())

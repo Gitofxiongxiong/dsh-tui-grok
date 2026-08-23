@@ -39,6 +39,8 @@ pub struct CapabilityMatrix {
     pub external_pager: bool,
     pub queue_steer: bool,
     pub workspace_actions: bool,
+    pub prompt_history: bool,
+    pub prompt_suggestions: bool,
 }
 
 impl Default for CapabilityMatrix {
@@ -53,6 +55,8 @@ impl Default for CapabilityMatrix {
             external_pager: false,
             queue_steer: true,
             workspace_actions: false,
+            prompt_history: false,
+            prompt_suggestions: false,
         }
     }
 }
@@ -70,6 +74,7 @@ impl CapabilityMatrix {
             ($field:ident) => {
                 if let Some(value) = object
                     .get(stringify!($field))
+                    .or_else(|| object.get(capability_camel_key(stringify!($field))))
                     .and_then(|value| value.as_bool())
                 {
                     capabilities.$field = value;
@@ -85,7 +90,21 @@ impl CapabilityMatrix {
         read!(external_pager);
         read!(queue_steer);
         read!(workspace_actions);
+        read!(prompt_history);
+        read!(prompt_suggestions);
         capabilities
+    }
+}
+
+fn capability_camel_key(key: &str) -> &str {
+    match key {
+        "external_editor" => "externalEditor",
+        "external_pager" => "externalPager",
+        "queue_steer" => "queueSteer",
+        "workspace_actions" => "workspaceActions",
+        "prompt_history" => "promptHistory",
+        "prompt_suggestions" => "promptSuggestions",
+        _ => key,
     }
 }
 
@@ -137,11 +156,15 @@ impl From<&Diagnostic> for DiagnosticView {
 /// Prompt metadata is a contract, not the local editor draft. The draft is
 /// owned by the Grok input state and becomes authoritative only after receipt
 /// and a subsequent host snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSnapshot {
     pub default_mode: PromptMode,
     pub supports_multiline: bool,
     pub authoritative: bool,
+    #[serde(default)]
+    pub history: Vec<String>,
+    #[serde(default)]
+    pub suggestions: Vec<String>,
 }
 
 /// Snapshot consumed by the Grok shell in one draw pass.
@@ -191,6 +214,8 @@ impl GrokHostSnapshot {
             .and_then(|value| value.as_str())
             .unwrap_or("deepseek")
             .to_string();
+        let history = projection_strings(session, &["promptHistory", "history"]);
+        let suggestions = projection_strings(session, &["promptSuggestions", "suggestions"]);
         let title = session
             .title()
             .map(str::to_string)
@@ -316,6 +341,8 @@ impl GrokHostSnapshot {
                 default_mode: PromptMode::Queue,
                 supports_multiline: true,
                 authoritative: false,
+                history,
+                suggestions,
             },
             queue,
             queue_revision,
@@ -375,6 +402,8 @@ impl GrokHostSnapshot {
                 default_mode: PromptMode::Queue,
                 supports_multiline: true,
                 authoritative: false,
+                history: Vec::new(),
+                suggestions: Vec::new(),
             },
             queue: Vec::new(),
             queue_revision: 0,
@@ -502,6 +531,8 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
             default_mode: PromptMode::Queue,
             supports_multiline: true,
             authoritative: false,
+            history: Vec::new(),
+            suggestions: Vec::new(),
         },
         queue: model.queue,
         queue_revision,
@@ -510,6 +541,21 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         diagnostics: Vec::new(),
         capabilities: CapabilityMatrix::default(),
     }
+}
+
+fn projection_strings(session: &SessionState, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .find_map(|key| session.projection(key))
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .filter(|value| !value.is_empty())
+                .take(100)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -549,8 +595,16 @@ mod tests {
         state.set_projection(
             "capabilities",
             7,
-            json!({ "mouse": true, "image": true, "workspace_actions": true }),
+            json!({
+                "mouse": true,
+                "image": true,
+                "workspace_actions": true,
+                "prompt_history": true,
+                "prompt_suggestions": true
+            }),
         );
+        state.set_projection("promptHistory", 8, json!(["first", "second"]));
+        state.set_projection("promptSuggestions", 9, json!(["/help", "/model"]));
         state
     }
 
@@ -566,6 +620,9 @@ mod tests {
         assert!(first.capabilities.mouse);
         assert!(first.capabilities.image);
         assert!(first.capabilities.workspace_actions);
+        assert!(first.capabilities.prompt_history);
+        assert_eq!(first.prompt.history, vec!["first", "second"]);
+        assert_eq!(first.prompt.suggestions, vec!["/help", "/model"]);
         assert!(!first.prompt.authoritative);
     }
 

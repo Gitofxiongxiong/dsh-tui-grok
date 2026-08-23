@@ -495,9 +495,9 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 | M2 terminal/render | 已完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；PTY restore、Unicode/wrap、inline link tests 全绿 | M4 接入 Grok scrollback/block renderer 和 reference golden |
 | M3 AppView/AgentView | 已完成（迁移基线） | 默认入口已切换为 `AppShell` reducer：KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch、picker-owned Esc ladder、adaptive pane layout、semantic focus snapshot；runtime 不再维护 picker_open 平行状态 | M4/M5 继续接入完整 AgentView pane/block/prompt surface |
 | M4 scrollback/blocks | 已完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 reference golden、selection/link map 和 50k 性能门禁 | M4.5-M4.8 rich renderer/reference/selection/perf |
-| M5 prompt | 已完成（vertical slice 基线） | 基于 Grok `EditBuffer` 的 multiline `PromptEditor`、Shift+Enter、grapheme-safe cursor、soft-wrap、paste policy、draft receipt 保留已进入默认 runtime；仍缺历史/suggestion/slash、外部 editor/pager 与完整 mouse selection golden | M5.6-M5.8 capability/history/external process/tests |
-| M6 picker/dashboard | 已完成（attach vertical slice） | control-plane roster rows 带 stable session ID；picker refresh/filter 不依赖数组索引；Selected 编译 Attach intent/effect 并穿过 `load_session_id` history/live barrier，成功替换 session、失败保留原状态；仍缺完整 dashboard pane/workspace hierarchy/peek-back golden | M6.6-M6.8 dashboard/workspace/race/reference |
-| M7 queue/interactions | 已完成（vertical slice 基线） | queue stable item ID/revision/pending receipt、approval/question modal、generation/request response、jobs/status header/footer 已进入默认 runtime；仍缺完整 reorder drag、复杂 question 表单、conflict/retry/timeout golden 和 reference matrix | M7.7-M7.8 完整错误路径、行为测试与 reference parity |
+| M5 prompt | 已完成（M5.6-M5.8 completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；外部进程真实 terminal handoff 与 mouse-selection golden 仍留在 M8/M9 | M5.7 real process handoff、M8 selection golden |
+| M6 picker/dashboard | 已完成（M6.6-M6.8 completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；picker 原有 load barrier 保留；真实双 session race/reference golden 仍留在 M9/M10 | M6.8 two-session PTY、M10 reference matrix |
+| M7 queue/interactions | 已完成（M7.7-M7.8 completion slice） | queue/interaction effect RPC errors 不再冒泡为未分类失败，统一映射 conflict/stale/timeout/unsupported/failed receipt；status 文案明确 retry/convergence，Dashboard jobs/status 与 queue/approval 行为测试已进入 Grok-derived surfaces；完整 reorder drag、复杂 question 表单和 reference matrix 仍待后续 | M7.8 behavior expansion、M10 reference parity |
 | M8 mouse/media | 未开始（主路径之外） | 当前 mouse 仅局部 picker 路径，媒体/selection parity 未完成 | geometry/selection/capability |
 | M9 lifecycle/performance | host 基础存在，UI scheduler 未闭合 | transport/loader/reconnect 部分存在，真实长时 soak 未完成 | generation、bounded scheduler、soak |
 | M10 parity/release | 未开始 | 目前只有 mock PTY 基线，不是 Grok reference matrix | reference runner、real backend、golden |
@@ -1205,11 +1205,14 @@ source manifest/license 变化：
     **已完成迁移基线**。
 15. **M6.3/M6.4**：完成 picker stable session ID→attach/load barrier/back；
     **已完成 attach/load vertical slice**。
-16. **M7.1/M7.3**：完成 queue 和 approval/question 的一条真实 effect 路径；
-17. **M10.1/M10.2**：建立 Grok reference 与 80×24/窄屏 semantic golden；
-18. **M10.6**：对真实 DeepSeek Harness 跑 hello→attach→stream→prompt→exit；
-19. 只有上述 critical slice 全绿后，才继续扩展 dashboard、jobs、media、bidi；
-20. 每完成一个切片，回写本文件的状态、证据、遗留差异和下一删除出口。
+16. **M7.1/M7.3**：完成 queue 和 approval/question 的一条真实 effect 路径；**已完成 vertical slice**。
+17. **M5.6-M5.8**：接入 capability-gated history/slash 与外部进程边界、错误输入测试；**已完成 completion slice**。
+18. **M6.6-M6.8**：接入 Dashboard/workspace/peek-back 和 stable-ID refresh；**已完成 completion slice**。
+19. **M7.7-M7.8**：接入 typed conflict/stale/timeout/unsupported receipt、retry 文案和行为测试；**已完成 completion slice**。
+20. **M10.1/M10.2**：建立 Grok reference 与 80×24/窄屏 semantic golden；
+21. **M10.6**：对真实 DeepSeek Harness 跑 hello→attach→stream→prompt→exit；
+22. 只有上述 critical slice 全绿后，才继续扩展 media、bidi 和完整 selection；
+23. 每完成一个切片，回写本文件的状态、证据、遗留差异和下一删除出口。
 
 第一条垂直切片的最低定义是：
 

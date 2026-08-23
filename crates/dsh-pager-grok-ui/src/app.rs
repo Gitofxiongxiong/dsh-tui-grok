@@ -78,6 +78,7 @@ pub enum ShellAction {
     PromptNewline,
     OpenQueue,
     OpenInteraction,
+    OpenDashboard,
     PromptKey(KeyEvent),
     PickerKey(KeyEvent),
     PickerMouse(MouseEvent),
@@ -89,6 +90,9 @@ pub enum ShellAction {
     PickerPaste(String),
     QueuePaste(String),
     InteractionPaste(String),
+    DashboardKey(KeyEvent),
+    DashboardMouse(MouseEvent),
+    DashboardPaste(String),
     Resized(Rect),
     Redraw,
 }
@@ -280,6 +284,7 @@ impl AppShell {
                 KeyOwner::Picker => ShellAction::PickerPaste(text),
                 KeyOwner::Queue => ShellAction::QueuePaste(text),
                 KeyOwner::Interaction => ShellAction::InteractionPaste(text),
+                KeyOwner::Dashboard => ShellAction::DashboardPaste(text),
                 _ => ShellAction::PromptPaste(text),
             },
             ShellEvent::Mouse(mouse) => {
@@ -291,6 +296,9 @@ impl AppShell {
                 }
                 if self.overlay == Overlay::Interaction {
                     return ShellAction::InteractionMouse(mouse);
+                }
+                if self.overlay == Overlay::Dashboard {
+                    return ShellAction::DashboardMouse(mouse);
                 }
                 match mouse.kind {
                     MouseEventKind::ScrollUp => ShellAction::ScrollUp(3),
@@ -315,6 +323,9 @@ impl AppShell {
             if self.overlay == Overlay::Interaction {
                 return ShellAction::InteractionKey(key);
             }
+            if self.overlay == Overlay::Dashboard {
+                return ShellAction::DashboardKey(key);
+            }
             if key.code == KeyCode::Esc {
                 self.close_overlay();
                 return ShellAction::CloseOverlay;
@@ -337,9 +348,18 @@ impl AppShell {
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
             return ShellAction::PromptNewline;
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(
+                key.code,
+                KeyCode::Char('p') | KeyCode::Char('n') | KeyCode::Char('x')
+            )
+        {
+            self.owner = KeyOwner::Prompt;
+            return ShellAction::PromptKey(key);
+        }
         if prompt_empty {
             match key.code {
-                KeyCode::Char('p') => {
+                KeyCode::Char('p') if key.modifiers.is_empty() => {
                     self.open_picker();
                     return ShellAction::OpenPicker;
                 }
@@ -350,6 +370,12 @@ impl AppShell {
                 KeyCode::Char('i') => {
                     self.open_interaction();
                     return ShellAction::OpenInteraction;
+                }
+                KeyCode::Char('d') => {
+                    self.previous_owner = self.owner;
+                    self.overlay = Overlay::Dashboard;
+                    self.owner = KeyOwner::Dashboard;
+                    return ShellAction::OpenDashboard;
                 }
                 KeyCode::Up | KeyCode::Char('k') => return ShellAction::ScrollUp(1),
                 KeyCode::Down | KeyCode::Char('j') => return ShellAction::ScrollDown(1),
@@ -448,6 +474,22 @@ mod tests {
                 true
             ),
             ShellAction::InteractionMouse(_)
+        ));
+    }
+
+    #[test]
+    fn dashboard_and_prompt_history_shortcuts_have_distinct_owners() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Char('d'))), true),
+            ShellAction::OpenDashboard
+        );
+        assert_eq!(shell.owner(), KeyOwner::Dashboard);
+        shell.close_overlay();
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Key(ctrl_p), true),
+            ShellAction::PromptKey(_)
         ));
     }
 

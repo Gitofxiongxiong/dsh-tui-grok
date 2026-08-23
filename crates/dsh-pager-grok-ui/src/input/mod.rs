@@ -39,6 +39,10 @@ impl PromptEditor {
         self.buffer = EditBuffer::new();
         self.preferred_column = None;
     }
+    pub(crate) fn replace_text(&mut self, text: &str) -> LineEditOutcome {
+        self.reset();
+        self.insert_paste(text)
+    }
     pub(crate) fn insert_newline(&mut self) -> LineEditOutcome {
         self.preferred_column = None;
         Self::from_edit_outcome(self.buffer.insert_str("\n"))

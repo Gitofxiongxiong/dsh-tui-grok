@@ -85,6 +85,7 @@ pub enum UiEffectStatus {
     Conflict,
     Unsupported,
     Failed,
+    Timeout,
 }
 
 /// Explicit host response. A receipt is admission only; authoritative state
@@ -97,6 +98,35 @@ pub struct UiEffectReceipt {
     pub diagnostic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+}
+
+/// Keep receipt presentation consistent across prompt, queue and interaction
+/// surfaces. Admission never implies authoritative convergence.
+pub fn receipt_status_message(receipt: &UiEffectReceipt, subject: &str) -> String {
+    if let Some(diagnostic) = receipt.diagnostic.as_deref() {
+        return match receipt.status {
+            UiEffectStatus::Conflict => {
+                format!("{subject} conflict: {diagnostic}; refresh and retry")
+            }
+            UiEffectStatus::Stale => {
+                format!("{subject} stale: {diagnostic}; action was not applied")
+            }
+            UiEffectStatus::Unsupported => format!("{subject} unavailable: {diagnostic}"),
+            UiEffectStatus::Timeout => format!("{subject} timed out: {diagnostic}; retry is safe"),
+            UiEffectStatus::Rejected => format!("{subject} rejected: {diagnostic}"),
+            UiEffectStatus::Failed => format!("{subject} failed: {diagnostic}"),
+            _ => diagnostic.to_string(),
+        };
+    }
+    match receipt.status {
+        UiEffectStatus::Rejected => format!("{subject} rejected by host"),
+        UiEffectStatus::Conflict => format!("{subject} conflict; refresh and retry"),
+        UiEffectStatus::Stale => format!("{subject} is stale; action was not applied"),
+        UiEffectStatus::Unsupported => format!("{subject} is unavailable"),
+        UiEffectStatus::Timeout => format!("{subject} timed out; retry is safe"),
+        UiEffectStatus::Failed => format!("{subject} failed"),
+        _ => format!("{subject} completed"),
+    }
 }
 
 /// DSH-neutral effect after intent compilation.
@@ -265,8 +295,8 @@ impl DshEffectSink<'_> {
                     operation.session_id.as_str(),
                     text,
                     mode,
-                )?;
-                (operation, Ok(result.accepted))
+                );
+                (operation, result.map(|value| value.accepted))
             }
             UiEffect::QueueMutation {
                 mut operation,
@@ -280,8 +310,8 @@ impl DshEffectSink<'_> {
                 let session =
                     SessionState::new(operation.session_id.to_string(), operation.generation.get());
                 let result =
-                    dsh_pager::update_queue(self.transport, &session, item_id.to_string(), action)?;
-                (operation, Ok(result.accepted))
+                    dsh_pager::update_queue(self.transport, &session, item_id.to_string(), action);
+                (operation, result.map(|value| value.accepted))
             }
             UiEffect::RespondInteraction {
                 mut operation,
@@ -299,8 +329,8 @@ impl DshEffectSink<'_> {
                     &session,
                     request_id.to_string(),
                     interaction,
-                )?;
-                (operation, Ok(result.accepted))
+                );
+                (operation, result.map(|value| value.accepted))
             }
             UiEffect::RenameSession {
                 mut operation,
@@ -310,8 +340,12 @@ impl DshEffectSink<'_> {
                 if self.completed.contains(&operation) {
                     return Ok(self.duplicate_receipt(operation));
                 }
-                dsh_pager::rename_session_id(self.transport, operation.session_id.as_str(), title)?;
-                (operation, Ok(true))
+                let result = dsh_pager::rename_session_id(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    title,
+                );
+                (operation, result.map(|_| true))
             }
             UiEffect::ForkSession {
                 mut operation,
@@ -321,20 +355,21 @@ impl DshEffectSink<'_> {
                 if self.completed.contains(&operation) {
                     return Ok(self.duplicate_receipt(operation));
                 }
-                dsh_pager::fork_session_id(
+                let result = dsh_pager::fork_session_id(
                     self.transport,
                     operation.session_id.as_str(),
                     at_seq.map(DshSeq::get),
-                )?;
-                (operation, Ok(true))
+                );
+                (operation, result.map(|_| true))
             }
             UiEffect::ArchiveSession { mut operation } => {
                 self.prepare_operation(&mut operation);
                 if self.completed.contains(&operation) {
                     return Ok(self.duplicate_receipt(operation));
                 }
-                dsh_pager::archive_session(self.transport, operation.session_id.as_str())?;
-                (operation, Ok(true))
+                let result =
+                    dsh_pager::archive_session(self.transport, operation.session_id.as_str());
+                (operation, result.map(|_| true))
             }
             UiEffect::AttachSession { mut operation, .. } => {
                 self.prepare_operation(&mut operation);
@@ -366,7 +401,7 @@ impl DshEffectSink<'_> {
                 retryable: Some(false),
             }),
             Err(error) => Ok(UiEffectReceipt {
-                status: UiEffectStatus::Failed,
+                status: classify_effect_error(&error),
                 operation,
                 diagnostic: Some(error.to_string()),
                 retryable: Some(true),
@@ -389,6 +424,24 @@ impl DshEffectSink<'_> {
             diagnostic: Some("duplicate operation suppressed".into()),
             retryable: Some(false),
         }
+    }
+}
+
+fn classify_effect_error(error: &dsh_pager::PagerError) -> UiEffectStatus {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("timeout") || message.contains("timed out") {
+        UiEffectStatus::Timeout
+    } else if message.contains("conflict") || message.contains("revision") {
+        UiEffectStatus::Conflict
+    } else if message.contains("stale")
+        || message.contains("generation")
+        || message.contains("gone")
+    {
+        UiEffectStatus::Stale
+    } else if message.contains("unsupported") || message.contains("capability") {
+        UiEffectStatus::Unsupported
+    } else {
+        UiEffectStatus::Failed
     }
 }
 
@@ -548,5 +601,40 @@ mod tests {
         assert_eq!(value["status"], json!("conflict"));
         assert_eq!(value["operation"]["generation"], json!(2));
         assert_eq!(value["retryable"], json!(true));
+    }
+
+    #[test]
+    fn receipt_message_distinguishes_conflict_stale_and_timeout() {
+        let operation = OperationKey {
+            session_id: DshSessionId::new("s"),
+            generation: DshGeneration::new(1),
+            request_id: DshRequestId::new("r"),
+            action: "queue-mutation".into(),
+            dedupe_key: "k".into(),
+        };
+        let receipt = |status: UiEffectStatus, diagnostic: &str| UiEffectReceipt {
+            status,
+            operation: operation.clone(),
+            diagnostic: Some(diagnostic.into()),
+            retryable: Some(true),
+        };
+        assert!(
+            receipt_status_message(
+                &receipt(UiEffectStatus::Conflict, "revision changed"),
+                "Queue"
+            )
+            .contains("conflict")
+        );
+        assert!(
+            receipt_status_message(
+                &receipt(UiEffectStatus::Stale, "old generation"),
+                "Interaction"
+            )
+            .contains("stale")
+        );
+        assert!(
+            receipt_status_message(&receipt(UiEffectStatus::Timeout, "deadline"), "Prompt")
+                .contains("timed out")
+        );
     }
 }
