@@ -39,7 +39,10 @@ as a completed production capability.
 | Theme constructors | `crates/codegen/xai-grok-pager-render/src/theme/tokyonight.rs` | `ae006d433f652c9e6d6533e38ba07ac49ff07770a63a9510a7dc8b1ae3c09f28` | `Theme::current` | planned |
 | Appearance | `crates/codegen/xai-grok-pager-render/src/appearance/config.rs` | `ef27fec032dda66aa0cf882c8bd005e5d9f368d08dfbdc4a08812af539cba744` | `GrokAppearanceSnapshot` | integrated projection |
 | Glyphs | `crates/codegen/xai-grok-pager-render/src/glyphs.rs` | `4662e6e4d2870dc22be3b7763b0f623969a80432a24dad37179c6eafc1e3c3e1` | `src/glyphs.rs` | planned |
-| PromptWidget | `crates/codegen/xai-grok-pager/src/views/prompt_widget/mod.rs` | `f89c9dda0fe244dd4ab2123601cedd0fe9e2722eee2533d5a8c9c14cd4ae23cf` | `PromptEditor` + `UiIntent` | planned |
+| PromptWidget | `crates/codegen/xai-grok-pager/src/views/prompt_widget/mod.rs` | `f89c9dda0fe244dd4ab2123601cedd0fe9e2722eee2533d5a8c9c14cd4ae23cf` | `PromptStyleContract`/`PromptInfoContract` + `PromptEditor` + `UiIntent` | render contract integrated; draw/interaction pending |
+| PromptWidget tests | `crates/codegen/xai-grok-pager/src/views/prompt_widget/tests.rs` | `407f924051144bb685354df4940f09df717cc30d3a89144a324302f3168f1fdd` | contract geometry/height fixtures now; upstream interaction fixtures with controller tranche | partial |
+| AgentView layout | `crates/codegen/xai-grok-pager/src/views/agent.rs` | `87ac96e07010893fd779ac8e27875410d0b87ba4d11501f1cfe9646689bcee20` | `AgentViewLayout` + capability pane heights | production subset; full pane solver pending |
+| AgentView render order | `crates/codegen/xai-grok-pager/src/app/agent_view/render.rs` | `87af0b2c939299e35c10a967ee5cb42ff2fba35cd1109969346ef557c0b3e643` | `GrokRenderSnapshot` + one layout snapshot | planned |
 | Scrollback render | `crates/codegen/xai-grok-pager/src/scrollback/render.rs` | `29fe2d148ec0feaed5acb08c590d7f4ad3cd852ec178832f4daaaf90c0e8a97f` | `RichTranscript` / block DTO | planned |
 | Scrollback layout | `crates/codegen/xai-grok-pager/src/scrollback/layout.rs` | `863ad75266d7e991b299e41bc872c648ef54dba2bb023b2e7e2a01605c630c7c` | `DshRenderContent` | planned |
 | Markdown blocks | `crates/codegen/xai-grok-pager/src/scrollback/blocks/markdown_content.rs` | `cc3d18620be6756344bf69f093bb5d05b825e27a47d737a4a8e915a03c9aa5ad` | `DshRenderBlock::Markdown` | planned |
@@ -52,3 +55,25 @@ as a completed production capability.
 | Subagents | `crates/codegen/xai-grok-pager/src/views/subagent_catalog_pane.rs` | `cfed1c7f772534cd97894057489195c0590a3b34a525fe045b7e4c1a5f3551d4` | `AgentSnapshot` | planned |
 | Agent status | `crates/codegen/xai-grok-pager/src/views/agent_status.rs` | `0721f13b99bd3def23c92976daf674de689ef4630c70fa90ff13554f4727506d` | status/task DTO | planned |
 | Turn status | `crates/codegen/xai-grok-pager/src/views/turn_status.rs` | `06f1826cf8455252901675aa838e91eb3d1ccf56fe608060117e14877bd4e818` | streaming/interrupt DTO | planned |
+
+## PromptWidget dependency classification
+
+The fixed upstream `PromptWidget` is not a single-file renderer. Its draw path
+mixes pure chrome/geometry with TextArea state, file-reference completion,
+history, slash/suggestion ghost text, paste chips, prompt images, terminal
+overlay escapes, and Grok agent/session helpers. The production migration must
+therefore preserve the following boundary instead of importing the Grok
+runtime to make the original file compile:
+
+| Upstream responsibility | Reuse class | DSH seam / disposition |
+|---|---|---|
+| `PromptStyle`, `PromptInfo`, height and chrome rect split | A1 | `src/views/prompt_contract.rs`; field-for-field owned projection, no drawing |
+| TextArea wrap, selection, cursor, mouse, undo/redo | A0 | workspace `dsh-grok-textarea`; next draw tranche must call its `render_ref` |
+| border/prefix/info/placeholder/cursor draw order | A1/B | next vendor draw-core tranche replaces `views/agent.rs::render_prompt_buffer` |
+| file search, history, slash and suggestion state | B | migrate controller tranches against existing typed host snapshots/effects |
+| paste/image preview and terminal overlay escapes | B/C | media DTO + explicit terminal capability; no Grok attachment runtime |
+| agent/session/shell/ACP/config/telemetry calls | D | excluded; project through `GrokRenderSnapshot` and `UiIntent` only |
+
+`render contract integrated` is deliberately not a pixel-parity completion
+claim. The old prompt renderer remains the production fallback until the fixed
+upstream draw core and its semantic cell tests replace it.

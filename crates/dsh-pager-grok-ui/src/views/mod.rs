@@ -9,6 +9,7 @@ pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]
 #[allow(dead_code)]
 pub mod modal_window;
+pub mod prompt_contract;
 pub mod queue;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/shortcuts_bar.rs"]
 pub mod shortcuts_bar;

@@ -364,6 +364,22 @@ width/grapheme/hit-map 规则，不能另造 line viewer 几何。
 门禁：前四项任一能力仍依赖简化 renderer 时，不得执行第 5 项；也不得以“真实
 RPC 已接通”为理由把对应 Grok renderer 闭包标记为完成。
 
+P6.1 进一步拆成以下可审计门禁，避免把“字段 contract 已存在”误报成 renderer
+迁移完成：
+
+1. 固定上游 `PromptStyle`、`PromptInfo`、height 和 chrome rect split 的
+   DSH-neutral contract；
+2. 将 `PromptEditor` 收敛到现有 Grok `TextArea`，由同一个 TextArea 负责 wrap、
+   selection、cursor、mouse 和 viewport；
+3. vendor/抽取固定上游 draw core，替换
+   `views/agent.rs::render_prompt_buffer`，同时迁移 semantic cell tests；
+4. 迁移完整 `AgentViewLayoutParams`（tasks/catalog/todo/queue/btw/banner/CTA/
+   follow-ups/voice/status/scrollbar/timeline），让绘制与 hit map 共用一个 snapshot；
+5. File Search、Suggestion/history 和 Image controller 接入后，P6.1 才可标记完成。
+
+当前仅第 1 项完成；生产路径仍使用 fallback prompt renderer，因此 Renderer 状态
+保持未完成。
+
 ## 4A. 能力状态和 host contract
 
 每个 feature snapshot 都必须有稳定的 `status`：
