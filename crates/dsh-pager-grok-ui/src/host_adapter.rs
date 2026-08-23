@@ -107,6 +107,16 @@ pub struct AgentViewSnapshot {
     pub diagnostics: Vec<DiagnosticView>,
 }
 
+/// Host-owned job/subagent projection used by task/status surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRow {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticView {
     pub level: String,
@@ -151,6 +161,7 @@ pub struct GrokHostSnapshot {
     pub queue: Vec<DshQueueItem>,
     pub queue_revision: u64,
     pub interaction: Option<DshInteraction>,
+    pub tasks: Vec<TaskRow>,
     pub diagnostics: Vec<DiagnosticView>,
     pub capabilities: CapabilityMatrix,
 }
@@ -260,6 +271,22 @@ impl GrokHostSnapshot {
         let interaction = presentation.interaction.clone();
         let queue = presentation.queue.clone();
         let queue_revision = presentation.queue_revision;
+        let tasks = control_plane
+            .and_then(|store| store.snapshot(session.session_id()))
+            .map(|snapshot| {
+                snapshot
+                    .jobs
+                    .iter()
+                    .map(|job| TaskRow {
+                        id: job.id.clone(),
+                        kind: job.kind.clone(),
+                        label: job.label.clone(),
+                        status: job.status.clone(),
+                        detail: job.detail.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let session_header = SessionHeader {
             id: DshSessionId::new(session.session_id()),
             generation: DshGeneration::new(session.generation()),
@@ -293,6 +320,7 @@ impl GrokHostSnapshot {
             queue,
             queue_revision,
             interaction,
+            tasks,
             diagnostics,
             capabilities: CapabilityMatrix::from_session(session),
         }
@@ -351,6 +379,7 @@ impl GrokHostSnapshot {
             queue: Vec::new(),
             queue_revision: 0,
             interaction: None,
+            tasks: Vec::new(),
             diagnostics: Vec::new(),
             capabilities: CapabilityMatrix::default(),
         }
@@ -477,6 +506,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         queue: model.queue,
         queue_revision,
         interaction,
+        tasks: Vec::new(),
         diagnostics: Vec::new(),
         capabilities: CapabilityMatrix::default(),
     }

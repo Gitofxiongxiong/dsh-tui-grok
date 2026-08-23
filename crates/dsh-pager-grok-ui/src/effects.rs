@@ -196,7 +196,17 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::ForkSession { at_seq } => format!("{action_name}:{at_seq:?}"),
         UiIntent::ArchiveSession => action_name.to_string(),
     };
-    let request_id = context.request_id.clone();
+    // Interaction request ids are host-owned correlation ids. Preserve them
+    // even when a caller did not pre-seed an operation context; generation is
+    // still taken from the active session context below.
+    let request_id = match &intent {
+        UiIntent::RespondInteraction { request_id, .. }
+            if context.request_id.as_str() == "pending" =>
+        {
+            request_id.clone()
+        }
+        _ => context.request_id.clone(),
+    };
     let dedupe_key = if request_id.as_str() == "pending" {
         dedupe_key
     } else {
@@ -498,6 +508,26 @@ mod tests {
         };
         assert_eq!(operation.request_id.as_str(), "op-1");
         assert_eq!(operation.dedupe_key, "submit:op-1");
+    }
+
+    #[test]
+    fn interaction_request_id_is_bound_even_without_preseeded_operation() {
+        let session = SessionState::new("s".into(), 8);
+        let effect = compile_intent(
+            UiIntent::RespondInteraction {
+                request_id: DshRequestId::new("rpc-7"),
+                interaction: TuiInteractionResponse::Question {
+                    answers: json!({"answers": []}),
+                },
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::RespondInteraction { operation, .. } = effect else {
+            panic!("expected interaction response effect");
+        };
+        assert_eq!(operation.request_id.as_str(), "rpc-7");
+        assert_eq!(operation.generation.get(), 8);
+        assert_eq!(operation.dedupe_key, "respond-interaction:rpc-7");
     }
 
     #[test]

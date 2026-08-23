@@ -76,11 +76,19 @@ pub enum ShellAction {
     ScrollDown(u16),
     SubmitPrompt,
     PromptNewline,
+    OpenQueue,
+    OpenInteraction,
     PromptKey(KeyEvent),
     PickerKey(KeyEvent),
     PickerMouse(MouseEvent),
+    QueueKey(KeyEvent),
+    QueueMouse(MouseEvent),
+    InteractionKey(KeyEvent),
+    InteractionMouse(MouseEvent),
     PromptPaste(String),
     PickerPaste(String),
+    QueuePaste(String),
+    InteractionPaste(String),
     Resized(Rect),
     Redraw,
 }
@@ -242,6 +250,18 @@ impl AppShell {
         self.owner = KeyOwner::Picker;
     }
 
+    pub fn open_queue(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::Queue;
+        self.owner = KeyOwner::Queue;
+    }
+
+    pub fn open_interaction(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::Interaction;
+        self.owner = KeyOwner::Interaction;
+    }
+
     pub fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
         self.owner = self.previous_owner;
@@ -258,11 +278,19 @@ impl AppShell {
             ShellEvent::Tick | ShellEvent::Notification => ShellAction::Redraw,
             ShellEvent::Paste(text) => match self.owner {
                 KeyOwner::Picker => ShellAction::PickerPaste(text),
+                KeyOwner::Queue => ShellAction::QueuePaste(text),
+                KeyOwner::Interaction => ShellAction::InteractionPaste(text),
                 _ => ShellAction::PromptPaste(text),
             },
             ShellEvent::Mouse(mouse) => {
                 if self.overlay == Overlay::Picker {
                     return ShellAction::PickerMouse(mouse);
+                }
+                if self.overlay == Overlay::Queue {
+                    return ShellAction::QueueMouse(mouse);
+                }
+                if self.overlay == Overlay::Interaction {
+                    return ShellAction::InteractionMouse(mouse);
                 }
                 match mouse.kind {
                     MouseEventKind::ScrollUp => ShellAction::ScrollUp(3),
@@ -280,6 +308,12 @@ impl AppShell {
                 // The copied Grok picker owns its own Esc ladder: first leave
                 // search/selection state, then request overlay close.
                 return ShellAction::PickerKey(key);
+            }
+            if self.overlay == Overlay::Queue {
+                return ShellAction::QueueKey(key);
+            }
+            if self.overlay == Overlay::Interaction {
+                return ShellAction::InteractionKey(key);
             }
             if key.code == KeyCode::Esc {
                 self.close_overlay();
@@ -308,6 +342,14 @@ impl AppShell {
                 KeyCode::Char('p') => {
                     self.open_picker();
                     return ShellAction::OpenPicker;
+                }
+                KeyCode::Char('q') => {
+                    self.open_queue();
+                    return ShellAction::OpenQueue;
+                }
+                KeyCode::Char('i') => {
+                    self.open_interaction();
+                    return ShellAction::OpenInteraction;
                 }
                 KeyCode::Up | KeyCode::Char('k') => return ShellAction::ScrollUp(1),
                 KeyCode::Down | KeyCode::Char('j') => return ShellAction::ScrollDown(1),
@@ -379,6 +421,33 @@ mod tests {
                 true
             ),
             ShellAction::PickerMouse(_)
+        ));
+        shell.close_overlay();
+        shell.open_queue();
+        assert!(matches!(
+            shell.dispatch(
+                ShellEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 1,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE
+                }),
+                true
+            ),
+            ShellAction::QueueMouse(_)
+        ));
+        shell.open_interaction();
+        assert!(matches!(
+            shell.dispatch(
+                ShellEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: 1,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE
+                }),
+                true
+            ),
+            ShellAction::InteractionMouse(_)
         ));
     }
 
