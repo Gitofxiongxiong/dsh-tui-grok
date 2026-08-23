@@ -11,12 +11,13 @@
 
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
 use dsh_pager::dashboard::DashboardModel;
 use dsh_pager::{
     DshGeneration, DshInteraction, DshQueueItemId, DshRequestId, PagerError, PagerResult,
-    RpcTransport, SessionState, drain_notifications, load_session_id, peek_session_tail,
-    repair_tail,
+    RpcTransport, SessionState, SessionUpdate, load_session_id, peek_session_tail, repair_tail,
 };
 use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
@@ -29,14 +30,21 @@ use ratatui::{
 };
 
 use crate::app::{AppShell, Overlay, ShellAction, ShellEvent};
+use crate::clipboard::{self, ClipboardBackend};
 use crate::effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent,
     compile_intent, receipt_status_message,
+};
+use crate::geometry::{
+    GeometryLine, HitMap, HitTarget, LinkTarget, column_for_grapheme, first_link_target,
+    insert_text_line,
 };
 use crate::host_adapter::GrokHostSnapshot;
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
+use crate::scheduler::SchedulerStats;
+use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
     dashboard::{DashboardPeek, render_dashboard_content},
@@ -56,6 +64,7 @@ use crate::views::{
 use serde_json::json;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const NOTIFICATION_BUDGET: usize = 256;
 
 #[derive(Debug, Clone)]
 struct PendingQueueMutation {
@@ -95,22 +104,45 @@ fn run_loop(
                 session,
             )?;
         }
-        match drain_notifications(transport, session) {
-            Ok(update) if update.gap_detected => {
+        match drain_notifications_bounded(transport, session, NOTIFICATION_BUDGET) {
+            Ok((update, processed)) if update.gap_detected => {
+                ui.scheduler_stats.enqueued =
+                    ui.scheduler_stats.enqueued.saturating_add(processed as u64);
+                ui.scheduler_stats.processed = ui
+                    .scheduler_stats
+                    .processed
+                    .saturating_add(processed as u64);
+                ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
                 if let Err(error) = repair_tail(transport, session) {
                     ui.status = Some(format!("history repair error: {error}"));
                 }
             }
-            Ok(update) if update.changed => {
+            Ok((update, processed)) if update.changed => {
+                ui.scheduler_stats.enqueued =
+                    ui.scheduler_stats.enqueued.saturating_add(processed as u64);
+                ui.scheduler_stats.processed = ui
+                    .scheduler_stats
+                    .processed
+                    .saturating_add(processed as u64);
+                ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
                 ui.shell.invalidate_content();
                 let _ = ui.dispatch_event(ShellEvent::Notification, transport, session)?;
             }
-            Ok(_) => {}
+            Ok((_, processed)) => {
+                ui.scheduler_stats.enqueued =
+                    ui.scheduler_stats.enqueued.saturating_add(processed as u64);
+                ui.scheduler_stats.processed = ui
+                    .scheduler_stats
+                    .processed
+                    .saturating_add(processed as u64);
+                ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
+            }
             Err(error) => {
                 ui.status = Some(format!("notification error: {error}"));
             }
         }
-        terminal.draw_with_links(&[], |frame| {
+        let frame_links = ui.frame_links.clone();
+        terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
         })?;
         if !event::poll(POLL_INTERVAL)? {
@@ -119,30 +151,60 @@ fn run_loop(
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if ui.dispatch_event(ShellEvent::Key(key), transport, session)? {
+                let quit = ui.dispatch_event(ShellEvent::Key(key), transport, session)?;
+                ui.flush_copy(terminal);
+                if quit {
                     break;
                 }
             }
             Event::Mouse(mouse) => {
-                if ui.dispatch_event(ShellEvent::Mouse(mouse), transport, session)? {
+                let quit = ui.dispatch_event(ShellEvent::Mouse(mouse), transport, session)?;
+                ui.flush_copy(terminal);
+                if quit {
                     break;
                 }
             }
             Event::Paste(text) => {
-                if ui.dispatch_event(ShellEvent::Paste(text), transport, session)? {
+                let quit = ui.dispatch_event(ShellEvent::Paste(text), transport, session)?;
+                ui.flush_copy(terminal);
+                if quit {
                     break;
                 }
             }
             Event::Resize(width, height) => {
                 let _ =
                     ui.dispatch_event(ShellEvent::Resize { width, height }, transport, session)?;
+                ui.flush_copy(terminal);
             }
             _ => {
                 let _ = ui.dispatch_event(ShellEvent::Tick, transport, session)?;
+                ui.flush_copy(terminal);
             }
         }
     }
     Ok(())
+}
+
+fn drain_notifications_bounded(
+    transport: &mut RpcTransport,
+    session: &mut SessionState,
+    budget: usize,
+) -> PagerResult<(SessionUpdate, usize)> {
+    let mut combined = SessionUpdate::default();
+    let mut processed = 0usize;
+    while processed < budget {
+        let Some(note) = transport.try_notification()? else {
+            break;
+        };
+        processed += 1;
+        let update = transport.route_notification(session, note)?;
+        combined.changed |= update.changed;
+        combined.gap_detected |= update.gap_detected;
+    }
+    // A pending sequence gap remains visible even when this frame's budget was
+    // exhausted; repair is deliberately handled before the next paint.
+    combined.gap_detected |= session.needs_repair();
+    Ok((combined, processed))
 }
 
 #[derive(Debug, Default)]
@@ -174,6 +236,13 @@ struct UiState {
     next_operation: u64,
     status: Option<String>,
     frame: usize,
+    hit_map: HitMap,
+    geometry_lines: Vec<GeometryLine>,
+    selection: SelectionModel,
+    hover_link: Option<LinkTarget>,
+    frame_links: Vec<dsh_grok_inline::LinkSpan>,
+    pending_copy: Option<String>,
+    scheduler_stats: SchedulerStats,
 }
 
 impl UiState {
@@ -185,6 +254,9 @@ impl UiState {
     ) {
         let area = frame.area();
         let theme = Theme::current();
+        self.hit_map.resize(area);
+        self.hit_map.clear();
+        self.geometry_lines.clear();
         let background = Block::default().style(Style::default().bg(theme.bg_base));
         frame.render_widget(background, area);
 
@@ -238,6 +310,7 @@ impl UiState {
         } else if self.shell.overlay() == Overlay::Dashboard {
             self.render_dashboard(frame, area);
         }
+        self.frame_links = self.hit_map.link_spans();
         self.frame = self.frame.wrapping_add(1);
     }
 
@@ -266,6 +339,12 @@ impl UiState {
         if !task_status.is_empty() {
             details.push_str(" · ");
             details.push_str(task_status);
+        }
+        if self.scheduler_stats.dropped > 0 {
+            details.push_str(&format!(
+                " · backlog dropped {}",
+                self.scheduler_stats.dropped
+            ));
         }
         format!("{base} · {details}")
     }
@@ -419,6 +498,58 @@ impl UiState {
             content,
         );
 
+        let mut y = content.y;
+        for row in &snapshot.transcript {
+            for (line_index, text) in row.content.display_text().split('\n').enumerate() {
+                if y >= content.bottom() {
+                    break;
+                }
+                let geometry = insert_text_line(
+                    &mut self.hit_map,
+                    HitTarget::TranscriptEntry(row.id),
+                    line_index,
+                    content.x.saturating_add(1),
+                    y,
+                    content.width.saturating_sub(1),
+                    text,
+                    first_link_target(text),
+                );
+                self.geometry_lines.push(geometry);
+                y = y.saturating_add(1);
+            }
+            if y >= content.bottom() {
+                break;
+            }
+        }
+
+        if let Some(selection) = self.selection.selection() {
+            let buffer = frame.buffer_mut();
+            for line in &self.geometry_lines {
+                let HitTarget::TranscriptEntry(entry_id) = line.target else {
+                    continue;
+                };
+                let grapheme_count =
+                    unicode_segmentation::UnicodeSegmentation::graphemes(line.text.as_str(), true)
+                        .count();
+                let Some((start, end)) =
+                    selection.grapheme_range_for_line(entry_id, line.line_index, grapheme_count)
+                else {
+                    continue;
+                };
+                let start_column = column_for_grapheme(&line.text, start) as u16;
+                let end_column = column_for_grapheme(&line.text, end) as u16;
+                buffer.set_style(
+                    Rect::new(
+                        line.rect.x.saturating_add(start_column),
+                        line.rect.y,
+                        end_column.saturating_sub(start_column),
+                        1,
+                    ),
+                    Style::default().bg(theme.bg_visual),
+                );
+            }
+        }
+
         let turn_count = snapshot.transcript.len();
         if let Some(rail_geometry) = compute_rail(
             rail,
@@ -436,7 +567,7 @@ impl UiState {
         }
     }
 
-    fn render_prompt(&self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
+    fn render_prompt(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
         let theme = Theme::current();
         let label = if snapshot.running { " > " } else { " · " };
         let available = area.width.saturating_sub(label.len() as u16 + 1) as usize;
@@ -474,6 +605,13 @@ impl UiState {
             .wrap(Wrap { trim: false }),
             area,
         );
+        self.hit_map.insert(crate::geometry::HitRegion {
+            target: HitTarget::Prompt,
+            rect: area,
+            label: "prompt".into(),
+            link: None,
+            priority: 15,
+        });
         if !self.prompt.is_empty() && area.height > 0 && area.width > 0 {
             let cursor_x = area
                 .x
@@ -802,13 +940,110 @@ impl UiState {
                 }
                 Ok(false)
             }
+            ShellAction::TranscriptMouse(mouse) => {
+                self.handle_transcript_mouse(mouse);
+                Ok(false)
+            }
             ShellAction::Resized(area) => {
                 let _ = self.shell.layout(area);
                 self.modal = ModalWindowState::default();
+                self.hit_map.resize(area);
+                self.selection.clear();
+                self.hover_link = None;
+                self.frame_links.clear();
                 self.status = Some(format!("Resized to {}x{}", area.width, area.height));
                 Ok(false)
             }
             ShellAction::None | ShellAction::Redraw => Ok(false),
+        }
+    }
+
+    fn handle_transcript_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll = self.scroll.saturating_add(3);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll = self.scroll.saturating_sub(3);
+            }
+            MouseEventKind::Moved => {
+                self.hover_link = self.hit_map.link_at(mouse.column, mouse.row).cloned();
+                if let Some(link) = &self.hover_link {
+                    self.status = Some(format!("Link: {}", link.url));
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row) else {
+                    self.selection.clear();
+                    return;
+                };
+                let Some(line) = self
+                    .geometry_lines
+                    .iter()
+                    .find(|line| line.rect.y == mouse.row && line.target == region.target)
+                else {
+                    return;
+                };
+                if let Some(point) =
+                    SelectionModel::point_for_line(&region.target, line, mouse.column)
+                {
+                    self.selection.begin(point);
+                    self.status = Some("Selecting transcript".into());
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row) else {
+                    return;
+                };
+                let Some(line) = self
+                    .geometry_lines
+                    .iter()
+                    .find(|line| line.rect.y == mouse.row && line.target == region.target)
+                else {
+                    return;
+                };
+                if let Some(point) =
+                    SelectionModel::point_for_line(&region.target, line, mouse.column)
+                {
+                    self.selection.extend(point);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(selection) = self.selection.finish() else {
+                    return;
+                };
+                if selection.is_empty() {
+                    return;
+                }
+                let copied = self.selection.copy_lines(&self.geometry_lines, &selection);
+                if !copied.is_empty() {
+                    self.pending_copy = Some(copied);
+                    self.status = Some("Selection copied".into());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn flush_copy(&mut self, terminal: &mut TerminalSurface) {
+        let Some(text) = self.pending_copy.take() else {
+            return;
+        };
+        let result = if self.capabilities.osc52 {
+            terminal.copy_text(&text).map(|_| ClipboardBackend::Osc52)
+        } else {
+            clipboard::system_clipboard_set(&text).map(|result| result.backend)
+        };
+        match result {
+            Ok(ClipboardBackend::Osc52 | ClipboardBackend::System) => {
+                self.status = Some("Selection copied".into());
+            }
+            Ok(ClipboardBackend::Unavailable) => {
+                self.status = Some("Clipboard unavailable".into());
+            }
+            Err(error) => {
+                self.status = Some(format!("Clipboard unavailable: {error}"));
+            }
         }
     }
 

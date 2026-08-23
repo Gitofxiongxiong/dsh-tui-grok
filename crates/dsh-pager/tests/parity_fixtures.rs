@@ -4,7 +4,7 @@ use std::fs;
 use serde_json::Value;
 
 #[test]
-fn m0_parity_manifest_contains_all_required_fallback_scenarios() {
+fn m10_parity_manifest_contains_all_required_scenarios_and_matrix() {
     let root = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../dsh-pager-test-support/fixtures/parity/"
@@ -13,7 +13,22 @@ fn m0_parity_manifest_contains_all_required_fallback_scenarios() {
         &fs::read_to_string(format!("{root}manifest.json")).expect("read parity manifest"),
     )
     .expect("parse parity manifest");
-    assert_eq!(manifest["status"], "fallback-baseline");
+    assert_eq!(manifest["status"], "semantic-reference-v1");
+    assert_eq!(
+        manifest["referenceMatrix"]["runner"],
+        "dsh-pager-grok-ui::parity::ReferenceRunner"
+    );
+    assert_eq!(
+        manifest["referenceMatrix"]["sizes"],
+        serde_json::json!([
+            [40, 12],
+            [60, 20],
+            [80, 24],
+            [100, 30],
+            [120, 40],
+            [160, 50]
+        ])
+    );
     let names = manifest["scenarios"]
         .as_array()
         .expect("scenario array")

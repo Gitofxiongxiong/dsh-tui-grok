@@ -40,3 +40,14 @@ python3 scripts/pty-smoke.py --binary target/debug/dsh-pager
 ```
 
 检查窗口 resize、折行、滚动、picker/modal 打开关闭以及退出后的终端恢复。UI 的快照/黄金测试只断言稳定文本和几何关系，不把 ANSI 控制序列硬编码到 runtime 测试。
+
+## M8-M10 完整端到端门禁
+
+scripts/e2e.sh 是当前完整入口：它校验协议/source manifest，验证
+ReferenceRunner 的六档尺寸、十二种状态和九类输入矩阵，运行 workspace
+测试，构建 binary，并通过 checked-in mock Harness 执行 PTY 主路径（含 resize、
+mouse/picker、queue、Esc ladder 和 terminal restore）；prompt、selection/copy、
+approval/question 和 queue authority 由同一 mock Harness 的 binary integration
+tests 覆盖。真实 DeepSeek
+Harness 可通过 DSH_TUI_SERVER 注入同一 binary；没有凭据或服务时脚本仍保留
+mock 证据，并将真实后端状态记录为 unavailable，而不会伪造成功。

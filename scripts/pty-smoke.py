@@ -40,6 +40,11 @@ def main() -> int:
         default=Path(__file__).parents[1] / "crates/dsh-pager-bin/tests/mock-server.mjs",
     )
     parser.add_argument("--timeout", type=float, default=12.0)
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="exercise resize, queue, mouse and terminal restore before exit",
+    )
     args = parser.parse_args()
 
     pid, fd = pty.fork()
@@ -100,8 +105,32 @@ def main() -> int:
             if b"clos" in visible()[before_close:]:
                 break
 
+        if args.full:
+            # M8/M10 input matrix smoke: resize invalidates geometry, queue and
+            # mouse overlays route through their owners before terminal restore.
+            resize(fd, 40, 80)
+            os.write(fd, b"q")
+            while b"Queue" not in visible() and time.monotonic() < deadline:
+                pump()
+            if b"Queue" not in visible():
+                raise RuntimeError("queue overlay did not render")
+            os.write(fd, b"\x1b")
+            pump(0.2)
+            # A SGR mouse wheel event and resize storm must be accepted even
+            # when they do not change the selected row; the assertion is
+            # terminal liveness. Prompt/interaction RPC paths are covered by
+            # the binary mock Harness tests in scripts/e2e.sh.
+            os.write(fd, b"\x1b[<64;5;5M")
+            resize(fd, 30, 100)
+            pump(0.6)
+
         # Exit through the same Esc path used by the interactive shell.
         os.write(fd, b"\x1b")
+        if args.full:
+            # Keep the close and quit steps separate so an implementation with
+            # an extra modal layer still follows the Esc ladder deterministically.
+            pump(0.2)
+            os.write(fd, b"\x1b\x1b")
         while time.monotonic() < deadline:
             pump()
             waited, status = os.waitpid(pid, os.WNOHANG)
@@ -117,7 +146,7 @@ def main() -> int:
             os.waitpid(pid, 0)
         except ChildProcessError:
             pass
-        raise RuntimeError("dsh-pager did not exit before the PTY timeout")
+        raise RuntimeError(f"dsh-pager did not exit before the PTY timeout; tail={visible()[-500:]!r}")
     except Exception:
         try:
             os.kill(pid, signal.SIGKILL)

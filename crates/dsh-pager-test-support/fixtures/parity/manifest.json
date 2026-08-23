@@ -1,7 +1,20 @@
 {
   "format": 1,
   "source": "DSH-neutral M0/M1 contract",
-  "status": "fallback-baseline",
+  "status": "semantic-reference-v1",
+  "referenceMatrix": {
+    "runner": "dsh-pager-grok-ui::parity::ReferenceRunner",
+    "status": "semantic-reference-v1",
+    "sizes": [[40, 12], [60, 20], [80, 24], [100, 30], [120, 40], [160, 50]],
+    "states": [
+      "empty", "loading", "running", "streaming", "completed", "error",
+      "reconnecting", "modal", "picker", "queue-edit", "selection", "dashboard-peek"
+    ],
+    "inputs": [
+      "key-repeat", "modified-key", "mouse-wheel", "mouse-click", "mouse-drag",
+      "bracketed-paste", "resize-storm", "ctrl-c", "esc"
+    ]
+  },
   "scenarios": [
     { "name": "empty", "fixture": "empty.json", "terminal": [80, 24] },
     { "name": "user-assistant", "fixture": "user-assistant.json", "terminal": [80, 24] },

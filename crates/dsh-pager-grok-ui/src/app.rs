@@ -93,6 +93,7 @@ pub enum ShellAction {
     DashboardKey(KeyEvent),
     DashboardMouse(MouseEvent),
     DashboardPaste(String),
+    TranscriptMouse(MouseEvent),
     Resized(Rect),
     Redraw,
 }
@@ -303,7 +304,7 @@ impl AppShell {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => ShellAction::ScrollUp(3),
                     MouseEventKind::ScrollDown => ShellAction::ScrollDown(3),
-                    _ => ShellAction::None,
+                    _ => ShellAction::TranscriptMouse(mouse),
                 }
             }
             ShellEvent::Key(key) => self.dispatch_key(key, prompt_empty),
@@ -491,6 +492,21 @@ mod tests {
             shell.dispatch(ShellEvent::Key(ctrl_p), true),
             ShellAction::PromptKey(_)
         ));
+    }
+
+    #[test]
+    fn transcript_mouse_clicks_are_not_dropped_by_shell_dispatch() {
+        let mut shell = AppShell::default();
+        let action = shell.dispatch(
+            ShellEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 4,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            }),
+            true,
+        );
+        assert!(matches!(action, ShellAction::TranscriptMouse(_)));
     }
 
     #[test]

@@ -498,9 +498,9 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 | M5 prompt | 已完成（M5.6-M5.8 completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；外部进程真实 terminal handoff 与 mouse-selection golden 仍留在 M8/M9 | M5.7 real process handoff、M8 selection golden |
 | M6 picker/dashboard | 已完成（M6.6-M6.8 completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；picker 原有 load barrier 保留；真实双 session race/reference golden 仍留在 M9/M10 | M6.8 two-session PTY、M10 reference matrix |
 | M7 queue/interactions | 已完成（M7.7-M7.8 completion slice） | queue/interaction effect RPC errors 不再冒泡为未分类失败，统一映射 conflict/stale/timeout/unsupported/failed receipt；status 文案明确 retry/convergence，Dashboard jobs/status 与 queue/approval 行为测试已进入 Grok-derived surfaces；完整 reorder drag、复杂 question 表单和 reference matrix 仍待后续 | M7.8 behavior expansion、M10 reference parity |
-| M8 mouse/media | 未开始（主路径之外） | 当前 mouse 仅局部 picker 路径，媒体/selection parity 未完成 | geometry/selection/capability |
-| M9 lifecycle/performance | host 基础存在，UI scheduler 未闭合 | transport/loader/reconnect 部分存在，真实长时 soak 未完成 | generation、bounded scheduler、soak |
-| M10 parity/release | 未开始 | 目前只有 mock PTY 基线，不是 Grok reference matrix | reference runner、real backend、golden |
+| M8 mouse/media | 已完成（M8 completion slice） | `HitMap` 在 render-time 统一产出 entry/block/prompt 命中矩形；selection 使用 grapheme/display column，resize 清空旧 map；OSC52/system clipboard、OSC8 link、image placeholder 和 mouse fallback 都是 typed capability 路径；geometry/Unicode/clipboard/media tests 已闭合 | M11 删除旧 selection fallback，并继续扩充 Grok media golden |
+| M9 lifecycle/performance | 已完成（M9 completion slice） | runtime notification drain 每帧受 256 条预算约束并记录 scheduler stats；`BoundedScheduler`、`GenerationGuard`、指数退避/上限 reconnect policy、late-result 拒绝和 reader/terminal restore 已有单测与 mock lifecycle 证据 | M11 真实长时 soak 与生产指标采集 |
+| M10 parity/release | 已完成（M10 semantic/reference gate） | `ReferenceRunner` 固定 40×12 至 160×50 六档尺寸、12 状态、9 输入（648 cases）并导出 rows/rect/focus/cursor/hit map；manifest 与 Rust/Python 校验器、mock PTY full path、source/protocol checks 已接入 `scripts/e2e.sh` | M11 fallback removal；真实 Harness 需在具备服务/凭据的环境重复同一 runner |
 | M11 cleanup/other harness | 未开始 | fallback 和重复模块仍保留 | 删除旧 UI、稳定 host trait |
 
 ### 6.2 每个切片的统一工作协议
@@ -842,6 +842,11 @@ control plane，处理异步切换的身份安全。
 **出口**：鼠标和选择不是附加功能，而是与 Grok 同源的 L4 几何/状态机；所有
 高级能力都有可验证的 capability fallback。
 
+**本批次证据（2026-08-23）**：`dsh-pager-grok-ui::geometry` 与
+`selection` 已进入默认 runtime；render-time `HitMap` 同时供鼠标、link span
+和 copy 使用，`media`/`clipboard` 返回显式 fallback；测试覆盖 CJK、emoji、
+组合字符、resize invalidation、OSC52 不可用和 image capability 缺失。
+
 ### M9：通知、重连、并发、取消和性能
 
 **目标**：在 UI parity 之上保证真实 Harness 长时间运行不丢事件、不串 session、
@@ -875,6 +880,12 @@ control plane，处理异步切换的身份安全。
 **出口**：Grok shell 的异步视觉状态与 DSH 的连接/代际状态稳定收敛，长时间
 运行不需要重启 pager。
 
+**本批次证据（2026-08-23）**：runtime 使用 256 条/帧 notification budget，
+`BoundedScheduler` 保持队列上限并统计 backlog，`GenerationGuard` 和
+`ReconnectState` 覆盖 stale/duplicate/backoff 边界；mock lifecycle、reader
+退出和 terminal restore 纳入完整 E2E 入口。真实长时 soak 指标仍由 M11 在生产
+Harness 环境采集。
+
 ### M10：Grok parity、真实后端和发布验收
 
 **目标**：把“实现了很多功能”转成可重复、可审计的 parity 证据。
@@ -907,6 +918,12 @@ control plane，处理异步切换的身份安全。
 
 **出口**：能够向评审提供可复现的 Grok reference 对照证据，而不是口头承诺
 “样式已经一样”。
+
+**本批次证据（2026-08-23）**：`ReferenceRunner` 和 parity manifest 固定六档
+尺寸、12 状态、9 输入共 648 个 semantic cases，输出稳定文字、rect、focus、
+cursor、hit map；`scripts/parity-matrix.py`、Rust fixture validator 和
+`scripts/e2e.sh` 形成可重放门禁。真实 DeepSeek Harness 不可用时必须显式记录
+unavailable，不以 mock 结果替代真实后端声明。
 
 ### M11：清理、稳定化和其他 Harness 复用
 

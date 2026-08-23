@@ -5,12 +5,14 @@
 //! be reused by unit, binary, and PTY layers without process-global state.
 
 mod fixture;
+mod parity;
 mod process;
 mod sandbox;
 mod scenario;
 mod screen;
 
 pub use fixture::{read_jsonl, write_jsonl, JsonlFixture};
+pub use parity::{ParityManifest, ParityReport, ParityScenario, ReferenceMatrix};
 pub use process::{run_with_timeout, CommandOutput, ProcessError};
 pub use sandbox::TestSandbox;
 pub use scenario::{Scenario, ScenarioStep};

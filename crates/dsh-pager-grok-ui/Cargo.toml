@@ -12,11 +12,13 @@ xai-ratatui-textarea = { package = "dsh-grok-textarea", path = "../dsh-grok-text
 dsh-pager = { path = "../dsh-pager" }
 dsh-pager-protocol = { path = "../dsh-pager-protocol" }
 dsh-pager-render = { path = "../dsh-pager-render" }
+dsh-grok-inline = { path = "../dsh-grok-inline" }
 ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 textwrap = { workspace = true }
 unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4"

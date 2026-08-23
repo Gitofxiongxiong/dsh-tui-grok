@@ -16,8 +16,13 @@ pub mod theme;
 pub mod views;
 
 pub mod effects;
+pub mod geometry;
 pub mod host_adapter;
+pub mod media;
+pub mod parity;
 pub mod runtime;
+pub mod scheduler;
+pub mod selection;
 
 pub use app::{
     AppShell, KeyOwner, Overlay, REPLACEMENT_MAP, ReplacementEntry, ShellAction, ShellEvent,
@@ -28,4 +33,9 @@ pub use effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectReceipt, UiEffectSink,
     UiEffectStatus, UiIntent, compile_intent,
 };
+pub use geometry::{GeometryLine, HitMap, HitRegion, HitTarget, LinkTarget};
 pub use runtime::run_interactive;
+pub use scheduler::{
+    BoundedScheduler, GenerationGuard, ReconnectPolicy, ReconnectState, SchedulerStats,
+};
+pub use selection::{ResolvedSelection, SelectionModel, SelectionPoint};

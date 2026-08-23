@@ -254,6 +254,7 @@ name = "dsh-pager-grok-ui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "dsh-grok-inline",
  "dsh-grok-textarea",
  "dsh-pager",
  "dsh-pager-protocol",
@@ -264,6 +265,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "textwrap",
+ "unicode-segmentation",
  "unicode-width 0.2.0",
 ]
 
