@@ -18,6 +18,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AppShell, ShellLayout};
+use crate::appearance::GrokAppearanceSnapshot;
 use crate::input::{PromptViewport, key::KeyShortcut};
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
@@ -72,12 +73,9 @@ impl AgentViewLayout {
             shortcuts_height,
             compact,
         } = params;
-        let outer_hpad = if compact { 1 } else { 2 };
-        let outer_vpad = if compact || area.height <= SHORT_TERMINAL_ROWS {
-            0
-        } else {
-            1
-        };
+        let appearance = GrokAppearanceSnapshot::for_area(area, compact);
+        let outer_hpad = appearance.outer_hpad;
+        let outer_vpad = appearance.outer_vpad;
         let inner = inset(area, outer_hpad, outer_vpad);
         if inner.width == 0 || inner.height == 0 {
             return Self {
@@ -107,7 +105,7 @@ impl AgentViewLayout {
         if top_gap > 0 {
             constraints.push(Constraint::Length(top_gap));
         }
-        constraints.push(Constraint::Min(SCROLLBACK_MIN_ROWS));
+        constraints.push(Constraint::Min(appearance.scrollback_min_rows));
         if turn_status_height > 0 {
             constraints.push(Constraint::Length(1));
             constraints.push(Constraint::Length(turn_status_height));
@@ -293,9 +291,9 @@ impl AgentView {
     ) -> Option<(u16, u16)> {
         let bg = theme.bg_base;
         let border = if state.focused {
-            theme.text_primary
+            theme.prompt_border_active
         } else {
-            theme.gray_dim
+            theme.prompt_border
         };
         buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
 
@@ -322,7 +320,12 @@ impl AgentView {
                 let max_width = area.width.saturating_sub(6) as usize;
                 let label = fit_text(&label, max_width);
                 let x = area.right().saturating_sub(3 + label.width() as u16);
-                buf.set_string(x, area.y, label, Style::default().fg(theme.gray).bg(bg));
+                buf.set_string(
+                    x,
+                    area.y,
+                    label,
+                    Style::default().fg(theme.accent_model).bg(bg),
+                );
             }
         }
 
@@ -378,7 +381,7 @@ impl AgentView {
                 content.x,
                 divider_y,
                 left,
-                Style::default().fg(theme.gray).bg(bg),
+                Style::default().fg(theme.accent_model).bg(bg),
             );
             if state.viewport.lines.len() > 1 {
                 let right = " multiline ";

@@ -24,3 +24,31 @@ auditable instead of being misreported as upstream drift.
 The textarea is reused through the Cargo alias `xai-ratatui-textarea` and is
 implemented by the workspace's `dsh-grok-textarea` crate. DSH-specific shims
 are outside this table and live in `src/`.
+
+## Renderer closure inventory
+
+The following files are the next vendor tranche. They are recorded before
+copying so the source boundary is explicit and the pure renderer/interaction
+closure can be reviewed separately from Grok runtime code. `planned` means the
+file is intentionally not yet in the local vendor tree; it must not be treated
+as a completed production capability.
+
+| Capability | Upstream path | Upstream SHA-256 | DSH seam | Status |
+|---|---|---|---|---|
+| Theme | `crates/codegen/xai-grok-pager-render/src/theme/mod.rs` | `c474aafdfa8085b18e030baa2a73629cde6d26201f2493fa89a4a9c71c1f877f` | `dsh_pager_render::Theme` | integrated projection |
+| Theme constructors | `crates/codegen/xai-grok-pager-render/src/theme/tokyonight.rs` | `ae006d433f652c9e6d6533e38ba07ac49ff07770a63a9510a7dc8b1ae3c09f28` | `Theme::current` | planned |
+| Appearance | `crates/codegen/xai-grok-pager-render/src/appearance/config.rs` | `ef27fec032dda66aa0cf882c8bd005e5d9f368d08dfbdc4a08812af539cba744` | `GrokAppearanceSnapshot` | integrated projection |
+| Glyphs | `crates/codegen/xai-grok-pager-render/src/glyphs.rs` | `4662e6e4d2870dc22be3b7763b0f623969a80432a24dad37179c6eafc1e3c3e1` | `src/glyphs.rs` | planned |
+| PromptWidget | `crates/codegen/xai-grok-pager/src/views/prompt_widget/mod.rs` | `f89c9dda0fe244dd4ab2123601cedd0fe9e2722eee2533d5a8c9c14cd4ae23cf` | `PromptEditor` + `UiIntent` | planned |
+| Scrollback render | `crates/codegen/xai-grok-pager/src/scrollback/render.rs` | `29fe2d148ec0feaed5acb08c590d7f4ad3cd852ec178832f4daaaf90c0e8a97f` | `RichTranscript` / block DTO | planned |
+| Scrollback layout | `crates/codegen/xai-grok-pager/src/scrollback/layout.rs` | `863ad75266d7e991b299e41bc872c648ef54dba2bb023b2e7e2a01605c630c7c` | `DshRenderContent` | planned |
+| Markdown blocks | `crates/codegen/xai-grok-pager/src/scrollback/blocks/markdown_content.rs` | `cc3d18620be6756344bf69f093bb5d05b825e27a47d737a4a8e915a03c9aa5ad` | `DshRenderBlock::Markdown` | planned |
+| Diff blocks | `crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/edit.rs` | `31f7f39a277a15151cf75d43258f6fb9967ea44025adb7db1e7dee73185f7371` | `DshRenderBlock::Diff` | planned |
+| File Search | `crates/codegen/xai-grok-pager/src/views/file_search/mod.rs` | `55b60c8f7c943e93cf2c87bd56a04d6e3337b65b39053fd3fa9aea83635f2307` | typed search snapshot/effect | planned |
+| Suggestion | `crates/codegen/xai-grok-pager/src/views/suggestion_controller/mod.rs` | `f18ea878e39605513c90fd65a783e7b0b69dd0c613354e81f02054257ff98e4c` | `SuggestionSnapshot` | planned |
+| Prompt images | `crates/codegen/xai-grok-pager-render/src/prompt_images.rs` | source available in fixed mirror | `MediaSnapshot` + attachment effect | planned |
+| Workspace | `crates/codegen/xai-grok-pager/src/views/dashboard/render.rs` | `58ee1ef74da687d774ca738c8e52f5569e9586af3e0ffa61288b057449f015db` | `WorkspaceSnapshot` | planned |
+| Tasks | `crates/codegen/xai-grok-pager/src/views/tasks_pane.rs` | `f609d1ef9a73b3eeee5a4b208a49b1568d800fb4b3dfd7a14a0be229588802ac` | `AgentSnapshot` | planned |
+| Subagents | `crates/codegen/xai-grok-pager/src/views/subagent_catalog_pane.rs` | `cfed1c7f772534cd97894057489195c0590a3b34a525fe045b7e4c1a5f3551d4` | `AgentSnapshot` | planned |
+| Agent status | `crates/codegen/xai-grok-pager/src/views/agent_status.rs` | `0721f13b99bd3def23c92976daf674de689ef4630c70fa90ff13554f4727506d` | status/task DTO | planned |
+| Turn status | `crates/codegen/xai-grok-pager/src/views/turn_status.rs` | `06f1826cf8455252901675aa838e91eb3d1ccf56fe608060117e14877bd4e818` | streaming/interrupt DTO | planned |

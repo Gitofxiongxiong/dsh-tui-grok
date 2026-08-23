@@ -157,10 +157,12 @@ pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: The
         theme.gray_bright
     } else if text.starts_with('✗') || text.starts_with("[unsupported") {
         theme.accent_user
-    } else if text.starts_with("diff ") || text.starts_with('+') {
-        theme.text_primary
+    } else if text.starts_with("diff ") {
+        theme.diff_equal_fg
+    } else if text.starts_with('+') {
+        theme.diff_insert_fg
     } else if text.starts_with('-') {
-        theme.accent_user
+        theme.diff_delete_fg
     } else {
         color_for_kind(kind, theme)
     };
@@ -215,7 +217,10 @@ fn render_block(
 ) {
     let prefix = " ".repeat(indent.saturating_mul(2));
     match block {
-        DshRenderBlock::Markdown { text } | DshRenderBlock::Plain { text } => {
+        DshRenderBlock::Markdown { text } => {
+            render_markdown(lines, text, theme, &prefix);
+        }
+        DshRenderBlock::Plain { text } => {
             push_plain_lines(
                 lines,
                 text,
@@ -244,7 +249,7 @@ fn render_block(
                 .unwrap_or("image");
             lines.push(Line::from(Span::styled(
                 format!("{prefix}[image: {label}]"),
-                Style::default().fg(theme.accent_user),
+                Style::default().fg(theme.accent_assistant),
             )));
         }
         DshRenderBlock::ToolCall {
@@ -320,6 +325,65 @@ fn render_block(
     }
 }
 
+/// Small, deterministic Markdown projection used until the full Grok AST
+/// renderer is vendored. It preserves the source text while applying the same
+/// semantic roles for headings, fenced code, task markers, and links.
+fn render_markdown(lines: &mut Vec<Line<'static>>, text: &str, theme: Theme, prefix: &str) {
+    let mut in_code = false;
+    for source in text.split('\n') {
+        let trimmed = source.trim_start();
+        let (style, content) = if trimmed.starts_with("```") {
+            in_code = !in_code;
+            (
+                Style::default().fg(theme.md_code).bg(theme.md_code_bg),
+                source,
+            )
+        } else if in_code {
+            (
+                Style::default().fg(theme.md_text).bg(theme.md_code_bg),
+                source,
+            )
+        } else if trimmed.starts_with("# ") {
+            (
+                Style::default()
+                    .fg(theme.md_heading_h1)
+                    .add_modifier(theme.md_heading_h1_mod),
+                source,
+            )
+        } else if trimmed.starts_with("## ") {
+            (
+                Style::default()
+                    .fg(theme.md_heading_h2)
+                    .add_modifier(theme.md_heading_h2_mod),
+                source,
+            )
+        } else if trimmed.starts_with("### ") {
+            (
+                Style::default()
+                    .fg(theme.md_heading_h3)
+                    .add_modifier(theme.md_heading_h3_mod),
+                source,
+            )
+        } else if trimmed.starts_with("- [x]") || trimmed.starts_with("* [x]") {
+            (Style::default().fg(theme.md_task_checked), source)
+        } else if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") {
+            (Style::default().fg(theme.md_task_unchecked), source)
+        } else if source.contains('`') {
+            (Style::default().fg(theme.md_code), source)
+        } else if source.contains("http://") || source.contains("https://") {
+            (Style::default().fg(theme.link_fg), source)
+        } else if source.trim().is_empty() {
+            (Style::default().fg(theme.md_muted), source)
+        } else {
+            (Style::default().fg(theme.md_text), source)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{content}"),
+            style,
+        )));
+    }
+}
+
 fn render_diff(
     lines: &mut Vec<Line<'static>>,
     path: Option<&str>,
@@ -340,13 +404,17 @@ fn render_diff(
     for line in old_text.lines() {
         lines.push(Line::from(Span::styled(
             format!("{prefix}- {line}"),
-            Style::default().fg(theme.accent_user),
+            Style::default()
+                .fg(theme.diff_delete_fg)
+                .bg(theme.diff_delete_bg),
         )));
     }
     for line in new_text.lines() {
         lines.push(Line::from(Span::styled(
             format!("{prefix}+ {line}"),
-            Style::default().fg(theme.text_primary),
+            Style::default()
+                .fg(theme.diff_insert_fg)
+                .bg(theme.diff_insert_bg),
         )));
     }
 }
@@ -360,10 +428,10 @@ fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str, style: Style, pr
 fn color_for_kind(kind: DshRenderKind, theme: Theme) -> ratatui::style::Color {
     match kind {
         DshRenderKind::User => theme.accent_user,
-        DshRenderKind::Assistant => theme.text_primary,
-        DshRenderKind::Thinking => theme.fuzzy_accent,
-        DshRenderKind::ToolCall | DshRenderKind::ToolResult => theme.gray_bright,
-        DshRenderKind::Error => theme.accent_user,
+        DshRenderKind::Assistant => theme.accent_assistant,
+        DshRenderKind::Thinking => theme.accent_thinking,
+        DshRenderKind::ToolCall | DshRenderKind::ToolResult => theme.accent_tool,
+        DshRenderKind::Error => theme.accent_error,
         _ => theme.gray,
     }
 }
@@ -547,5 +615,26 @@ mod tests {
                 "missing {expected} in {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn markdown_and_diff_use_dedicated_theme_roles() {
+        let theme = *Theme::current();
+        let mut lines = Vec::new();
+        render_markdown(
+            &mut lines,
+            "# heading\n```rust\nlet x = 1;\n```\nhttps://example.com",
+            theme,
+            "",
+        );
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.md_heading_h1));
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.md_code));
+        assert_eq!(lines[2].spans[0].style.bg, Some(theme.md_code_bg));
+        assert_eq!(lines[4].spans[0].style.fg, Some(theme.link_fg));
+
+        let mut diff = Vec::new();
+        render_diff(&mut diff, None, "old", "new", theme, 0);
+        assert_eq!(diff[0].spans[0].style.bg, Some(theme.diff_delete_bg));
+        assert_eq!(diff[1].spans[0].style.bg, Some(theme.diff_insert_bg));
     }
 }

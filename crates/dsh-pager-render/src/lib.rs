@@ -12,22 +12,85 @@ use crossterm::terminal::{
 use dsh_grok_inline::{LinkSpan, Terminal as InlineTerminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use ratatui::Frame;
 
 /// Semantic palette shared by every Grok-derived view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
+    // Background roles.
     pub accent_user: Color,
     pub bg_base: Color,
     pub bg_highlight: Color,
     pub bg_hover: Color,
     pub bg_light: Color,
+    pub bg_dark: Color,
+    pub bg_terminal: Color,
     pub bg_visual: Color,
+
+    // Agent and lifecycle accents.
+    pub accent_assistant: Color,
+    pub accent_thinking: Color,
+    pub accent_tool: Color,
+    pub accent_system: Color,
+    pub accent_error: Color,
+    pub accent_success: Color,
+    pub accent_running: Color,
+    pub accent_skill: Color,
+
+    // Semantic text roles.
     pub gray: Color,
     pub gray_bright: Color,
     pub gray_dim: Color,
+    pub command: Color,
+    pub path: Color,
+    pub running: Color,
+    pub warning: Color,
     pub fuzzy_accent: Color,
+    pub accent_plan: Color,
+    pub accent_verify: Color,
+    pub accent_remember: Color,
+    pub selection_border: Color,
+    pub hover_border: Color,
+    pub prompt_border: Color,
+    pub prompt_border_active: Color,
+    pub accent_model: Color,
+    pub scrollbar_bg: Color,
+    pub scrollbar_fg: Color,
+
+    // Diff roles.
+    pub diff_delete_bg: Color,
+    pub diff_delete_fg: Color,
+    pub diff_insert_bg: Color,
+    pub diff_insert_fg: Color,
+    pub diff_equal_fg: Color,
+    pub diff_gutter_fg: Color,
+
+    // Prompt image/attachment roles.
+    pub paste_bg: Color,
+    pub paste_fg: Color,
+    pub paste_dim: Color,
+
+    // Markdown roles. Modifier fields preserve the upstream style contract.
+    pub md_heading_h1: Color,
+    pub md_heading_h1_mod: Modifier,
+    pub md_heading_h2: Color,
+    pub md_heading_h2_mod: Modifier,
+    pub md_heading_h3: Color,
+    pub md_heading_h3_mod: Modifier,
+    pub md_heading_h4: Color,
+    pub md_heading_h4_mod: Modifier,
+    pub md_heading_h5: Color,
+    pub md_heading_h5_mod: Modifier,
+    pub md_heading_h6: Color,
+    pub md_heading_h6_mod: Modifier,
+    pub md_code: Color,
+    pub md_task_checked: Color,
+    pub md_task_unchecked: Color,
+    pub md_muted: Color,
+    pub md_code_bg: Color,
+    pub md_text: Color,
+    pub link_fg: Color,
     pub text_secondary: Color,
     pub text_primary: Color,
 }
@@ -35,18 +98,70 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            accent_user: Color::Rgb(120, 180, 255),
-            bg_base: Color::Rgb(17, 19, 24),
-            bg_highlight: Color::Rgb(30, 34, 43),
-            bg_hover: Color::Rgb(38, 43, 54),
-            bg_light: Color::Rgb(27, 31, 40),
-            bg_visual: Color::Rgb(45, 52, 68),
-            gray: Color::Rgb(160, 168, 182),
-            gray_bright: Color::Rgb(218, 224, 235),
-            gray_dim: Color::Rgb(93, 101, 116),
-            fuzzy_accent: Color::Rgb(120, 190, 255),
-            text_secondary: Color::Rgb(223, 229, 240),
-            text_primary: Color::Rgb(235, 239, 247),
+            bg_base: Color::Rgb(20, 20, 20),
+            bg_light: Color::Rgb(36, 36, 36),
+            bg_dark: Color::Rgb(28, 28, 28),
+            bg_highlight: Color::Rgb(36, 36, 36),
+            bg_hover: Color::Rgb(44, 44, 44),
+            bg_terminal: Color::Rgb(10, 10, 10),
+            accent_user: Color::Rgb(200, 200, 200),
+            accent_assistant: Color::Rgb(187, 154, 247),
+            accent_thinking: Color::Rgb(187, 154, 247),
+            accent_tool: Color::Rgb(120, 120, 120),
+            accent_system: Color::Rgb(122, 162, 247),
+            accent_error: Color::Rgb(247, 118, 142),
+            accent_success: Color::Rgb(158, 206, 106),
+            accent_running: Color::Rgb(187, 154, 247),
+            accent_skill: Color::Rgb(122, 162, 247),
+            text_primary: Color::Rgb(225, 225, 225),
+            text_secondary: Color::Rgb(200, 200, 200),
+            gray_dim: Color::Rgb(88, 88, 88),
+            gray: Color::Rgb(108, 108, 108),
+            gray_bright: Color::Rgb(120, 120, 120),
+            command: Color::Rgb(224, 175, 104),
+            path: Color::Rgb(255, 158, 100),
+            running: Color::Rgb(125, 207, 255),
+            warning: Color::Rgb(224, 175, 104),
+            fuzzy_accent: Color::Rgb(122, 162, 247),
+            accent_plan: Color::Rgb(255, 219, 141),
+            accent_verify: Color::Rgb(187, 154, 247),
+            accent_remember: Color::Rgb(139, 195, 74),
+            selection_border: Color::Rgb(60, 60, 65),
+            hover_border: Color::Rgb(30, 30, 34),
+            prompt_border: Color::Rgb(50, 50, 55),
+            prompt_border_active: Color::Rgb(80, 80, 88),
+            accent_model: Color::Rgb(26, 188, 156),
+            scrollbar_bg: Color::Rgb(17, 17, 17),
+            scrollbar_fg: Color::Rgb(36, 36, 36),
+            diff_delete_bg: Color::Rgb(66, 14, 20),
+            diff_delete_fg: Color::Rgb(247, 118, 142),
+            diff_insert_bg: Color::Rgb(6, 56, 6),
+            diff_insert_fg: Color::Rgb(158, 206, 106),
+            diff_equal_fg: Color::Rgb(108, 108, 108),
+            diff_gutter_fg: Color::Rgb(108, 108, 108),
+            bg_visual: Color::Rgb(54, 54, 54),
+            paste_bg: Color::Rgb(17, 17, 17),
+            paste_fg: Color::Rgb(200, 200, 200),
+            paste_dim: Color::Rgb(65, 65, 65),
+            md_heading_h1: Color::Rgb(26, 188, 156),
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: Color::Rgb(122, 162, 247),
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: Color::Rgb(157, 124, 216),
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: Color::Rgb(120, 120, 120),
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: Color::Rgb(108, 108, 108),
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: Color::Rgb(90, 90, 90),
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: Color::Rgb(58, 149, 171),
+            md_task_checked: Color::Rgb(158, 206, 106),
+            md_task_unchecked: Color::Rgb(200, 200, 200),
+            md_muted: Color::Rgb(108, 108, 108),
+            md_code_bg: Color::Rgb(28, 28, 28),
+            md_text: Color::Rgb(200, 200, 200),
+            link_fg: Color::Rgb(122, 166, 218),
         }
     }
 }
@@ -336,5 +451,14 @@ mod tests {
     fn terminal_capabilities_keep_cell_diff_available_for_fallback_rendering() {
         let capabilities = super::TerminalCapabilities::probe();
         assert!(capabilities.cell_diff);
+    }
+
+    #[test]
+    fn grok_theme_exposes_full_renderer_role_closure() {
+        let theme = super::Theme::default();
+        assert_ne!(theme.prompt_border, theme.prompt_border_active);
+        assert_ne!(theme.diff_delete_fg, theme.diff_insert_fg);
+        assert_ne!(theme.md_code, theme.md_text);
+        assert!(theme.md_heading_h1_mod.contains(super::Modifier::BOLD));
     }
 }
