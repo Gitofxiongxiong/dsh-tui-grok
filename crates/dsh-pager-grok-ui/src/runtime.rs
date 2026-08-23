@@ -53,6 +53,7 @@ use crate::theme::Theme;
 use crate::views::{
     agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact},
     dashboard::{DashboardPeek, render_dashboard_content},
+    file_search::controller::FileSearchController,
     interaction::{render_interaction_content, response_for},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
@@ -68,6 +69,7 @@ use crate::views::{
     prompt_widget::GrokPromptRenderer,
     queue::{QueueRenderState, moved_selection, render_queue_content},
     status_bar::StatusBar,
+    suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
     transcript::RichTranscript,
 };
@@ -255,11 +257,8 @@ struct UiState {
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
     file_search_editor: PromptEditor,
-    file_search_selected_id: Option<String>,
-    file_search_revision: u64,
-    file_search_result: Option<FileSearchSnapshot>,
-    suggestion_selected: usize,
-    suggestion_dismissed: bool,
+    file_search: FileSearchController,
+    suggestions: SuggestionController,
     image_selected: usize,
     media_preview: Option<MediaPreviewBuffer>,
     agent_task_selected: usize,
@@ -337,18 +336,19 @@ impl UiState {
             return;
         }
         if let UiEffect::FileSearchQuery { revision, .. } = &completion.effect {
-            if *revision != self.file_search_revision {
+            if *revision != self.file_search.revision() {
                 self.status = Some(format!(
                     "Ignored stale File search completion for revision {revision}"
                 ));
                 return;
             }
             if let Some(value) = completion.file_references.clone() {
-                self.file_search_result = Some(file_search_snapshot_from_effect(
+                let result = file_search_snapshot_from_effect(
                     self.file_search_editor.text(),
                     *revision,
                     value,
-                ));
+                );
+                let _ = self.file_search.apply_result(result);
             }
         }
         if let UiEffect::PreviewMedia { attachment_id, .. } = &completion.effect
@@ -368,6 +368,16 @@ impl UiState {
             && completion.receipt.status == UiEffectStatus::Accepted
         {
             self.interaction_pending = None;
+        }
+        if let UiEffect::SubmitPrompt { text, .. } = &completion.effect
+            && completion.receipt.status == UiEffectStatus::Accepted
+            && self.prompt.text() == text
+        {
+            let text = text.clone();
+            self.record_prompt_history(&text);
+            self.prompt.reset();
+            self.suggestions.reset();
+            self.status = Some(prompt_admission_message(&completion.receipt.status));
         }
         if completion.receipt.status != UiEffectStatus::Accepted
             || matches!(
@@ -402,20 +412,9 @@ impl UiState {
         // latest stable-ID result into this frame's single render snapshot.
         snapshot.agent.subagents = self.agent_subagents.clone();
         self.reconcile_snapshot(&snapshot);
-        let suggestions_visible = !self.suggestion_dismissed
-            && snapshot.capabilities.prompt_suggestions
-            && snapshot.suggestions.status == FeatureStatus::Available
-            && self.prompt.text().starts_with('/')
-            && snapshot
-                .suggestions
-                .items
-                .iter()
-                .any(|item| item.starts_with(self.prompt.text()));
-        let suggestion_rows = if suggestions_visible {
-            snapshot.suggestions.items.len().clamp(1, 3) as u16
-        } else {
-            0
-        };
+        let suggestion_rows = self
+            .suggestion_items(&snapshot)
+            .map_or(0, |items| items.len().clamp(1, 3) as u16);
         let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
@@ -820,7 +819,7 @@ impl UiState {
     }
 
     fn apply_file_search_result(&self, snapshot: &mut GrokHostSnapshot) {
-        let Some(result) = self.file_search_result.as_ref() else {
+        let Some(result) = self.file_search.snapshot() else {
             return;
         };
         if result.revision >= snapshot.file_search.revision
@@ -1159,7 +1158,7 @@ impl UiState {
                 content.content,
                 &snapshot.file_search,
                 self.file_search_editor.text(),
-                self.file_search_selected_id.as_deref(),
+                self.file_search.selected_id(),
                 theme,
             );
         }
@@ -1245,7 +1244,11 @@ impl UiState {
         }
         let buf = frame.buffer_mut();
         for (index, item) in items.iter().take(height as usize).enumerate() {
-            let selected = index == self.suggestion_selected.min(items.len().saturating_sub(1));
+            let selected = index
+                == self
+                    .suggestions
+                    .selected()
+                    .min(items.len().saturating_sub(1));
             let marker = if selected { "▸" } else { " " };
             let line = format!("{marker} {item}");
             let style = if selected {
@@ -1267,22 +1270,11 @@ impl UiState {
     }
 
     fn suggestion_items<'a>(&self, snapshot: &'a GrokHostSnapshot) -> Option<Vec<&'a str>> {
-        if self.suggestion_dismissed
-            || !snapshot.capabilities.prompt_suggestions
-            || snapshot.suggestions.status != FeatureStatus::Available
-            || !self.prompt.text().starts_with('/')
-        {
+        if !snapshot.capabilities.prompt_suggestions {
             return None;
         }
-        let prefix = self.prompt.text();
-        let items = snapshot
-            .suggestions
-            .items
-            .iter()
-            .filter(|item| item.starts_with(prefix))
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        (!items.is_empty()).then_some(items)
+        self.suggestions
+            .visible_items(&snapshot.suggestions, self.prompt.text())
     }
 
     fn dispatch_event(
@@ -1372,9 +1364,7 @@ impl UiState {
             }
             ShellAction::OpenFileSearch => {
                 self.file_search_editor.reset();
-                self.file_search_selected_id = None;
-                self.file_search_revision = 0;
-                self.file_search_result = None;
+                self.file_search.reset();
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
@@ -1452,11 +1442,12 @@ impl UiState {
                     Some(transport.control_plane()),
                 );
                 if self.suggestion_items(&snapshot).is_some() {
-                    self.suggestion_dismissed = true;
+                    self.suggestions.dismiss();
                     self.status = None;
                     return Ok(false);
                 }
                 self.prompt.reset();
+                self.suggestions.reset();
                 self.status = Some("Draft cleared".into());
                 Ok(false)
             }
@@ -1505,8 +1496,7 @@ impl UiState {
                     }
                     LineEditOutcome::TextChanged => {
                         self.prompt_history_index = None;
-                        self.suggestion_selected = 0;
-                        self.suggestion_dismissed = false;
+                        self.suggestions.text_changed();
                         self.status = None;
                     }
                 }
@@ -1529,8 +1519,7 @@ impl UiState {
                 if !text.is_empty() {
                     let _ = self.prompt.insert_paste(&text);
                     self.prompt_history_index = None;
-                    self.suggestion_selected = 0;
-                    self.suggestion_dismissed = false;
+                    self.suggestions.text_changed();
                     self.status = None;
                 }
                 Ok(false)
@@ -1572,7 +1561,7 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::FileSearchMouse(mouse) => {
-                self.handle_file_search_mouse(mouse, session);
+                self.handle_file_search_mouse(mouse);
                 Ok(false)
             }
             ShellAction::FileSearchPaste(text) => {
@@ -1708,16 +1697,14 @@ impl UiState {
             KeyCode::Esc => {
                 self.shell.close_overlay();
                 self.file_search_editor.reset();
-                self.file_search_selected_id = None;
-                self.file_search_revision = 0;
-                self.file_search_result = None;
+                self.file_search.reset();
                 self.status = Some("File search closed".into());
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.move_file_search_selection(-1, session);
+                self.move_file_search_selection(-1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.move_file_search_selection(1, session);
+                self.move_file_search_selection(1);
             }
             KeyCode::Enter => {
                 let mut snapshot = GrokHostSnapshot::from_session_with_control_plane(
@@ -1725,10 +1712,11 @@ impl UiState {
                     Some(transport.control_plane()),
                 );
                 self.apply_file_search_result(&mut snapshot);
-                if let Some(row) =
-                    snapshot.file_search.rows.iter().find(|row| {
-                        Some(row.id.as_str()) == self.file_search_selected_id.as_deref()
-                    })
+                if let Some(row) = snapshot
+                    .file_search
+                    .rows
+                    .iter()
+                    .find(|row| Some(row.id.as_str()) == self.file_search.selected_id())
                 {
                     let mention = format_file_reference(&row.path);
                     self.prompt.insert_paste(&mention);
@@ -1749,7 +1737,6 @@ impl UiState {
                     self.file_search_editor.handle_key(&key),
                     LineEditOutcome::Unhandled
                 ) {
-                    self.file_search_selected_id = None;
                     self.request_file_search(transport, session)?;
                 }
             }
@@ -1762,70 +1749,29 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &SessionState,
     ) -> PagerResult<()> {
-        self.file_search_revision = self.file_search_revision.saturating_add(1);
         let query = self.file_search_editor.text().to_string();
+        let revision = self.file_search.begin_query(&query);
         let context = UiContext::for_operation(
             session,
-            DshRequestId::new(format!("file-search-{}", self.file_search_revision)),
+            DshRequestId::new(format!("file-search-{revision}")),
         );
         let receipt = self.submit_effect(
             transport,
-            UiIntent::FileSearchQuery {
-                query,
-                revision: self.file_search_revision,
-            },
+            UiIntent::FileSearchQuery { query, revision },
             &context,
         )?;
-        if matches!(receipt.status, UiEffectStatus::Pending) {
-            self.file_search_result = Some(FileSearchSnapshot {
-                status: FeatureStatus::Pending,
-                query: self.file_search_editor.text().to_string(),
-                revision: self.file_search_revision,
-                preview_status: FeatureStatus::Pending,
-                selected_id: None,
-                rows: Vec::new(),
-                diagnostic: None,
-            });
-        }
         self.status = Some(receipt_status_message(&receipt, "File search"));
         Ok(())
     }
 
-    fn move_file_search_selection(&mut self, delta: isize, session: &SessionState) {
-        let mut snapshot = GrokHostSnapshot::from_session_with_control_plane(session, None);
-        self.apply_file_search_result(&mut snapshot);
-        if snapshot.file_search.rows.is_empty() {
-            return;
-        }
-        let current = self
-            .file_search_selected_id
-            .as_deref()
-            .and_then(|id| {
-                snapshot
-                    .file_search
-                    .rows
-                    .iter()
-                    .position(|row| row.id == id)
-            })
-            .unwrap_or(0);
-        let next = if delta < 0 {
-            current.saturating_sub(delta.unsigned_abs())
-        } else {
-            current
-                .saturating_add(delta as usize)
-                .min(snapshot.file_search.rows.len().saturating_sub(1))
-        };
-        self.file_search_selected_id = snapshot
-            .file_search
-            .rows
-            .get(next)
-            .map(|row| row.id.clone());
+    fn move_file_search_selection(&mut self, delta: isize) {
+        self.file_search.move_selection(delta);
     }
 
-    fn handle_file_search_mouse(&mut self, mouse: MouseEvent, session: &SessionState) {
+    fn handle_file_search_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.move_file_search_selection(-1, session),
-            MouseEventKind::ScrollDown => self.move_file_search_selection(1, session),
+            MouseEventKind::ScrollUp => self.move_file_search_selection(-1),
+            MouseEventKind::ScrollDown => self.move_file_search_selection(1),
             _ => {}
         }
     }
@@ -2000,33 +1946,24 @@ impl UiState {
         snapshot: &GrokHostSnapshot,
     ) -> bool {
         use crossterm::event::KeyModifiers;
-        if let Some(items) = self.suggestion_items(snapshot) {
-            match key.code {
-                KeyCode::Up => {
-                    self.suggestion_selected = self.suggestion_selected.saturating_sub(1);
-                    return true;
+        match self
+            .suggestions
+            .handle_key(key.code, &snapshot.suggestions, self.prompt.text())
+        {
+            SuggestionOutcome::Accepted => {
+                let accepted = self
+                    .suggestions
+                    .accepted_item(&snapshot.suggestions, self.prompt.text())
+                    .map(str::to_string);
+                if let Some(accepted) = accepted {
+                    let _ = self.prompt.replace_text(&accepted);
+                    self.suggestions.dismiss();
+                    self.status = None;
                 }
-                KeyCode::Down => {
-                    self.suggestion_selected = self
-                        .suggestion_selected
-                        .saturating_add(1)
-                        .min(items.len().saturating_sub(1));
-                    return true;
-                }
-                KeyCode::Tab => {
-                    if let Some(item) = items.get(self.suggestion_selected) {
-                        let _ = self.prompt.replace_text(item);
-                        self.suggestion_selected = 0;
-                        self.suggestion_dismissed = false;
-                    }
-                    return true;
-                }
-                KeyCode::Esc => {
-                    self.suggestion_dismissed = true;
-                    return true;
-                }
-                _ => {}
+                return true;
             }
+            SuggestionOutcome::Handled | SuggestionOutcome::Dismissed => return true,
+            SuggestionOutcome::Unhandled => {}
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
             self.status = if snapshot.capabilities.external_editor {
@@ -2049,24 +1986,6 @@ impl UiState {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
             return self.navigate_prompt_history(snapshot, 1);
-        }
-        if key.code == KeyCode::Tab
-            && self.prompt.text().starts_with('/')
-            && snapshot.capabilities.prompt_suggestions
-        {
-            let prefix = self.prompt.text();
-            if let Some(suggestion) = snapshot
-                .prompt
-                .suggestions
-                .iter()
-                .find(|suggestion| suggestion.starts_with(prefix))
-            {
-                let _ = self.prompt.replace_text(suggestion);
-                self.status = None;
-            } else {
-                self.status = Some("No matching slash command".into());
-            }
-            return true;
         }
         false
     }
@@ -2095,6 +2014,7 @@ impl UiState {
             (Some(_), 1) => {
                 self.prompt_history_index = None;
                 self.prompt.reset();
+                self.suggestions.reset();
                 return true;
             }
             (None, 1) => return true,
@@ -2102,6 +2022,7 @@ impl UiState {
         };
         self.prompt_history_index = Some(next);
         let _ = self.prompt.replace_text(&history[next]);
+        self.suggestions.text_changed();
         self.status = None;
         true
     }
@@ -3408,7 +3329,7 @@ mod tests {
             crossterm::event::KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
         assert!(ui.handle_prompt_command(&tab, &snapshot));
         assert_eq!(ui.prompt.text(), "/history");
-        ui.suggestion_dismissed = false;
+        ui.suggestions.text_changed();
         let mut unsupported = snapshot.clone();
         unsupported.capabilities.prompt_suggestions = false;
         assert!(ui.suggestion_items(&unsupported).is_none());

@@ -1,6 +1,7 @@
 #![allow(clippy::needless_borrow)]
 
 pub mod file_search {
+    pub mod controller;
     pub mod line_viewer;
 }
 pub mod agent;
@@ -20,6 +21,7 @@ pub mod shortcuts_bar;
 pub mod picker;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/status_bar.rs"]
 pub mod status_bar;
+pub mod suggestion_controller;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/timeline.rs"]
 pub mod timeline;
 pub mod transcript;

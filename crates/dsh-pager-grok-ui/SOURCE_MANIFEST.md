@@ -20,6 +20,8 @@ auditable instead of being misreported as upstream drift.
 | `vendor/grok/xai-grok-pager/src/input/line_editor.rs` | same | `0b6fa76994d6b637442a98bc90cd5b539d13ae97dc6602befeb008bb61683d87` | `0b6fa76994d6b637442a98bc90cd5b539d13ae97dc6602befeb008bb61683d87` | none |
 | `vendor/grok/xai-grok-pager/src/input/key.rs` | same | `69d6f7446bf106c33e1dc894ef095c62782dae3d609f6661ef0291046bc754ee` | `2836bde45b5b3dae4bb7ca655c2f463bd1b5066fe8496cb74e32ca1ae96c2db7` | doctest crate path uses `dsh_pager_grok_ui` |
 | `vendor/grok/xai-grok-pager-render/src/modal_window_state.rs` | same | `023d33dbbacb445a6772eeb687a0e10e79bb93e50dda20ba9f55f23ab1c642df` | `023d33dbbacb445a6772eeb687a0e10e79bb93e50dda20ba9f55f23ab1c642df` | none |
+| `vendor/grok/xai-grok-pager/src/views/file_search/mod.rs` | `crates/codegen/xai-grok-pager/src/views/file_search/mod.rs` | `55b60c8f7c943e93cf2c87bd56a04d6e3337b65b39053fd3fa9aea83635f2307` | `55b60c8f7c943e93cf2c87bd56a04d6e3337b65b39053fd3fa9aea83635f2307` | provenance-only source; DSH adapter in `src/views/file_search/controller.rs` |
+| `vendor/grok/xai-grok-pager/src/views/suggestion_controller/mod.rs` | `crates/codegen/xai-grok-pager/src/views/suggestion_controller/mod.rs` | `f18ea878e39605513c90fd65a783e7b0b69dd0c613354e81f02054257ff98e4c` | `f18ea878e39605513c90fd65a783e7b0b69dd0c613354e81f02054257ff98e4c` | provenance-only source; DSH adapter in `src/views/suggestion_controller.rs` |
 
 The textarea is reused through the Cargo alias `xai-ratatui-textarea` and is
 implemented by the workspace's `dsh-grok-textarea` crate. DSH-specific shims
