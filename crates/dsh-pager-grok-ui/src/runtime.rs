@@ -239,6 +239,7 @@ struct UiState {
     suggestion_dismissed: bool,
     image_selected: usize,
     agent_task_selected: usize,
+    agent_subagents: Vec<crate::host_adapter::SubagentRow>,
     dashboard: DashboardModel,
     dashboard_revision: Option<u64>,
     dashboard_query: PromptEditor,
@@ -873,10 +874,12 @@ impl UiState {
         };
         let buf = frame.buffer_mut();
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
+            let mut agent = snapshot.agent.clone();
+            agent.subagents = self.agent_subagents.clone();
             render_agent_tasks_content(
                 buf,
                 content.content,
-                &snapshot.agent,
+                &agent,
                 self.agent_task_selected,
                 theme,
             );
@@ -1024,7 +1027,31 @@ impl UiState {
                     session,
                     Some(transport.control_plane()),
                 );
-                self.status = Some(agent_status_message(&snapshot.agent));
+                self.agent_subagents.clear();
+                let mut subagent_diagnostic = None;
+                if snapshot.capabilities.subagents {
+                    match dsh_pager::list_subagents(transport, session.session_id()) {
+                        Ok(catalog) => {
+                            self.agent_subagents = catalog
+                                .entries
+                                .into_iter()
+                                .map(|entry| crate::host_adapter::SubagentRow {
+                                    id: entry.id,
+                                    parent_id: session.session_id().to_string(),
+                                    label: entry.label.unwrap_or_else(|| entry.kind.clone()),
+                                    mode: entry.mode.map(|mode| format!("{mode:?}").to_lowercase()),
+                                    status: entry.activity.or(entry.reason),
+                                })
+                                .collect();
+                        }
+                        Err(error) => {
+                            subagent_diagnostic = Some(format!("Subagent list failed: {error}"));
+                        }
+                    }
+                }
+                self.status = Some(subagent_diagnostic.unwrap_or_else(|| {
+                    agent_status_message_with_subagents(&snapshot.agent, self.agent_subagents.len())
+                }));
                 Ok(false)
             }
             ShellAction::OpenDashboard => {
@@ -1185,7 +1212,7 @@ impl UiState {
             }
             ShellAction::ImagePreviewMouse(_) => Ok(false),
             ShellAction::AgentTasksKey(key) => {
-                self.handle_agent_tasks_key(key, session);
+                self.handle_agent_tasks_key(key, transport, session);
                 Ok(false)
             }
             ShellAction::AgentTasksMouse(_) => Ok(false),
@@ -1409,14 +1436,19 @@ impl UiState {
         }
     }
 
-    fn handle_agent_tasks_key(&mut self, key: crossterm::event::KeyEvent, session: &SessionState) {
+    fn handle_agent_tasks_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) {
         if key.code == KeyCode::Esc {
             self.shell.close_overlay();
             self.status = Some("Agent tasks closed".into());
             return;
         }
         let snapshot = GrokHostSnapshot::from_session(session);
-        let count = snapshot.agent.tasks.len() + snapshot.agent.subagents.len();
+        let count = snapshot.agent.tasks.len() + self.agent_subagents.len();
         if count == 0 {
             return;
         }
@@ -1424,6 +1456,24 @@ impl UiState {
             KeyCode::Up => self.agent_task_selected = self.agent_task_selected.saturating_sub(1),
             KeyCode::Down => {
                 self.agent_task_selected = self.agent_task_selected.saturating_add(1).min(count - 1)
+            }
+            KeyCode::Char('x') => {
+                let subagent_index = self
+                    .agent_task_selected
+                    .saturating_sub(snapshot.agent.tasks.len());
+                if let Some(row) = self.agent_subagents.get(subagent_index)
+                    && row.mode.as_deref() == Some("continuable")
+                {
+                    let address = dsh_pager_protocol::SubagentAddress {
+                        parent_session_id: row.parent_id.clone(),
+                        child_session_id: row.id.clone(),
+                        mode: dsh_pager_protocol::SubagentMode::Continuable,
+                    };
+                    self.status = match dsh_pager::interrupt_subagent(transport, &address) {
+                        Ok(_) => Some(format!("Interrupt requested for {}", row.id)),
+                        Err(error) => Some(format!("Interrupt unavailable: {error}")),
+                    };
+                }
             }
             _ => {}
         }
@@ -2508,12 +2558,12 @@ fn media_status_message(snapshot: &MediaSnapshot) -> String {
     }
 }
 
-fn agent_status_message(snapshot: &AgentSnapshot) -> String {
+fn agent_status_message_with_subagents(snapshot: &AgentSnapshot, subagents: usize) -> String {
     match snapshot.status {
         FeatureStatus::Available => format!(
             "{} task(s), {} subagent(s)",
             snapshot.tasks.len(),
-            snapshot.subagents.len()
+            subagents
         ),
         FeatureStatus::Pending => "Agent task state pending host snapshot".into(),
         FeatureStatus::Unsupported => "Agent task state unavailable".into(),
