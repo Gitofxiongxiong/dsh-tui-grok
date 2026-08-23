@@ -7,10 +7,29 @@ tui_profile="${DSH_TUI_PROFILE:-grok-tui}"
 server_program="${DSH_TUI_SERVER:-$harness_root/apps/cli/lib/bin.js --profile $tui_profile}"
 timeout_seconds="${REAL_E2E_TIMEOUT:-45}"
 session_id="${REAL_E2E_SESSION:-}"
+install_local="${DSH_TUI_INSTALL_LOCAL:-0}"
 
 if [[ ! -x "$harness_root/apps/cli/lib/bin.js" ]]; then
   printf 'real Harness entry is not executable: %s\n' "$harness_root/apps/cli/lib/bin.js" >&2
   exit 2
+fi
+
+if [[ "$install_local" == "1" ]]; then
+  if [[ "$server_program" != "$harness_root/apps/cli/lib/bin.js --profile $tui_profile" ]]; then
+    printf 'DSH_TUI_INSTALL_LOCAL=1 cannot be combined with a custom DSH_TUI_SERVER\n' >&2
+    exit 2
+  fi
+  for package_dir in dsh-tui-protocol dsh-tui-server dsh-tui-embedded; do
+    if [[ ! -f "$repo_root/packages/$package_dir/lib/index.js" ]]; then
+      printf 'built package is missing: %s (run pnpm run build:ts first)\n' \
+        "$repo_root/packages/$package_dir/lib/index.js" >&2
+      exit 2
+    fi
+  done
+  node "$harness_root/apps/cli/lib/bin.js" plugin --profile "$tui_profile" add \
+    "$repo_root/packages/dsh-tui-protocol" \
+    "$repo_root/packages/dsh-tui-server" \
+    "$repo_root/packages/dsh-tui-embedded"
 fi
 
 cd "$repo_root"

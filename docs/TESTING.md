@@ -64,6 +64,23 @@ DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
   DSH_TUI_PROFILE=grok-tui scripts/real-e2e.sh
 ```
 
+如果三个外置包尚未发布到 npm，先运行 `pnpm run build:ts`，再加上
+`DSH_TUI_INSTALL_LOCAL=1`。脚本会一次性 link 本仓库的 protocol、server 和
+embedded 源码包；不要把 packed tarball 分三次安装，因为 packed manifest 中的
+`workspace:*` 会变成 registry semver，最后一个包会触发 npm 404：
+
+```bash
+DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
+  DSH_TUI_PROFILE=grok-tui \
+  DSH_TUI_INSTALL_LOCAL=1 \
+  scripts/real-e2e.sh
+```
+
+`scripts/real-e2e.sh` 默认只验证 hello/list/dashboard/load/PTY，不提交 prompt。
+`--smoke-interactions`、`--smoke-queue` 和 `--smoke-lifecycle` 是 checked-in mock
+的确定性 smoke；pager 默认拒绝把它们发送给真实 Harness。只有明确确认隔离
+session 和副作用后，才设置 `DSH_ALLOW_REAL_SMOKE=1` 手动运行。
+
 ```bash
 REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
   DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness scripts/real-e2e.sh

@@ -3,10 +3,13 @@
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use dsh_pager::{
     drain_notifications, fork_session, list_sessions, load_session, rename_session, respond,
-    submit_prompt, update_queue, DashboardModel, DashboardStatus, RpcTransport, SessionChoice,
+    submit_prompt, update_queue, DashboardModel, DashboardStatus, InteractionKind, RpcTransport,
+    SessionChoice,
 };
 use dsh_pager_grok_ui::run_interactive;
 use dsh_pager_protocol::{
@@ -38,6 +41,12 @@ fn main() {
 
 fn run() -> Result<i32, Box<dyn Error>> {
     let args = parse_args()?;
+    if smoke_requested(&args)
+        && !is_mock_backend(&args)
+        && env::var_os("DSH_ALLOW_REAL_SMOKE").is_none()
+    {
+        return Err("non-interactive smoke flags require the checked-in mock backend; set DSH_ALLOW_REAL_SMOKE=1 only for an intentional isolated real-backend run".into());
+    }
     let mut transport = RpcTransport::spawn(&args.program, &args.program_args)?;
     let cwd = env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -131,6 +140,18 @@ fn run() -> Result<i32, Box<dyn Error>> {
     }
     run_interactive(transport, session)?;
     Ok(0)
+}
+
+fn smoke_requested(args: &Args) -> bool {
+    args.smoke_interactions || args.smoke_queue || args.smoke_lifecycle
+}
+
+fn is_mock_backend(args: &Args) -> bool {
+    args.program == "node"
+        && args
+            .program_args
+            .iter()
+            .any(|argument| argument.ends_with("mock-server.mjs"))
 }
 
 fn resume_class_label(class: ResumeClass) -> &'static str {
@@ -241,10 +262,95 @@ fn eprint_help() {
     );
 }
 
+const INTERACTION_SMOKE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait for a server-owned interaction after an admitted prompt.
+///
+/// `session.prompt` is only an admission receipt.  A real Harness may need
+/// several model/tool turns before it emits an approval or question, while
+/// the checked-in mock emits it in the same read cycle.  Polling the existing
+/// notification queue keeps both paths deterministic without changing the
+/// wire contract.
+fn wait_for_interaction(
+    transport: &mut RpcTransport,
+    state: &mut dsh_pager::SessionState,
+    label: &str,
+    expected_kind: InteractionKind,
+    history_before: usize,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + INTERACTION_SMOKE_TIMEOUT;
+    loop {
+        drain_notifications(transport, state)?;
+        if let Some(interaction) = state.pending_interaction() {
+            if interaction.kind == expected_kind {
+                return Ok(());
+            }
+            return Err(format!(
+                "expected {label} interaction, received {:?}",
+                interaction.kind
+            )
+            .into());
+        }
+        if state.history().len() > history_before && !state.running() {
+            return Err(format!(
+                "backend completed without {label} interaction (history entries={})",
+                state.history().len()
+            )
+            .into());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for {label} interaction after {}s",
+                INTERACTION_SMOKE_TIMEOUT.as_secs()
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Wait until the server acknowledges the final interaction response.
+fn wait_for_interaction_clear(
+    transport: &mut RpcTransport,
+    state: &mut dsh_pager::SessionState,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + INTERACTION_SMOKE_TIMEOUT;
+    loop {
+        drain_notifications(transport, state)?;
+        if state.pending_interaction().is_none() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for interaction response to clear".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn smoke_question_answers(questions: &[serde_json::Value]) -> serde_json::Value {
+    let answers = questions
+        .iter()
+        .filter_map(|question| {
+            let id = question.get("id")?.as_str()?;
+            let selected = question
+                .get("options")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|options| options.first())
+                .and_then(|option| option.get("label"))
+                .and_then(serde_json::Value::as_str)
+                .map(|label| vec![serde_json::Value::String(label.to_string())])
+                .unwrap_or_default();
+            Some(serde_json::json!({ "id": id, "selected": selected }))
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "answers": answers })
+}
+
 fn run_interaction_smoke(
     transport: &mut RpcTransport,
     mut session: dsh_pager::SessionState,
 ) -> Result<(), Box<dyn Error>> {
+    let history_before_prompt = session.history().len();
     let prompt = submit_prompt(
         transport,
         &session,
@@ -254,7 +360,13 @@ fn run_interaction_smoke(
     if !prompt.accepted {
         return Err("mock rejected smoke prompt".into());
     }
-    drain_notifications(transport, &mut session)?;
+    wait_for_interaction(
+        transport,
+        &mut session,
+        "approval",
+        InteractionKind::Approval,
+        history_before_prompt,
+    )?;
     let approval = session
         .pending_interaction()
         .cloned()
@@ -269,7 +381,14 @@ fn run_interaction_smoke(
             outcome: "allowed-once".into(),
         },
     )?;
-    drain_notifications(transport, &mut session)?;
+    let history_before_question = session.history().len();
+    wait_for_interaction(
+        transport,
+        &mut session,
+        "question",
+        InteractionKind::Question,
+        history_before_question,
+    )?;
     let question = session
         .pending_interaction()
         .cloned()
@@ -279,15 +398,10 @@ fn run_interaction_smoke(
         &session,
         question.request_id,
         TuiInteractionResponse::Question {
-            answers: serde_json::json!({
-                "answers": [{ "id": "q1", "selected": ["yes"] }]
-            }),
+            answers: smoke_question_answers(&question.questions),
         },
     )?;
-    drain_notifications(transport, &mut session)?;
-    if session.pending_interaction().is_some() {
-        return Err("interaction smoke left a pending request".into());
-    }
+    wait_for_interaction_clear(transport, &mut session)?;
     eprintln!("dsh-pager: interaction smoke ok");
     Ok(())
 }

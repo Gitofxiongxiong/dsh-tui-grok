@@ -29,21 +29,38 @@ dsh plugin --profile grok-tui add @dsh-pager-grok/tui-embedded@0.1.0
 dsh --profile grok-tui
 ```
 
-开发期不发布 npm 时，先在本仓库打包三个 npm tarball，再按依赖顺序安装：
+开发期不发布 npm 时，不要把三个 tarball 分三次装进 profile。`pnpm pack` 会把
+`workspace:*` 转成普通的 `0.1.0` semver；profile 安装最后一个 bundle 时，pnpm
+会尝试从 npm registry 重新下载 `@dsh-pager-grok/tui-server`，而不是复用前面装的
+本地 tarball。直接一次性 link 三个源码包即可：
 
 ```bash
-mkdir -p /tmp/dsh-pager-grok-pack
-pnpm --filter @dsh-pager-grok/tui-protocol pack --pack-destination /tmp/dsh-pager-grok-pack
-pnpm --filter @dsh-pager-grok/tui-server pack --pack-destination /tmp/dsh-pager-grok-pack
-pnpm --filter @dsh-pager-grok/tui-embedded pack --pack-destination /tmp/dsh-pager-grok-pack
-
-dsh plugin --profile grok-tui add /tmp/dsh-pager-grok-pack/dsh-pager-grok-tui-protocol-0.1.0.tgz
-dsh plugin --profile grok-tui add /tmp/dsh-pager-grok-pack/dsh-pager-grok-tui-server-0.1.0.tgz
-dsh plugin --profile grok-tui add /tmp/dsh-pager-grok-pack/dsh-pager-grok-tui-embedded-0.1.0.tgz
+pnpm run build:ts
+dsh plugin --profile grok-tui add \
+  /home/leo/code/dsh-pager-grok/packages/dsh-tui-protocol \
+  /home/leo/code/dsh-pager-grok/packages/dsh-tui-server \
+  /home/leo/code/dsh-pager-grok/packages/dsh-tui-embedded
 dsh --profile grok-tui
 ```
 
+真实联调脚本也可以自动完成这一步。它仍然只改 profile 的依赖，不改
+`deepseek-harness` checkout：
+
+```bash
+DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
+DSH_TUI_PROFILE=grok-tui \
+DSH_TUI_INSTALL_LOCAL=1 \
+scripts/real-e2e.sh
+```
+
+只有正式发布到 npm 后，才使用上面的 `tui-embedded@0.1.0` 单包安装方式。
+
 三个 tarball 应保持同一版本；实际发布时应由 GitHub Actions 统一发布，避免 profile 装到不匹配的 protocol/server。
+
+`real-e2e.sh` 的默认真实联调只做只读加载和隔离空 session 的 PTY 生命周期，
+不会提交模型 prompt。`--smoke-interactions` 等非交互 smoke 依赖仓库内的
+mock-server；对真实 Harness 的模型 prompt 必须另行确认权限和费用边界，并显式
+设置 `DSH_ALLOW_REAL_SMOKE=1`。
 
 ## 与 Rust pager 的边界
 
