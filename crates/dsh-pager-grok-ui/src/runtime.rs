@@ -33,8 +33,8 @@ use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::effects::{
-    DshEffectSink, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus,
-    UiIntent, compile_intent, receipt_status_message,
+    AsyncEffectExecutor, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectCompletion,
+    UiEffectStatus, UiIntent, compile_intent, receipt_status_message,
 };
 use crate::geometry::{
     GeometryLine, HitMap, HitTarget, LinkTarget, column_for_grapheme, first_link_target,
@@ -124,6 +124,9 @@ fn run_loop(
                 transport,
                 session,
             )?;
+        }
+        if let Err(error) = ui.poll_effects(transport, session) {
+            ui.status = Some(format!("effect completion error: {error}"));
         }
         match drain_notifications_bounded(transport, session, NOTIFICATION_BUDGET) {
             Ok((update, processed)) if update.gap_detected => {
@@ -269,6 +272,7 @@ struct UiState {
     prompt_history_index: Option<usize>,
     local_prompt_history: Vec<String>,
     effect_ledger: EffectLedger,
+    effect_executor: AsyncEffectExecutor,
     next_operation: u64,
     status: Option<String>,
     frame: usize,
@@ -282,6 +286,99 @@ struct UiState {
 }
 
 impl UiState {
+    fn submit_effect(
+        &mut self,
+        transport: &mut RpcTransport,
+        intent: UiIntent,
+        context: &UiContext,
+    ) -> PagerResult<crate::effects::UiEffectReceipt> {
+        let (executor, ledger) = (&mut self.effect_executor, &mut self.effect_ledger);
+        executor.submit(transport, ledger, intent, context)
+    }
+
+    fn poll_effects(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<()> {
+        let completions = {
+            let (executor, ledger) = (&mut self.effect_executor, &mut self.effect_ledger);
+            executor.poll(transport, ledger)?
+        };
+        for completion in completions {
+            self.apply_effect_completion(completion, session);
+        }
+        Ok(())
+    }
+
+    fn apply_effect_completion(&mut self, completion: UiEffectCompletion, session: &SessionState) {
+        let subject = match &completion.effect {
+            UiEffect::SubmitPrompt { .. } => "Prompt",
+            UiEffect::QueueMutation { .. } => "Queue update",
+            UiEffect::RespondInteraction { .. } => "Interaction response",
+            UiEffect::RenameSession { .. } => "Rename session",
+            UiEffect::ForkSession { .. } => "Fork session",
+            UiEffect::ArchiveSession { .. } | UiEffect::ArchiveSessionTarget { .. } => {
+                "Archive session"
+            }
+            UiEffect::FileSearchQuery { .. } => "File search",
+            UiEffect::PreviewMedia { .. } => "Image preview",
+            UiEffect::ReorderSession { .. } => "Reorder session",
+            UiEffect::InterruptSubagent { .. } => "Subagent interrupt",
+            UiEffect::AttachSession { .. } => "Attach session",
+        };
+        if completion.receipt.operation.session_id.as_str() != session.session_id()
+            || completion.receipt.operation.generation != DshGeneration::new(session.generation())
+        {
+            self.status = Some(format!(
+                "Ignored stale {subject} completion for {}",
+                completion.receipt.operation.request_id
+            ));
+            return;
+        }
+        if let UiEffect::FileSearchQuery { revision, .. } = &completion.effect {
+            if *revision != self.file_search_revision {
+                self.status = Some(format!(
+                    "Ignored stale File search completion for revision {revision}"
+                ));
+                return;
+            }
+            if let Some(value) = completion.file_references.clone() {
+                self.file_search_result = Some(file_search_snapshot_from_effect(
+                    self.file_search_editor.text(),
+                    *revision,
+                    value,
+                ));
+            }
+        }
+        if let UiEffect::PreviewMedia { attachment_id, .. } = &completion.effect
+            && let Some(preview) = completion.attachment_preview.clone()
+            && preview.attachment_id == *attachment_id
+        {
+            self.media_preview = Some(MediaPreviewBuffer {
+                attachment_id: preview.attachment_id,
+                media_type: preview.media_type,
+                data: preview.data,
+                bytes: preview.bytes,
+                width: preview.width,
+                height: preview.height,
+            });
+        }
+        if matches!(completion.effect, UiEffect::RespondInteraction { .. })
+            && completion.receipt.status == UiEffectStatus::Accepted
+        {
+            self.interaction_pending = None;
+        }
+        if completion.receipt.status != UiEffectStatus::Accepted
+            || matches!(
+                completion.effect,
+                UiEffect::FileSearchQuery { .. } | UiEffect::PreviewMedia { .. }
+            )
+        {
+            self.status = Some(receipt_status_message(&completion.receipt, subject));
+        }
+    }
+
     fn render(
         &mut self,
         frame: &mut Frame<'_>,
@@ -1671,35 +1768,15 @@ impl UiState {
             session,
             DshRequestId::new(format!("file-search-{}", self.file_search_revision)),
         );
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::FileSearchQuery {
                 query,
                 revision: self.file_search_revision,
             },
             &context,
         )?;
-        if let Some(value) = sink.take_file_references() {
-            let query = self.file_search_editor.text().to_string();
-            self.file_search_result = Some(FileSearchSnapshot {
-                status: FeatureStatus::Available,
-                query,
-                revision: self.file_search_revision,
-                selected_id: None,
-                rows: value
-                    .items
-                    .into_iter()
-                    .map(|item| FileSearchRow {
-                        id: format!("{}:{}", item.kind, item.path),
-                        path: item.path,
-                        kind: Some(item.kind),
-                        preview: None,
-                    })
-                    .collect(),
-                preview_status: FeatureStatus::Unsupported,
-                diagnostic: None,
-            });
-        } else if matches!(receipt.status, UiEffectStatus::Pending) {
+        if matches!(receipt.status, UiEffectStatus::Pending) {
             self.file_search_result = Some(FileSearchSnapshot {
                 status: FeatureStatus::Pending,
                 query: self.file_search_editor.text().to_string(),
@@ -1795,23 +1872,13 @@ impl UiState {
     ) -> PagerResult<()> {
         let request_id = DshRequestId::new(format!("media-preview:{attachment_id}"));
         let context = UiContext::for_operation(session, request_id);
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::PreviewMedia {
                 attachment_id: attachment_id.to_string(),
             },
             &context,
         )?;
-        if let Some(preview) = sink.take_attachment_preview() {
-            self.media_preview = Some(MediaPreviewBuffer {
-                attachment_id: preview.attachment_id,
-                media_type: preview.media_type,
-                data: preview.data,
-                bytes: preview.bytes,
-                width: preview.width,
-                height: preview.height,
-            });
-        }
         self.status = Some(receipt_status_message(&receipt, "Image preview"));
         Ok(())
     }
@@ -1850,8 +1917,8 @@ impl UiState {
                         mode: dsh_pager_protocol::SubagentMode::Continuable,
                     };
                     let child_id = row.id.clone();
-                    let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-                    self.status = match sink.submit(
+                    self.status = match self.submit_effect(
+                        transport,
                         UiIntent::InterruptSubagent { address },
                         &UiContext::from_session(session),
                     ) {
@@ -1908,9 +1975,9 @@ impl UiState {
             self.status = Some("Steer mode unavailable".into());
             return Ok(());
         }
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let context = UiContext::from_session(session);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::SubmitPrompt {
                 text: text.clone(),
                 mode,
@@ -2150,19 +2217,14 @@ impl UiState {
         };
         let session_id = dsh_pager::DshSessionId::new(row.session_id.clone());
         let context = UiContext::from_session(session);
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::ArchiveSessionTarget {
                 session_id: session_id.clone(),
             },
             &context,
         )?;
         self.status = Some(receipt_status_message(&receipt, "Archive session"));
-        if prompt_receipt_admitted(&receipt.status) {
-            dsh_pager::list_sessions(transport)?;
-            self.dashboard_revision = None;
-            self.sync_dashboard(transport.control_plane());
-        }
         Ok(())
     }
 
@@ -2206,8 +2268,8 @@ impl UiState {
                 workspace_id, row.session_id
             )),
         );
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::ReorderSession {
                 workspace_id,
                 session_id: dsh_pager::DshSessionId::new(row.session_id),
@@ -2216,11 +2278,6 @@ impl UiState {
             &context,
         )?;
         self.status = Some(receipt_status_message(&receipt, "Reorder session"));
-        if prompt_receipt_admitted(&receipt.status) {
-            dsh_pager::list_sessions(transport)?;
-            self.dashboard_revision = None;
-            self.sync_dashboard(transport.control_plane());
-        }
         Ok(())
     }
 
@@ -2473,8 +2530,8 @@ impl UiState {
         let request_id = DshRequestId::new(format!("queue-{}", self.next_operation));
         self.next_operation = self.next_operation.saturating_add(1);
         let context = UiContext::for_operation(session, request_id);
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::QueueMutation {
                 item_id: item_id.clone(),
                 action,
@@ -2635,8 +2692,8 @@ impl UiState {
     ) -> PagerResult<()> {
         let request_id = DshRequestId::new(interaction.request_id());
         let context = UiContext::for_operation(session, request_id.clone());
-        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
-        let receipt = sink.submit(
+        let receipt = self.submit_effect(
+            transport,
             UiIntent::RespondInteraction {
                 request_id: request_id.clone(),
                 interaction: response,
@@ -2897,6 +2954,31 @@ fn file_search_status_message(snapshot: &FileSearchSnapshot) -> String {
     }
 }
 
+fn file_search_snapshot_from_effect(
+    query: &str,
+    revision: u64,
+    value: dsh_pager_protocol::FileReferencesListValue,
+) -> FileSearchSnapshot {
+    FileSearchSnapshot {
+        status: FeatureStatus::Available,
+        query: query.to_string(),
+        revision,
+        preview_status: FeatureStatus::Unsupported,
+        selected_id: None,
+        rows: value
+            .items
+            .into_iter()
+            .map(|item| FileSearchRow {
+                id: format!("{}:{}", item.kind, item.path),
+                path: item.path,
+                kind: Some(item.kind),
+                preview: None,
+            })
+            .collect(),
+        diagnostic: None,
+    }
+}
+
 fn render_image_preview_content(
     buffer: &mut ratatui::buffer::Buffer,
     area: Rect,
@@ -3124,10 +3206,7 @@ fn steer_capability_available(session: &SessionState, snapshot: &GrokHostSnapsho
 }
 
 fn prompt_receipt_admitted(status: &UiEffectStatus) -> bool {
-    matches!(
-        status,
-        UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
-    )
+    matches!(status, UiEffectStatus::Accepted | UiEffectStatus::Queued)
 }
 
 fn prompt_admission_message(status: &UiEffectStatus) -> String {
@@ -3243,7 +3322,7 @@ mod tests {
     fn prompt_draft_is_only_cleared_after_admission() {
         assert!(prompt_receipt_admitted(&UiEffectStatus::Accepted));
         assert!(prompt_receipt_admitted(&UiEffectStatus::Queued));
-        assert!(prompt_receipt_admitted(&UiEffectStatus::Pending));
+        assert!(!prompt_receipt_admitted(&UiEffectStatus::Pending));
         assert!(!prompt_receipt_admitted(&UiEffectStatus::Rejected));
         assert!(!prompt_receipt_admitted(&UiEffectStatus::Conflict));
         assert!(!prompt_receipt_admitted(&UiEffectStatus::Stale));

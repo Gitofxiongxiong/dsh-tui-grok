@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
@@ -34,6 +34,8 @@ pub struct RpcTransport {
     rx: Receiver<ReaderMessage>,
     reader: Option<JoinHandle<()>>,
     notifications: VecDeque<JsonRpcNotification>,
+    pending: HashMap<u64, String>,
+    completed: HashMap<u64, PagerResult<Value>>,
     next_id: u64,
     client_id: Option<String>,
     control_plane: ControlPlaneRouter,
@@ -107,6 +109,8 @@ impl RpcTransport {
             rx,
             reader: Some(reader),
             notifications: VecDeque::new(),
+            pending: HashMap::new(),
+            completed: HashMap::new(),
             next_id: 1,
             client_id: None,
             control_plane: ControlPlaneRouter::default(),
@@ -182,14 +186,13 @@ impl RpcTransport {
         P: Serialize,
         T: DeserializeOwned,
     {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        let request = rpc_request(id, method, Some(serde_json::to_value(params)?));
-        self.stdin
-            .write_all(encode_request_line(&request)?.as_bytes())?;
-        self.stdin.flush()?;
+        let id = self.begin_call_value(method, serde_json::to_value(params)?)?;
 
         loop {
+            if let Some(result) = self.completed.remove(&id) {
+                return result
+                    .and_then(|value| serde_json::from_value(value).map_err(PagerError::from));
+            }
             let message = match self.rx.recv_timeout(RPC_TIMEOUT) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => {
@@ -203,31 +206,82 @@ impl RpcTransport {
                     )))
                 }
             };
-            match message {
-                ReaderMessage::Frame(JsonRpcLine::Notification(note)) => {
-                    self.notifications.push_back(note);
-                }
-                ReaderMessage::Frame(JsonRpcLine::Success(success)) if success.id == request.id => {
-                    return serde_json::from_value(success.result).map_err(PagerError::from);
-                }
-                ReaderMessage::Frame(JsonRpcLine::Failure(failure)) if failure.id == request.id => {
-                    return Err(PagerError::new(format!(
-                        "{method} failed: {}",
-                        failure.error
-                    )))
-                }
-                ReaderMessage::Frame(other) => {
-                    return Err(PagerError::new(format!(
-                        "unexpected frame while waiting for {method}: {other:?}"
-                    )))
-                }
-                ReaderMessage::Error(error) => return Err(PagerError::new(error)),
-                ReaderMessage::Closed => {
-                    return Err(PagerError::new(format!(
-                        "backend closed stdout while waiting for {method}"
-                    )))
+            self.process_message(message)?;
+        }
+    }
+
+    /// Start a JSON-RPC request without waiting for its response.
+    ///
+    /// The request id is local to this transport connection. Callers must
+    /// retain it and use poll_call_value to collect the result.
+    /// Notifications and responses may arrive in any order.
+    pub fn begin_call_value(&mut self, method: &str, params: Value) -> PagerResult<u64> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let request = rpc_request(id, method, Some(params));
+        self.stdin
+            .write_all(encode_request_line(&request)?.as_bytes())?;
+        self.stdin.flush()?;
+        self.pending.insert(id, method.to_string());
+        Ok(id)
+    }
+
+    /// Poll one previously started request. This method never waits on the
+    /// backend; None means the response has not arrived yet.
+    pub fn poll_call_value(&mut self, id: u64) -> PagerResult<Option<Value>> {
+        self.pump_nonblocking()?;
+        let Some(result) = self.completed.remove(&id) else {
+            return Ok(None);
+        };
+        result.map(Some)
+    }
+
+    fn pump_nonblocking(&mut self) -> PagerResult<()> {
+        loop {
+            match self.rx.try_recv() {
+                Ok(message) => self.process_message(message)?,
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(PagerError::new("backend reader stopped"));
                 }
             }
+        }
+    }
+
+    fn process_message(&mut self, message: ReaderMessage) -> PagerResult<()> {
+        match message {
+            ReaderMessage::Frame(JsonRpcLine::Notification(note)) => {
+                self.notifications.push_back(note);
+                Ok(())
+            }
+            ReaderMessage::Frame(JsonRpcLine::Success(success)) => {
+                let id = response_id(&success.id)?;
+                let method = self.pending.remove(&id).ok_or_else(|| {
+                    PagerError::new(format!("response received for unknown request id {id}"))
+                })?;
+                let _ = method;
+                self.completed.insert(id, Ok(success.result));
+                Ok(())
+            }
+            ReaderMessage::Frame(JsonRpcLine::Failure(failure)) => {
+                let id = response_id(&failure.id)?;
+                let method = self.pending.remove(&id).ok_or_else(|| {
+                    PagerError::new(format!("response received for unknown request id {id}"))
+                })?;
+                self.completed.insert(
+                    id,
+                    Err(PagerError::new(format!(
+                        "{} failed: {}",
+                        method, failure.error
+                    ))),
+                );
+                Ok(())
+            }
+            ReaderMessage::Frame(other) => Err(PagerError::new(format!(
+                "unexpected request frame from backend: {other:?}"
+            ))),
+            ReaderMessage::Error(error) => Err(PagerError::new(error)),
+            ReaderMessage::Closed => Err(PagerError::new("backend closed stdout")),
         }
     }
 
@@ -235,21 +289,19 @@ impl RpcTransport {
         if let Some(note) = self.notifications.pop_front() {
             return Ok(Some(note));
         }
-        match self.rx.try_recv() {
-            Ok(ReaderMessage::Frame(JsonRpcLine::Notification(note))) => Ok(Some(note)),
-            Ok(ReaderMessage::Frame(other)) => Err(PagerError::new(format!(
-                "unexpected frame without an outstanding request: {other:?}"
-            ))),
-            Ok(ReaderMessage::Error(error)) => Err(PagerError::new(error)),
-            Ok(ReaderMessage::Closed) => Err(PagerError::new("backend closed stdout")),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(PagerError::new("backend reader stopped")),
-        }
+        self.pump_nonblocking()?;
+        Ok(self.notifications.pop_front())
     }
 
     pub fn call_value(&mut self, method: &str, params: Value) -> PagerResult<Value> {
         self.call(method, &params)
     }
+}
+
+fn response_id(value: &Value) -> PagerResult<u64> {
+    value
+        .as_u64()
+        .ok_or_else(|| PagerError::new(format!("JSON-RPC response id is not an integer: {value}")))
 }
 
 impl Drop for RpcTransport {

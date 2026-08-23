@@ -1,13 +1,14 @@
 //! Host-independent effects emitted by Grok UI interactions.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use dsh_pager::{
-    DshGeneration, DshQueueItemId, DshRequestId, DshSeq, DshSessionId, PagerResult, RpcTransport,
-    SessionState,
+    DshGeneration, DshQueueItemId, DshRequestId, DshSeq, DshSessionId, PagerError, PagerResult,
+    RpcTransport, SessionState,
 };
 use dsh_pager_protocol::{PromptMode, QueueAction, SubagentAddress, TuiInteractionResponse};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 /// Semantic user intent emitted by a Grok view. It has no transport or
 /// renderer references and can be reduced in a host-neutral test harness.
@@ -657,6 +658,367 @@ impl DshEffectSink<'_, '_> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiEffectCompletion {
+    pub effect: UiEffect,
+    pub receipt: UiEffectReceipt,
+    pub file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
+    pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingEffect {
+    effect: UiEffect,
+}
+
+#[derive(Debug, Default)]
+pub struct AsyncEffectExecutor {
+    pending: HashMap<u64, PendingEffect>,
+}
+
+impl AsyncEffectExecutor {
+    pub fn submit(
+        &mut self,
+        transport: &mut RpcTransport,
+        ledger: &mut EffectLedger,
+        intent: UiIntent,
+        context: &UiContext,
+    ) -> PagerResult<UiEffectReceipt> {
+        self.submit_effect(transport, ledger, compile_intent(intent, context))
+    }
+
+    pub fn submit_effect(
+        &mut self,
+        transport: &mut RpcTransport,
+        ledger: &mut EffectLedger,
+        mut effect: UiEffect,
+    ) -> PagerResult<UiEffectReceipt> {
+        let mut operation = effect_operation(&effect).clone();
+        ledger.prepare_operation(&mut operation);
+        if ledger.contains(&operation) {
+            return Ok(ledger.duplicate_receipt(operation));
+        }
+        let Some((method, params)) = encode_async_request(&effect, &operation)? else {
+            return Ok(UiEffectReceipt {
+                status: UiEffectStatus::Unsupported,
+                operation,
+                diagnostic: Some("attach requires the session load barrier".into()),
+                retryable: Some(false),
+            });
+        };
+        set_effect_operation(&mut effect, operation.clone());
+        let request_id = transport.begin_call_value(method, params)?;
+        self.pending.insert(request_id, PendingEffect { effect });
+        Ok(UiEffectReceipt {
+            status: UiEffectStatus::Pending,
+            operation,
+            diagnostic: None,
+            retryable: Some(true),
+        })
+    }
+
+    pub fn poll(
+        &mut self,
+        transport: &mut RpcTransport,
+        ledger: &mut EffectLedger,
+    ) -> PagerResult<Vec<UiEffectCompletion>> {
+        let ids = self.pending.keys().copied().collect::<Vec<_>>();
+        let mut completions = Vec::new();
+        for request_id in ids {
+            let result = match transport.poll_call_value(request_id) {
+                Ok(Some(value)) => decode_async_result(&self.pending[&request_id].effect, value),
+                Ok(None) => continue,
+                Err(error) => Err(error),
+            };
+            let Some(pending) = self.pending.remove(&request_id) else {
+                continue;
+            };
+            completions.push(build_completion(pending.effect, ledger, result));
+        }
+        Ok(completions)
+    }
+}
+
+fn effect_operation(effect: &UiEffect) -> &OperationKey {
+    match effect {
+        UiEffect::SubmitPrompt { operation, .. }
+        | UiEffect::AttachSession { operation, .. }
+        | UiEffect::QueueMutation { operation, .. }
+        | UiEffect::RespondInteraction { operation, .. }
+        | UiEffect::RenameSession { operation, .. }
+        | UiEffect::ForkSession { operation, .. }
+        | UiEffect::ArchiveSession { operation }
+        | UiEffect::ArchiveSessionTarget { operation, .. }
+        | UiEffect::FileSearchQuery { operation, .. }
+        | UiEffect::PreviewMedia { operation, .. }
+        | UiEffect::ReorderSession { operation, .. }
+        | UiEffect::InterruptSubagent { operation, .. } => operation,
+    }
+}
+
+fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
+    match effect {
+        UiEffect::SubmitPrompt {
+            operation: target, ..
+        }
+        | UiEffect::AttachSession {
+            operation: target, ..
+        }
+        | UiEffect::QueueMutation {
+            operation: target, ..
+        }
+        | UiEffect::RespondInteraction {
+            operation: target, ..
+        }
+        | UiEffect::RenameSession {
+            operation: target, ..
+        }
+        | UiEffect::ForkSession {
+            operation: target, ..
+        }
+        | UiEffect::ArchiveSession { operation: target }
+        | UiEffect::ArchiveSessionTarget {
+            operation: target, ..
+        }
+        | UiEffect::FileSearchQuery {
+            operation: target, ..
+        }
+        | UiEffect::PreviewMedia {
+            operation: target, ..
+        }
+        | UiEffect::ReorderSession {
+            operation: target, ..
+        }
+        | UiEffect::InterruptSubagent {
+            operation: target, ..
+        } => *target = operation,
+    }
+}
+
+fn encode_async_request(
+    effect: &UiEffect,
+    operation: &OperationKey,
+) -> PagerResult<Option<(&'static str, Value)>> {
+    let request = match effect {
+        UiEffect::SubmitPrompt { text, mode, .. } => Some((
+            "session.prompt",
+            json!({
+                "sessionId": operation.session_id,
+                "mode": mode,
+                "content": [{"type": "text", "text": text}],
+            }),
+        )),
+        UiEffect::QueueMutation {
+            item_id, action, ..
+        } => Some((
+            "session.updateQueue",
+            json!({
+                "sessionId": operation.session_id,
+                "itemId": item_id,
+                "action": action,
+            }),
+        )),
+        UiEffect::RespondInteraction {
+            request_id,
+            interaction,
+            ..
+        } => Some((
+            "tui.respond",
+            json!({
+                "sessionId": operation.session_id,
+                "generation": operation.generation,
+                "requestId": request_id,
+                "interaction": interaction,
+            }),
+        )),
+        UiEffect::RenameSession { title, .. } => Some((
+            "session.rename",
+            json!({"sessionId": operation.session_id, "title": title}),
+        )),
+        UiEffect::ForkSession { at_seq, .. } => Some((
+            "session.fork",
+            json!({"sessionId": operation.session_id, "atSeq": at_seq}),
+        )),
+        UiEffect::ArchiveSession { .. } => Some((
+            "workspace.archiveSession",
+            json!({"sessionId": operation.session_id}),
+        )),
+        UiEffect::ArchiveSessionTarget { session_id, .. } => {
+            Some(("workspace.archiveSession", json!({"sessionId": session_id})))
+        }
+        UiEffect::FileSearchQuery { query, .. } => Some((
+            "fileReferences.list",
+            json!({"sessionId": operation.session_id, "query": query}),
+        )),
+        UiEffect::PreviewMedia { attachment_id, .. } => Some((
+            "session.attachment",
+            json!({
+                "sessionId": operation.session_id,
+                "attachmentId": attachment_id,
+            }),
+        )),
+        UiEffect::ReorderSession {
+            workspace_id,
+            session_id,
+            before_session_id,
+            ..
+        } => Some((
+            "workspace.insertSessionBefore",
+            json!({
+                "workspaceId": workspace_id,
+                "sessionId": session_id,
+                "beforeSessionId": before_session_id,
+            }),
+        )),
+        UiEffect::InterruptSubagent { address, .. } => Some((
+            "subagent.interrupt",
+            json!({
+                "parentSessionId": address.parent_session_id,
+                "childSessionId": address.child_session_id,
+                "mode": address.mode,
+            }),
+        )),
+        UiEffect::AttachSession { .. } => None,
+    };
+    Ok(request)
+}
+
+struct DecodedAsyncResult {
+    accepted: bool,
+    file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
+    attachment_preview: Option<dsh_pager::AttachmentPreview>,
+}
+
+fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyncResult> {
+    if matches!(effect, UiEffect::RespondInteraction { .. }) {
+        let value: dsh_pager_protocol::TuiRespondResult = serde_json::from_value(raw)?;
+        return Ok(DecodedAsyncResult {
+            accepted: value.accepted,
+            file_references: None,
+            attachment_preview: None,
+        });
+    }
+    let value = unwrap_api_value(raw)?;
+    if matches!(effect, UiEffect::FileSearchQuery { .. }) {
+        let file_references = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            file_references: Some(file_references),
+            attachment_preview: None,
+        });
+    }
+    if matches!(effect, UiEffect::PreviewMedia { .. }) {
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            file_references: None,
+            attachment_preview: Some(parse_attachment_preview(value)?),
+        });
+    }
+    let accepted = value
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    Ok(DecodedAsyncResult {
+        accepted,
+        file_references: None,
+        attachment_preview: None,
+    })
+}
+
+fn unwrap_api_value(raw: Value) -> PagerResult<Value> {
+    let result: dsh_pager_protocol::ApiResult<Value> = serde_json::from_value(raw)?;
+    result.into_result().map_err(PagerError::from)
+}
+
+fn parse_attachment_preview(value: Value) -> PagerResult<dsh_pager::AttachmentPreview> {
+    const MAX_DATA_BYTES: usize = 1_048_576;
+    let attachment = value.get("attachment").unwrap_or(&value);
+    let data = value
+        .get("data")
+        .and_then(Value::as_str)
+        .filter(|data| !data.is_empty())
+        .ok_or_else(|| PagerError::new("session.attachment returned no image data"))?;
+    if data.len() > MAX_DATA_BYTES {
+        return Err(PagerError::new(format!(
+            "session.attachment preview exceeds {MAX_DATA_BYTES} base64 bytes"
+        )));
+    }
+    let attachment_id = attachment
+        .get("attachmentId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if attachment_id.is_empty() {
+        return Err(PagerError::new(
+            "session.attachment returned no attachment id",
+        ));
+    }
+    Ok(dsh_pager::AttachmentPreview {
+        attachment_id,
+        media_type: attachment
+            .get("mediaType")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream")
+            .to_string(),
+        data: data.to_string(),
+        bytes: attachment.get("bytes").and_then(Value::as_u64),
+        width: attachment
+            .get("width")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok()),
+        height: attachment
+            .get("height")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok()),
+    })
+}
+
+fn build_completion(
+    effect: UiEffect,
+    ledger: &mut EffectLedger,
+    result: PagerResult<DecodedAsyncResult>,
+) -> UiEffectCompletion {
+    let operation = effect_operation(&effect).clone();
+    match result {
+        Ok(decoded) if decoded.accepted => {
+            ledger.complete(operation.clone());
+            UiEffectCompletion {
+                effect,
+                receipt: UiEffectReceipt {
+                    status: UiEffectStatus::Accepted,
+                    operation,
+                    diagnostic: None,
+                    retryable: Some(false),
+                },
+                file_references: decoded.file_references,
+                attachment_preview: decoded.attachment_preview,
+            }
+        }
+        Ok(decoded) => UiEffectCompletion {
+            effect,
+            receipt: UiEffectReceipt {
+                status: UiEffectStatus::Rejected,
+                operation,
+                diagnostic: Some("host rejected operation".into()),
+                retryable: Some(false),
+            },
+            file_references: decoded.file_references,
+            attachment_preview: decoded.attachment_preview,
+        },
+        Err(error) => UiEffectCompletion {
+            effect,
+            receipt: UiEffectReceipt {
+                status: classify_effect_error(&error),
+                operation,
+                diagnostic: Some(error.to_string()),
+                retryable: Some(true),
+            },
+            file_references: None,
+            attachment_preview: None,
+        },
+    }
+}
+
 fn classify_effect_error(error: &dsh_pager::PagerError) -> UiEffectStatus {
     let message = error.to_string().to_ascii_lowercase();
     if message.contains("timeout") || message.contains("timed out") {
@@ -936,6 +1298,75 @@ mod tests {
             ledger.duplicate_receipt(duplicate).diagnostic.as_deref(),
             Some("duplicate operation suppressed")
         );
+    }
+
+    #[test]
+    fn async_request_encoding_keeps_wire_identity_and_does_not_call_transport() {
+        let session = SessionState::new("s".into(), 4);
+        let effect = compile_intent(
+            UiIntent::SubmitPrompt {
+                text: "hello".into(),
+                mode: PromptMode::Queue,
+            },
+            &UiContext::for_operation(&session, DshRequestId::new("op-7")),
+        );
+        let operation = effect_operation(&effect).clone();
+        let (method, params) = encode_async_request(&effect, &operation)
+            .expect("encode")
+            .expect("supported effect");
+        assert_eq!(method, "session.prompt");
+        assert_eq!(params["sessionId"], "s");
+        assert_eq!(params["mode"], "queue");
+        assert_eq!(params["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn async_completion_decodes_file_rows_and_media_metadata() {
+        let session = SessionState::new("s".into(), 4);
+        let file_effect = compile_intent(
+            UiIntent::FileSearchQuery {
+                query: "src".into(),
+                revision: 2,
+            },
+            &UiContext::for_operation(&session, DshRequestId::new("file-2")),
+        );
+        let decoded = decode_async_result(
+            &file_effect,
+            json!({
+                "ok": true,
+                "value": {"items": [{"path": "src/lib.rs", "kind": "file"}]}
+            }),
+        )
+        .expect("file completion");
+        assert!(decoded.accepted);
+        assert_eq!(decoded.file_references.unwrap().items[0].path, "src/lib.rs");
+
+        let media_effect = compile_intent(
+            UiIntent::PreviewMedia {
+                attachment_id: "img-1".into(),
+            },
+            &UiContext::for_operation(&session, DshRequestId::new("media-1")),
+        );
+        let decoded = decode_async_result(
+            &media_effect,
+            json!({
+                "ok": true,
+                "value": {
+                    "attachment": {
+                        "attachmentId": "img-1",
+                        "mediaType": "image/png",
+                        "width": 4,
+                        "height": 3
+                    },
+                    "data": "aGVsbG8="
+                }
+            }),
+        )
+        .expect("media completion");
+        let preview = decoded.attachment_preview.unwrap();
+        assert_eq!(preview.attachment_id, "img-1");
+        assert_eq!(preview.media_type, "image/png");
+        assert_eq!(preview.width, Some(4));
     }
 
     #[test]
