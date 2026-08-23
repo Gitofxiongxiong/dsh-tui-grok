@@ -6,8 +6,8 @@
 
 use dsh_pager::{
     ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
-    DshQueueItem, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderKind, DshSeq,
-    DshSessionId, SessionState,
+    DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
+    DshRenderKind, DshSeq, DshSessionId, SessionState,
 };
 use dsh_pager_protocol::PromptMode;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ pub struct TranscriptRow {
 /// or not negotiated; it never means the UI should silently fake support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct CapabilityMatrix {
     pub mouse: bool,
     pub paste: bool,
@@ -41,6 +42,8 @@ pub struct CapabilityMatrix {
     pub workspace_actions: bool,
     pub prompt_history: bool,
     pub prompt_suggestions: bool,
+    pub file_search: bool,
+    pub subagents: bool,
 }
 
 impl Default for CapabilityMatrix {
@@ -57,6 +60,8 @@ impl Default for CapabilityMatrix {
             workspace_actions: false,
             prompt_history: false,
             prompt_suggestions: false,
+            file_search: false,
+            subagents: false,
         }
     }
 }
@@ -92,6 +97,8 @@ impl CapabilityMatrix {
         read!(workspace_actions);
         read!(prompt_history);
         read!(prompt_suggestions);
+        read!(file_search);
+        read!(subagents);
         capabilities
     }
 }
@@ -104,8 +111,94 @@ fn capability_camel_key(key: &str) -> &str {
         "workspace_actions" => "workspaceActions",
         "prompt_history" => "promptHistory",
         "prompt_suggestions" => "promptSuggestions",
+        "file_search" => "fileSearch",
+        "subagents" => "subagents",
         _ => key,
     }
+}
+
+/// Availability of a user-visible feature in the current host snapshot.
+///
+/// `Pending` is deliberately distinct from `Unsupported`: the former means
+/// the UI must wait for an authoritative host result, while the latter must
+/// render the Grok-defined fallback and diagnostic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeatureStatus {
+    Available,
+    Pending,
+    #[default]
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSearchRow {
+    pub id: String,
+    pub path: String,
+    pub line: u32,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSearchSnapshot {
+    pub status: FeatureStatus,
+    pub query: String,
+    pub selected_id: Option<String>,
+    pub rows: Vec<FileSearchRow>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestionSnapshot {
+    pub status: FeatureStatus,
+    pub active: bool,
+    pub selected: Option<usize>,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaRow {
+    pub id: String,
+    pub media_type: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaSnapshot {
+    pub status: FeatureStatus,
+    pub rows: Vec<MediaRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRow {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSnapshot {
+    pub status: FeatureStatus,
+    pub actions_supported: bool,
+    pub order: Vec<String>,
+    pub rows: Vec<WorkspaceRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentRow {
+    pub id: String,
+    pub parent_id: String,
+    pub label: String,
+    pub mode: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSnapshot {
+    pub status: FeatureStatus,
+    pub tasks: Vec<TaskRow>,
+    pub subagents: Vec<SubagentRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +279,16 @@ pub struct GrokHostSnapshot {
     pub interaction: Option<DshInteraction>,
     pub tasks: Vec<TaskRow>,
     pub diagnostics: Vec<DiagnosticView>,
+    #[serde(default)]
+    pub file_search: FileSearchSnapshot,
+    #[serde(default)]
+    pub suggestions: SuggestionSnapshot,
+    #[serde(default)]
+    pub media: MediaSnapshot,
+    #[serde(default)]
+    pub workspace: WorkspaceSnapshot,
+    #[serde(default)]
+    pub agent: AgentSnapshot,
     pub capabilities: CapabilityMatrix,
 }
 
@@ -221,7 +324,7 @@ impl GrokHostSnapshot {
             .map(str::to_string)
             .unwrap_or_else(|| format!("Session {}", session.session_id()));
         let presentation = session.presentation_model();
-        let transcript = presentation
+        let transcript: Vec<TranscriptRow> = presentation
             .entries
             .into_iter()
             .map(TranscriptRow::from)
@@ -293,6 +396,7 @@ impl GrokHostSnapshot {
             .iter()
             .map(DiagnosticView::from)
             .collect();
+        let capabilities = CapabilityMatrix::from_session(session);
         let interaction = presentation.interaction.clone();
         let queue = presentation.queue.clone();
         let queue_revision = presentation.queue_revision;
@@ -312,6 +416,34 @@ impl GrokHostSnapshot {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let file_search = FileSearchSnapshot {
+            // A capability bit only says the host can serve this surface. A
+            // query/result snapshot is still required before the renderer may
+            // call it available.
+            status: if capabilities.file_search {
+                FeatureStatus::Pending
+            } else {
+                FeatureStatus::Unsupported
+            },
+            query: String::new(),
+            selected_id: None,
+            rows: Vec::new(),
+            diagnostic: (!capabilities.file_search)
+                .then(|| "DeepSeek Harness file search is unavailable".into()),
+        };
+        let suggestion_snapshot = SuggestionSnapshot {
+            status: feature_status(capabilities.prompt_suggestions),
+            active: false,
+            selected: None,
+            items: suggestions.clone(),
+        };
+        let media = media_snapshot(&transcript, capabilities.image);
+        let workspace = workspace_snapshot(control_plane, capabilities.workspace_actions);
+        let agent = AgentSnapshot {
+            status: feature_status(control_plane.is_some() || !tasks.is_empty()),
+            tasks: tasks.clone(),
+            subagents: Vec::new(),
+        };
         let session_header = SessionHeader {
             id: DshSessionId::new(session.session_id()),
             generation: DshGeneration::new(session.generation()),
@@ -349,7 +481,12 @@ impl GrokHostSnapshot {
             interaction,
             tasks,
             diagnostics,
-            capabilities: CapabilityMatrix::from_session(session),
+            file_search,
+            suggestions: suggestion_snapshot,
+            media,
+            workspace,
+            agent,
+            capabilities,
         }
     }
 
@@ -410,6 +547,11 @@ impl GrokHostSnapshot {
             interaction: None,
             tasks: Vec::new(),
             diagnostics: Vec::new(),
+            file_search: FileSearchSnapshot::default(),
+            suggestions: SuggestionSnapshot::default(),
+            media: MediaSnapshot::default(),
+            workspace: WorkspaceSnapshot::default(),
+            agent: AgentSnapshot::default(),
             capabilities: CapabilityMatrix::default(),
         }
     }
@@ -497,6 +639,70 @@ impl From<DshRenderEntry> for TranscriptRow {
     }
 }
 
+fn feature_status(enabled: bool) -> FeatureStatus {
+    if enabled {
+        FeatureStatus::Available
+    } else {
+        FeatureStatus::Unsupported
+    }
+}
+
+fn media_snapshot(transcript: &[TranscriptRow], enabled: bool) -> MediaSnapshot {
+    let rows =
+        transcript
+            .iter()
+            .flat_map(|entry| {
+                entry.content.blocks.iter().enumerate().filter_map(
+                    move |(index, block)| match block {
+                        DshRenderBlock::Image {
+                            attachment_id,
+                            media_type,
+                            name,
+                            ..
+                        } => Some(MediaRow {
+                            id: format!("{}:image:{index}", render_entry_id(entry.id)),
+                            media_type: media_type.clone(),
+                            name: name.clone().or_else(|| attachment_id.clone()),
+                        }),
+                        _ => None,
+                    },
+                )
+            })
+            .collect();
+    MediaSnapshot {
+        status: feature_status(enabled),
+        rows,
+    }
+}
+
+fn workspace_snapshot(
+    control_plane: Option<&ControlPlaneStore>,
+    actions_supported: bool,
+) -> WorkspaceSnapshot {
+    let Some(control_plane) = control_plane else {
+        return WorkspaceSnapshot {
+            status: FeatureStatus::Pending,
+            actions_supported,
+            order: Vec::new(),
+            rows: Vec::new(),
+        };
+    };
+    WorkspaceSnapshot {
+        status: FeatureStatus::Available,
+        actions_supported,
+        order: control_plane.workspace_order().to_vec(),
+        rows: control_plane
+            .workspaces()
+            .map(|workspace| WorkspaceRow {
+                id: workspace.workspace_id.clone(),
+                title: workspace.title.clone(),
+                path: workspace.path.clone(),
+                session_ids: workspace.session_ids.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// Keep this conversion explicit at the boundary; a future Codex adapter can
 /// implement the same shape without importing DSH's presentation module.
 pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
@@ -539,7 +745,19 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         interaction,
         tasks: Vec::new(),
         diagnostics: Vec::new(),
+        file_search: FileSearchSnapshot::default(),
+        suggestions: SuggestionSnapshot::default(),
+        media: MediaSnapshot::default(),
+        workspace: WorkspaceSnapshot::default(),
+        agent: AgentSnapshot::default(),
         capabilities: CapabilityMatrix::default(),
+    }
+}
+
+fn render_entry_id(id: DshRenderEntryId) -> String {
+    match id {
+        DshRenderEntryId::Event { seq } => format!("event:{seq}"),
+        DshRenderEntryId::Partial { turn, step } => format!("partial:{turn}:{step}"),
     }
 }
 
@@ -600,7 +818,9 @@ mod tests {
                 "image": true,
                 "workspace_actions": true,
                 "prompt_history": true,
-                "prompt_suggestions": true
+                "prompt_suggestions": true,
+                "file_search": true,
+                "subagents": true
             }),
         );
         state.set_projection("promptHistory", 8, json!(["first", "second"]));
@@ -621,9 +841,15 @@ mod tests {
         assert!(first.capabilities.image);
         assert!(first.capabilities.workspace_actions);
         assert!(first.capabilities.prompt_history);
+        assert!(first.capabilities.file_search);
+        assert!(first.capabilities.subagents);
         assert_eq!(first.prompt.history, vec!["first", "second"]);
         assert_eq!(first.prompt.suggestions, vec!["/help", "/model"]);
         assert!(!first.prompt.authoritative);
+        assert_eq!(first.file_search.status, FeatureStatus::Pending);
+        assert_eq!(first.suggestions.status, FeatureStatus::Available);
+        assert_eq!(first.workspace.status, FeatureStatus::Pending);
+        assert_eq!(first.agent.status, FeatureStatus::Unsupported);
     }
 
     #[test]

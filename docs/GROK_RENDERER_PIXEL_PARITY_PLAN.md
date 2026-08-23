@@ -1,4 +1,4 @@
-# Grok renderer 复用与像素级前端对齐方案
+# Grok renderer 复用、完整能力迁移与像素级前端对齐方案
 
 > 适用仓库：`/home/leo/code/dsh-pager-grok`
 > 上游仓库：`/home/leo/code/grok-build`
@@ -9,12 +9,18 @@
 
 后续前端迁移不再手写 Grok 的等价 renderer。Grok Build 的视觉实现直接作为
 前端 reference 和生产 renderer：布局、主题、Prompt、Scrollback、selection、
-status、快捷键、焦点和终端降级规则优先复用上游代码。
+status、快捷键、焦点、Markdown、Diff、File Search、Suggestion、Image、
+Workspace、Agent/Task/Subagent 和终端降级规则优先复用上游代码。
 
-DSH 仍然是唯一的数据和副作用真源。DSH 只负责把 `SessionState`、
-`ControlPlaneStore` 和 capability 投影成 Grok renderer 消费的 DTO，并把 Grok
-view 产生的 `UiIntent` 转换为 `UiEffect`。Grok agent、shell、ACP、RPC、配置、
-持久化和 telemetry 不进入 DSH UI。
+DSH 仍然是唯一的数据、身份、能力和副作用真源。DSH 负责把 `SessionState`、
+`ControlPlaneStore`、搜索结果、workspace/job/subagent 状态、媒体元数据和
+capability 投影成 Grok renderer 消费的 DTO，并把 Grok view 产生的 `UiIntent`
+转换为 `UiEffect`。新项目必须保留上述完整用户能力，但不把 Grok 的 agent loop、
+shell、ACP、RPC、配置、持久化和 telemetry runtime 带进来。
+
+这里的“排除 Grok agent”只表示不复制 Grok 的业务执行引擎；AgentView、agent
+消息、运行状态、task、subagent、interrupt 和 streaming 视觉/交互仍然是必须
+迁移的 TUI 能力，由 DeepSeek Harness 提供真实状态。
 
 目标不是把 Grok 应用整体复制进 DSH，而是复制 Grok 的视觉实现闭包：
 
@@ -28,8 +34,8 @@ DSH SessionState / ControlPlaneStore
        GrokRenderAdapter
         |       |        |
         v       v        v
-   AgentView  Prompt  Scrollback
-   Layout     Widget  Pane/Blocks
+   AgentView  Prompt  Scrollback  Capability surfaces
+   Layout     Widget  Blocks      Search/Suggest/Image/Workspace/Agent
         \       |        /
          \      v       /
           ratatui Buffer
@@ -62,13 +68,19 @@ DSH SessionState / ControlPlaneStore
 | Appearance | DSH 常量和局部参数 | 引入 Grok prompt/scrollback/layout 配置的只读投影 |
 | ScrollbackPane/block renderer | `RichTranscript` | 直接复用 Grok scrollback block/layout/render 路径 |
 | AgentView render orchestration | `runtime.rs` 手工串联 | 复用 Grok `AgentView::draw` 的绘制顺序 |
+| Markdown / Diff renderer | `views/transcript.rs` 的简化文本投影 | 复用 Grok markdown/diff AST、样式、hunk 和复制语义 |
+| File Search | 目前只有 line viewer 和 session search 基础 | 迁移 Grok file-search overlay、结果列表、预览和命中几何，并接 DSH file-search contract |
+| Suggestion / history | `PromptEditor` + 简化 projection | 迁移 Grok suggestion controller、候选 viewport、slash/history 状态机 |
+| Image / media | placeholder + capability shim | 迁移 Grok image block、preview、尺寸约束和显式 fallback |
+| Workspace / dashboard | DSH `DashboardModel` + 简化 modal | 复用 Grok workspace/list/tree/focus/peek 组件，DSH 提供 authority |
+| Agent / task / subagent | status/task DTO + 简化文案 | 迁移 Grok AgentView/status/task/subagent pane，DSH 提供 lifecycle 和 effect |
 
 因此，当前界面“接近但不一致”的根因不是缺少 ratatui 能力，而是核心 renderer
 仍然是 DSH 自建实现。
 
 ## 3. 复用边界
 
-### 3.1 必须直接复用的前端代码
+### 3.1 必须直接复用的前端代码和能力闭包
 
 第一阶段优先引入以下上游路径：
 
@@ -80,6 +92,14 @@ xai-grok-pager/src/app/agent_view/render.rs
 xai-grok-pager/src/views/agent_status.rs
 xai-grok-pager/src/views/turn_status.rs
 xai-grok-pager/src/scrollback/
+xai-grok-pager/src/scrollback/blocks/
+xai-grok-pager/src/scrollback/wrappers/
+xai-grok-pager/src/views/file_search/
+xai-grok-pager/src/views/suggestion_controller/
+xai-grok-pager/src/prompt_images/
+xai-grok-pager/src/views/dashboard/
+xai-grok-pager/src/views/tasks_pane.rs
+xai-grok-pager/src/views/subagent* / app/agent_view/task_status*
 xai-grok-pager-render/src/appearance/
 xai-grok-pager-render/src/theme/
 xai-grok-pager-render/src/glyphs.rs
@@ -91,24 +111,34 @@ xai-grok-pager-render/src/render/
 - row constraints、outer padding、prompt gap 和 short-terminal 断点；
 - prompt 的 divider、accent、prefix、title、info line、cursor 和 unfocused dimming；
 - transcript block 的结构、折行、颜色、selection、scrollbar 和 timeline；
+- Markdown、code、Diff/hunk、tool/result、reasoning、image 和 unknown block 的
+  结构、样式、折行、selection、link/copy 语义；
+- file search 的输入、过滤、结果列表、line preview、命中高亮、焦点和 overlay；
+- suggestion/history 的候选排序、viewport、光标、accept/dismiss 和 Esc ladder；
+- image/media 的 inline/preview/placeholder、尺寸裁剪和 capability fallback；
+- workspace/session tree、dashboard、peek/back、job/task/subagent 视觉和焦点；
 - status、turn status、spinner、shortcut 和 capability fallback；
 - 主题 token、glyph 和终端颜色角色。
 
-不能只复制 `PromptWidget` 或 `agent.rs` 单文件。必须以编译和行为所需的最小
-renderer dependency closure 为单位 vendor，否则会再次出现“看起来像上游、实际
-几何和颜色仍由本地代码决定”的结果。
+不能只复制 `PromptWidget` 或 `agent.rs` 单文件。必须按“纯 renderer + 交互状态
+机 + 上游测试”的最小能力闭包 vendor；闭包中确实属于 Markdown、Diff、file
+search、suggestion、image、workspace 或 agent UI 的依赖必须保留，只有业务执行
+runtime 才在 adapter seam 外重接，否则会出现“功能还在但视觉和行为已经分叉”。
 
 ### 3.2 明确不得复制的 Grok 代码
 
-以下模块即使被 renderer 间接引用，也不得进入 DSH production dependency：
+以下模块即使被 renderer 间接引用，也不得以 Grok runtime 形式进入 DSH production
+dependency：
 
 - Grok agent loop、tool/shell orchestration；
 - ACP client/runtime 和 Grok session model；
-- Grok workspace/config/auth/persistence/telemetry；
+- Grok workspace/config/auth/persistence/telemetry runtime（workspace UI、数据
+  DTO 和 action 视觉仍然必须保留）；
 - Grok RPC transport、foreign session storage 和后台 worker；
 - 只为 Grok 产品业务存在的 dispatch/effect 实现。
 
-这些能力仍由 `crates/dsh-pager` 和 DSH protocol 拥有。
+这些运行时能力仍由 `crates/dsh-pager`、DSH protocol 和 DeepSeek Harness 拥有；
+对应的用户可见功能由 Grok-derived UI 完成。
 
 ### 3.3 Adapter 是唯一接缝
 
@@ -121,11 +151,24 @@ pub struct GrokRenderSnapshot {
     pub prompt: GrokPromptVisual,
     pub scrollback: GrokScrollbackVisual,
     pub status: GrokStatusVisual,
+    pub file_search: GrokFileSearchVisual,
+    pub suggestions: GrokSuggestionVisual,
+    pub media: GrokMediaVisual,
+    pub workspace: GrokWorkspaceVisual,
+    pub agent: GrokAgentVisual,
     pub capabilities: TerminalCapabilities,
 }
 ```
 
 DTO 只表达绘制和交互所需事实，不保存 DSH runtime 引用，不发起副作用。
+
+每个 capability surface 都必须区分三种状态：
+
+- `available`：DTO 数据和对应 host effect 都已具备；
+- `pending`：host 正在加载或等待 authoritative snapshot；
+- `unsupported`：当前 Harness/terminal 没有能力，UI 必须走 Grok fallback 并给出诊断。
+
+不能把“没有数据”当成空列表，也不能把未实现的 effect 伪造成成功。
 
 动作方向保持：
 
@@ -147,16 +190,20 @@ Grok input/state
 
 工作项：
 
-1. 从固定 Grok revision 计算 Prompt、AgentView、Scrollback、Theme、Appearance
-   和 render helper 的依赖闭包。
+1. 从固定 Grok revision 计算 Prompt、AgentView、Scrollback、Theme、Appearance、
+   Markdown、Diff、File Search、Suggestion、Image、Workspace 和 Agent UI 的
+   依赖闭包；逐项标记 pure renderer、local state、host DTO 和 host effect。
 2. 按 `vendor/grok` 原始目录结构复制，保留 Apache-2.0 `LICENSE/NOTICE`。
 3. 更新 `SOURCE_MANIFEST.md`：每个文件记录 upstream path、source hash、vendor
    hash 和本地适配原因。
-4. 保留上游 tests；如果 tests 依赖 Grok runtime，则提取纯 renderer fixture，
-   不复制业务测试 harness。
+4. 保留上游 tests；如果 tests 依赖 Grok runtime，则提取纯 renderer/interaction
+   fixture，不复制业务执行 harness，但不得删除对应用户能力的行为断言。
+5. 为每个能力建立 source map：上游源码、当前 DSH DTO、需要的 UiIntent/UiEffect、
+   stable ID/generation、capability fallback 和旧实现删除条件。
 
-完成标准：所有新增视觉文件都可追溯；没有未登记的 vendor 文件；不引入 Grok
-agent/shell/runtime。
+完成标准：所有新增视觉文件都可追溯；没有未登记的 vendor 文件；Markdown、Diff、
+File Search、Suggestion、Image、Workspace、Agent 的 renderer 闭包都有明确入口；
+不引入 Grok agent/shell/runtime。
 
 ### P1：完整 Theme、Appearance 和 glyph
 
@@ -191,6 +238,24 @@ agent/shell/runtime。
 完成标准：`40x12`、`80x24`、`120x40` 的 prompt border、title、prefix、info line、
    cursor 和 multiline frame 与 Grok reference 逐 cell 一致。
 
+### P2A：完整能力闭包接线
+
+P2A 与 P2/P3 并行，但它是 TUI 功能完整性的硬门禁，不允许因为主 prompt 或
+transcript 已经显示就把其它产品面推迟到“以后再说”。
+
+| 能力 | Grok UI 闭包 | DSH host seam | 最低出口 |
+|---|---|---|---|
+| Markdown | markdown AST、代码/列表/链接 renderer、wrap/copy | `DshRenderBlock::Markdown` + content revision | block semantic cells、链接和复制一致 |
+| Diff | hunk、增删行、路径 header、折叠/复制 | `DshRenderBlock::Diff` + stable entry/block ID | diff geometry、颜色 role、selection 一致 |
+| File Search | query editor、结果列表、line viewer、命中高亮、overlay/focus | typed search snapshot + search effect；不得把 `session.search` 冒充 filesystem search | loading/empty/error/result/preview 以及 stale query |
+| Suggestion | candidate controller、history/slash、viewport、accept/dismiss | prompt suggestion DTO + capability；副作用仍走 intent/effect | cursor、候选焦点、Esc/Enter 状态机 |
+| Image | image block、prompt attachment、preview、尺寸裁剪、placeholder | attachment ID/media metadata/capability；数据由 Harness 提供 | supported/unsupported/missing 三种状态明确 |
+| Workspace | tree/list、group、peek/back、archive、reorder、焦点 | workspace/session/job DTO + mutation effect | stable ID、refresh/attach/back race |
+| Agent | AgentView、streaming、turn/status、task/subagent、interrupt | session event、job/subagent snapshot + generation | running/complete/error/reconnect/interrupt |
+
+这些能力都必须进入 reference fixture 和真实 backend matrix。没有对应 DSH
+authority 的能力只能显示 `pending` 或 `unsupported`，不能用静态假数据伪造完成。
+
 ### P3：AgentViewLayout 和主绘制顺序
 
 目标是让所有 pane 的几何来自 Grok solver。
@@ -203,6 +268,9 @@ agent/shell/runtime。
 3. 用同一份 layout snapshot 同时驱动绘制、hit map、cursor 和 mouse routing。
 4. 删除当前 runtime 的手写 header/prompt/footer 几何回推逻辑。
 5. 保留 DSH 的 overlay owner 和 effect reducer，只更换其视觉落点。
+
+P3 的“主绘制顺序”还必须包含 file-search/suggestion/image/workspace/agent 的
+overlay 和 pane owner；它不是只替换 header、transcript、prompt 三段 row stack。
 
 完成标准：任何支持的终端尺寸下，pane rect 不重叠、不越界；resize 后 layout、
    hit map、scrollbar 和 cursor 同步失效并重建。
@@ -226,6 +294,10 @@ agent/shell/runtime。
    wrapping、selection geometry 和 scrollbar 语义一致；partial replacement 不
    产生重复 block。
 
+P4 的 block 闭包至少包括 Markdown、Reasoning、ToolCall、ToolResult、Diff、Image、
+Subagent/Agent status 和 Unknown。File Search 预览中的代码/文本行必须复用同一
+width/grapheme/hit-map 规则，不能另造 line viewer 几何。
+
 ### P5：runtime 收敛和旧 renderer 删除
 
 目标是生产路径只保留一套 Grok 视觉实现。
@@ -236,6 +308,8 @@ agent/shell/runtime。
 - 当前 `RichTranscript` 生产绘制路径；
 - runtime 中重复的 status/header 文案拼接和尺寸计算；
 - 与 Grok 等价的 DSH Theme、spacing、glyph 和 scrollbar 算法。
+- 只支持“主会话能显示”的 feature fallback；在 file search、suggestion、image、
+  workspace 或 agent surface 仍缺失时，不得关闭对应旧路径。
 
 保留：
 
@@ -246,6 +320,39 @@ agent/shell/runtime。
 
 完成标准：生产 runtime 不再存在第二套同职责 renderer；所有临时 fallback 都有
 删除记录或明确保留理由。
+
+## 4A. 能力状态和 host contract
+
+每个 feature snapshot 都必须有稳定的 `status`：
+
+```rust
+pub enum FeatureStatus {
+    Available,
+    Pending,
+    Unsupported,
+}
+```
+
+规则：
+
+1. `Available` 只能来自 DSH snapshot/capability 和可执行 effect 的共同确认；
+2. `Pending` 表示正在加载、等待 attach barrier、搜索结果或媒体内容，不代表成功；
+3. `Unsupported` 必须落到 Grok 定义的 fallback/diagnostic；不得静默隐藏入口；
+4. 所有动作目标使用 stable ID，并携带 session/request/generation；
+5. view 不得直接读取 `SessionState`、解析 RPC JSON 或调用 loader；
+6. UI 功能可以完整迁移，Grok 业务执行 runtime 不得迁移。
+
+目标 snapshot 分区：
+
+```text
+GrokHostSnapshot
+  ├─ session / prompt / scrollback / status
+  ├─ file_search
+  ├─ suggestions
+  ├─ media
+  ├─ workspace
+  └─ agent (tasks / subagents / interactions)
+```
 
 ## 5. 像素级 parity 方案
 
