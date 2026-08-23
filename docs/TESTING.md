@@ -60,7 +60,8 @@ mock 证据，并将真实后端状态记录为 unavailable，而不会伪造成
 始终使用另一个隔离空 session，避免长历史页面影响终端退出断言：
 
 ```bash
-DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness scripts/real-e2e.sh
+DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
+  DSH_TUI_PROFILE=grok-tui scripts/real-e2e.sh
 ```
 
 ```bash
@@ -69,7 +70,7 @@ REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
 ```
 
 默认 backend 为
-`/home/leo/code/deepseek-harness/apps/cli/lib/bin.js --profile tui-embedded`，
+`/home/leo/code/deepseek-harness/apps/cli/lib/bin.js --profile grok-tui`，
 并从 Harness 自己的 `$DSH_HOME` credentials/settings 层读取配置；密钥不写入本仓库。
 如果刚修改过 Harness 的 TypeScript 源码，先在该 checkout 重建 host bundle：
 

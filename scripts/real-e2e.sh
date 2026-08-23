@@ -3,7 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 harness_root="${DSH_HARNESS_ROOT:-/home/leo/code/deepseek-harness}"
-server_program="${DSH_TUI_SERVER:-$harness_root/apps/cli/lib/bin.js --profile tui-embedded}"
+tui_profile="${DSH_TUI_PROFILE:-grok-tui}"
+server_program="${DSH_TUI_SERVER:-$harness_root/apps/cli/lib/bin.js --profile $tui_profile}"
 timeout_seconds="${REAL_E2E_TIMEOUT:-45}"
 session_id="${REAL_E2E_SESSION:-}"
 
@@ -43,7 +44,7 @@ python3 scripts/pty-smoke.py \
   --pager-arg=--new \
   --backend "$harness_root/apps/cli/lib/bin.js" \
   --backend-arg=--profile \
-  --backend-arg tui-embedded \
+  --backend-arg "$tui_profile" \
   --timeout "$timeout_seconds"
 
 printf 'real DeepSeek Harness E2E checks passed (hello/list/dashboard/load/PTY)\n'
