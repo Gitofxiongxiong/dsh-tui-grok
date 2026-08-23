@@ -53,7 +53,8 @@ use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
     agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact},
-    dashboard::{DashboardPeek, render_dashboard_content},
+    agent_panes::{AgentPaneController, render_agent_tasks_content, render_inline_agent_panes},
+    dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
     file_search::controller::FileSearchController,
     interaction::{render_interaction_content, response_for},
     modal_window::{
@@ -73,6 +74,7 @@ use crate::views::{
     suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
     transcript::ScrollbackPane,
+    workspace::WorkspaceTreeController,
 };
 use serde_json::json;
 use xai_ratatui_textarea::MouseAction;
@@ -264,9 +266,10 @@ struct UiState {
     image_selected: usize,
     media_preview: Option<MediaPreviewBuffer>,
     media_preview_controller: MediaPreviewController,
-    agent_task_selected: usize,
+    agent_pane: AgentPaneController,
     agent_subagents: Vec<crate::host_adapter::SubagentRow>,
     dashboard: DashboardModel,
+    workspace_tree: WorkspaceTreeController,
     dashboard_revision: Option<u64>,
     dashboard_query: PromptEditor,
     dashboard_query_active: bool,
@@ -415,6 +418,7 @@ impl UiState {
         // the effect reducer after the base session projection. Fold the
         // latest stable-ID result into this frame's single render snapshot.
         snapshot.agent.subagents = self.agent_subagents.clone();
+        self.agent_pane.sync(&snapshot.agent);
         self.reconcile_snapshot(&snapshot);
         let suggestion_rows = self
             .suggestion_items(&snapshot)
@@ -648,7 +652,7 @@ impl UiState {
         } else if self.shell.overlay() == Overlay::AgentTasks {
             self.render_agent_tasks(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::Dashboard {
-            self.render_dashboard(frame, area);
+            self.render_dashboard(frame, area, &snapshot.workspace);
         }
         self.frame_links = self.hit_map.link_spans();
         self.frame = self.frame.wrapping_add(1);
@@ -662,55 +666,7 @@ impl UiState {
         theme: &Theme,
     ) {
         let buf = frame.buffer_mut();
-        if layout.tasks.height > 0 {
-            buf.set_string(
-                layout.tasks.x,
-                layout.tasks.y,
-                "Tasks",
-                Style::default().fg(theme.gray_bright).bg(theme.bg_base),
-            );
-            for (index, task) in snapshot.tasks.iter().enumerate() {
-                let y = layout.tasks.y.saturating_add(index as u16 + 1);
-                if y >= layout.tasks.bottom() {
-                    break;
-                }
-                let line = format!("{} [{}] {}", task.status, task.id, task.label);
-                buf.set_string(
-                    layout.tasks.x,
-                    y,
-                    truncate_str(&line, layout.tasks.width as usize),
-                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-                );
-            }
-        }
-        if layout.catalog.height > 0 {
-            buf.set_string(
-                layout.catalog.x,
-                layout.catalog.y,
-                "Subagents",
-                Style::default().fg(theme.gray_bright).bg(theme.bg_base),
-            );
-            for (index, subagent) in snapshot.agent.subagents.iter().enumerate() {
-                let y = layout.catalog.y.saturating_add(index as u16 + 1);
-                if y >= layout.catalog.bottom() {
-                    break;
-                }
-                let line = format!(
-                    "{} [{}] {}",
-                    subagent.status.as_deref().unwrap_or("unknown"),
-                    subagent.id,
-                    subagent.label
-                );
-                buf.set_string(
-                    layout.catalog.x,
-                    y,
-                    truncate_str(&line, layout.catalog.width as usize),
-                    Style::default()
-                        .fg(theme.accent_assistant)
-                        .bg(theme.bg_base),
-                );
-            }
-        }
+        render_inline_agent_panes(buf, layout.tasks, layout.catalog, &snapshot.agent, theme);
         if layout.queue.height > 0 {
             render_queue_content(
                 buf,
@@ -843,10 +799,17 @@ impl UiState {
             control_plane.workspaces().cloned().collect(),
             control_plane.workspace_order().to_vec(),
         );
+        self.workspace_tree.sync(&self.dashboard);
         self.dashboard_revision = Some(revision);
     }
 
-    fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    fn render_dashboard(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        workspace: &crate::host_adapter::WorkspaceSnapshot,
+    ) {
+        self.workspace_tree.sync(&self.dashboard);
         let theme = Theme::current();
         let shortcuts = [
             Shortcut {
@@ -872,11 +835,15 @@ impl UiState {
             render_dashboard_content(
                 buf,
                 content.content,
-                &self.dashboard,
-                self.dashboard_peek.as_ref(),
-                self.dashboard_query_active,
-                self.dashboard_query.text(),
-                theme,
+                DashboardRenderState {
+                    model: &self.dashboard,
+                    peek: self.dashboard_peek.as_ref(),
+                    query_active: self.dashboard_query_active,
+                    query: self.dashboard_query.text(),
+                    workspace,
+                    workspace_tree: &self.workspace_tree,
+                    theme,
+                },
             );
         }
     }
@@ -1226,13 +1193,7 @@ impl UiState {
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
             let mut agent = snapshot.agent.clone();
             agent.subagents = self.agent_subagents.clone();
-            render_agent_tasks_content(
-                buf,
-                content.content,
-                &agent,
-                self.agent_task_selected,
-                theme,
-            );
+            render_agent_tasks_content(buf, content.content, &agent, &self.agent_pane, theme);
         }
     }
 
@@ -1395,7 +1356,7 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::OpenAgentTasks => {
-                self.agent_task_selected = 0;
+                self.agent_pane.clear();
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
@@ -1422,6 +1383,9 @@ impl UiState {
                         }
                     }
                 }
+                let mut agent_snapshot = snapshot.agent.clone();
+                agent_snapshot.subagents = self.agent_subagents.clone();
+                self.agent_pane.sync(&agent_snapshot);
                 self.status = Some(subagent_diagnostic.unwrap_or_else(|| {
                     agent_status_message_with_subagents(&snapshot.agent, self.agent_subagents.len())
                 }));
@@ -1859,20 +1823,14 @@ impl UiState {
             return;
         }
         let snapshot = GrokHostSnapshot::from_session(session);
-        let count = snapshot.agent.tasks.len() + self.agent_subagents.len();
-        if count == 0 {
-            return;
-        }
+        let mut agent = snapshot.agent.clone();
+        agent.subagents = self.agent_subagents.clone();
+        self.agent_pane.sync(&agent);
         match key.code {
-            KeyCode::Up => self.agent_task_selected = self.agent_task_selected.saturating_sub(1),
-            KeyCode::Down => {
-                self.agent_task_selected = self.agent_task_selected.saturating_add(1).min(count - 1)
-            }
+            KeyCode::Up => self.agent_pane.move_selection(-1),
+            KeyCode::Down => self.agent_pane.move_selection(1),
             KeyCode::Char('x') => {
-                let subagent_index = self
-                    .agent_task_selected
-                    .saturating_sub(snapshot.agent.tasks.len());
-                if let Some(row) = self.agent_subagents.get(subagent_index)
+                if let Some(row) = self.agent_pane.selected_subagent(&agent)
                     && row.mode.as_deref() == Some("continuable")
                 {
                     let address = dsh_pager_protocol::SubagentAddress {
@@ -2102,16 +2060,30 @@ impl UiState {
             }
             return Ok(());
         }
+        let workspace_actions_supported = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        )
+        .workspace
+        .actions_supported;
         match key.code {
             KeyCode::Esc => {
                 self.shell.close_overlay();
                 self.status = Some("Dashboard closed".into());
             }
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.reorder_dashboard_selection(transport, session, -1)?;
+                if workspace_actions_supported {
+                    self.reorder_dashboard_selection(transport, session, -1)?;
+                } else {
+                    self.status = Some("Workspace reorder unavailable".into());
+                }
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.reorder_dashboard_selection(transport, session, 1)?;
+                if workspace_actions_supported {
+                    self.reorder_dashboard_selection(transport, session, 1)?;
+                } else {
+                    self.status = Some("Workspace reorder unavailable".into());
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => self.dashboard.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.dashboard.move_selection(1),
@@ -2130,7 +2102,11 @@ impl UiState {
                 self.status = Some("Dashboard refreshed".into());
             }
             KeyCode::Char('x') => {
-                self.archive_dashboard_selection(transport, session)?;
+                if workspace_actions_supported {
+                    self.archive_dashboard_selection(transport, session)?;
+                } else {
+                    self.status = Some("Workspace archive unavailable".into());
+                }
             }
             KeyCode::Enter => {
                 if let Some(row) = self.dashboard.selected() {
@@ -3014,85 +2990,6 @@ fn render_image_preview_content(
     );
 }
 
-fn render_agent_tasks_content(
-    buffer: &mut ratatui::buffer::Buffer,
-    area: Rect,
-    snapshot: &AgentSnapshot,
-    selected: usize,
-    theme: &Theme,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    match snapshot.status {
-        FeatureStatus::Unsupported => buffer.set_string(
-            area.x,
-            area.y,
-            "Agent task/subagent state unavailable",
-            Style::default().fg(theme.warning).bg(theme.bg_base),
-        ),
-        FeatureStatus::Pending => buffer.set_string(
-            area.x,
-            area.y,
-            "Waiting for authoritative agent task snapshot...",
-            Style::default().fg(theme.gray).bg(theme.bg_base),
-        ),
-        FeatureStatus::Available => {
-            let mut index = 0usize;
-            for task in &snapshot.tasks {
-                let y = area.y.saturating_add(index as u16);
-                if y >= area.bottom().saturating_sub(2) {
-                    break;
-                }
-                let marker = if index == selected { "▸" } else { " " };
-                let line = format!("{marker} task {} [{}] {}", task.id, task.status, task.label);
-                buffer.set_string(
-                    area.x,
-                    y,
-                    truncate_str(&line, area.width as usize),
-                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-                );
-                index += 1;
-            }
-            for subagent in &snapshot.subagents {
-                let y = area.y.saturating_add(index as u16);
-                if y >= area.bottom().saturating_sub(2) {
-                    break;
-                }
-                let line = format!(
-                    "  subagent {} [{}] {}",
-                    subagent.id,
-                    subagent.status.as_deref().unwrap_or("unknown"),
-                    subagent.label
-                );
-                buffer.set_string(
-                    area.x,
-                    y,
-                    truncate_str(&line, area.width as usize),
-                    Style::default()
-                        .fg(theme.accent_assistant)
-                        .bg(theme.bg_base),
-                );
-                index += 1;
-            }
-            if index == 0 {
-                buffer.set_string(
-                    area.x,
-                    area.y,
-                    "No active tasks or subagents",
-                    Style::default().fg(theme.gray).bg(theme.bg_base),
-                );
-            }
-        }
-    }
-    buffer.set_string(
-        area.x,
-        area.bottom().saturating_sub(1),
-        "↑/↓ select · Esc close",
-        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
-    );
-}
-
 fn media_status_message(snapshot: &MediaSnapshot) -> String {
     match snapshot.status {
         FeatureStatus::Available => format!("{} media attachment(s)", snapshot.rows.len()),
@@ -3174,6 +3071,7 @@ mod tests {
     };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
+    use crate::views::agent_panes::AgentPaneController;
     use crate::views::modal_window::{
         ModalSizing, ModalWindowConfig, Shortcut, render_modal_window,
     };
@@ -3382,7 +3280,7 @@ mod tests {
                 status: FeatureStatus::Pending,
                 ..Default::default()
             },
-            0,
+            &AgentPaneController::default(),
             Theme::current(),
         );
         let task_text = task_buffer

@@ -10,7 +10,9 @@ use ratatui::{
     style::{Modifier, Style},
 };
 
+use crate::host_adapter::{FeatureStatus, WorkspaceSnapshot};
 use crate::theme::Theme;
+use crate::views::workspace::WorkspaceTreeController;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardPeek {
@@ -19,15 +21,26 @@ pub struct DashboardPeek {
     pub lines: Vec<String>,
 }
 
-pub fn render_dashboard_content(
-    buffer: &mut Buffer,
-    area: Rect,
-    model: &DashboardModel,
-    peek: Option<&DashboardPeek>,
-    query_active: bool,
-    query: &str,
-    theme: &Theme,
-) {
+pub struct DashboardRenderState<'a> {
+    pub model: &'a DashboardModel,
+    pub peek: Option<&'a DashboardPeek>,
+    pub query_active: bool,
+    pub query: &'a str,
+    pub workspace: &'a WorkspaceSnapshot,
+    pub workspace_tree: &'a WorkspaceTreeController,
+    pub theme: &'a Theme,
+}
+
+pub fn render_dashboard_content(buffer: &mut Buffer, area: Rect, state: DashboardRenderState<'_>) {
+    let DashboardRenderState {
+        model,
+        peek,
+        query_active,
+        query,
+        workspace,
+        workspace_tree,
+        theme,
+    } = state;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -51,6 +64,16 @@ pub fn render_dashboard_content(
                 ""
             }
         )
+    };
+    let heading = workspace_tree
+        .focused_workspace_id()
+        .map(|id| format!("{heading} · focus {id}"))
+        .unwrap_or(heading);
+    let heading = match workspace.status {
+        FeatureStatus::Available if workspace.actions_supported => heading,
+        FeatureStatus::Available => format!("{heading} · read-only"),
+        FeatureStatus::Pending => format!("{heading} · pending"),
+        FeatureStatus::Unsupported => format!("{heading} · unavailable"),
     };
     put(
         buffer,
@@ -120,6 +143,8 @@ pub fn render_dashboard_content(
     }
     let footer = if query_active {
         "Enter apply search · Esc search off · Backspace edit"
+    } else if !workspace.actions_supported {
+        "↑/↓ select · Enter attach · v peek · g group · a archived · / search · workspace mutations unavailable"
     } else {
         "↑/↓ select · Shift+↑/↓ reorder · Enter attach · x archive · v peek · g group · a archived · / search · Esc back"
     };
@@ -225,11 +250,19 @@ mod tests {
         render_dashboard_content(
             &mut buffer,
             Rect::new(0, 0, 80, 12),
-            &DashboardModel::default(),
-            None,
-            false,
-            "",
-            &Theme::current(),
+            DashboardRenderState {
+                model: &DashboardModel::default(),
+                peek: None,
+                query_active: false,
+                query: "",
+                workspace: &WorkspaceSnapshot {
+                    status: FeatureStatus::Available,
+                    actions_supported: true,
+                    ..Default::default()
+                },
+                workspace_tree: &WorkspaceTreeController::default(),
+                theme: Theme::current(),
+            },
         );
         assert!(buffer.content().iter().any(|cell| cell.symbol() == "D"));
         assert!(buffer.content().iter().any(|cell| cell.symbol() == "v"));

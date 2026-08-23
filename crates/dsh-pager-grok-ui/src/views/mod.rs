@@ -5,6 +5,7 @@ pub mod file_search {
     pub mod line_viewer;
 }
 pub mod agent;
+pub mod agent_panes;
 pub mod dashboard;
 pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]
@@ -25,3 +26,4 @@ pub mod suggestion_controller;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/timeline.rs"]
 pub mod timeline;
 pub mod transcript;
+pub mod workspace;
