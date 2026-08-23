@@ -3,13 +3,16 @@
 //! This intentionally compares terminal-independent rows, rectangles and
 //! focus ownership. ANSI bytes remain the responsibility of PTY tests.
 
+use dsh_pager::DshRenderEntry;
 use ratatui::layout::{Position, Rect};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{AppShell, KeyOwner, Overlay};
 use crate::geometry::{HitMap, HitTarget, insert_text_line};
 use crate::host_adapter::GrokHostSnapshot;
+use crate::theme::Theme;
 use crate::views::agent::{AgentView, AgentViewLayout};
+use crate::views::transcript::RichTranscript;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticRect {
@@ -215,28 +218,52 @@ pub fn render_semantic(
             rect: layout.transcript.into(),
         });
     } else {
-        let mut y = layout.transcript.y;
-        for entry in &snapshot.transcript {
-            for text in entry.content.display_text().split('\n') {
-                if y >= layout.transcript.bottom() {
-                    break;
-                }
-                rows.push(SemanticRow {
-                    role: format!("transcript-{}", entry.kind.label().to_lowercase()),
-                    text: text.to_string(),
-                    rect: Rect::new(layout.transcript.x, y, layout.transcript.width, 1).into(),
-                });
-                y = y.saturating_add(1);
+        let entries = snapshot
+            .transcript
+            .iter()
+            .map(|row| DshRenderEntry {
+                id: row.id,
+                source_seq: row.source_seq,
+                kind: row.kind,
+                text: row.text.clone(),
+                partial: false,
+                lineage: Vec::new(),
+                content: row.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        let rich = RichTranscript::new(
+            &entries,
+            layout.transcript.width.saturating_sub(1).max(1) as usize,
+            *Theme::current(),
+        );
+        for paint in rich.visible_lines(0, layout.transcript.height) {
+            if paint.screen_y >= layout.transcript.height {
+                continue;
             }
+            rows.push(SemanticRow {
+                role: "transcript".into(),
+                text: paint.line.to_string(),
+                rect: Rect::new(
+                    layout.transcript.x.saturating_add(1),
+                    layout.transcript.y.saturating_add(paint.screen_y),
+                    layout.transcript.width.saturating_sub(1),
+                    1,
+                )
+                .into(),
+            });
         }
     }
     rows.push(SemanticRow {
         role: "prompt".into(),
-        text: if snapshot.prompt.authoritative {
-            "Prompt".into()
-        } else {
-            "Ask DeepSeek anything".into()
-        },
+        text: format!(
+            "{} · {}",
+            AgentView::mode_label(snapshot.prompt.default_mode),
+            if snapshot.prompt.authoritative {
+                "Prompt"
+            } else {
+                "Ask DeepSeek anything"
+            }
+        ),
         rect: layout.prompt.into(),
     });
     rows.push(SemanticRow {
@@ -246,24 +273,39 @@ pub fn render_semantic(
     });
 
     let mut map = HitMap::new(area);
-    let mut y = layout.transcript.y;
-    for entry in &snapshot.transcript {
-        for (line_index, text) in entry.content.display_text().split('\n').enumerate() {
-            if y >= layout.transcript.bottom() {
-                break;
-            }
-            insert_text_line(
-                &mut map,
-                HitTarget::TranscriptEntry(entry.id),
-                line_index,
-                layout.transcript.x,
-                y,
-                layout.transcript.width,
-                text,
-                crate::geometry::first_link_target(text),
-            );
-            y = y.saturating_add(1);
+    let entries = snapshot
+        .transcript
+        .iter()
+        .map(|row| DshRenderEntry {
+            id: row.id,
+            source_seq: row.source_seq,
+            kind: row.kind,
+            text: row.text.clone(),
+            partial: false,
+            lineage: Vec::new(),
+            content: row.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    let rich = RichTranscript::new(
+        &entries,
+        layout.transcript.width.saturating_sub(1).max(1) as usize,
+        *Theme::current(),
+    );
+    for paint in rich.visible_lines(0, layout.transcript.height) {
+        if paint.screen_y >= layout.transcript.height {
+            continue;
         }
+        let text = paint.line.to_string();
+        insert_text_line(
+            &mut map,
+            HitTarget::TranscriptEntry(paint.entry_id),
+            paint.line_index,
+            layout.transcript.x.saturating_add(1),
+            layout.transcript.y.saturating_add(paint.screen_y),
+            layout.transcript.width.saturating_sub(1),
+            &text,
+            crate::geometry::first_link_target(&text),
+        );
     }
     map.insert(crate::geometry::HitRegion {
         target: HitTarget::Prompt,

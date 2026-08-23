@@ -4,13 +4,146 @@
 //! user-visible role, indentation and copy projection so the runtime never
 //! needs to inspect protocol JSON or flatten a tool result itself.
 
-use dsh_pager::{DshRenderBlock, DshRenderContent, DshRenderKind};
+use dsh_pager::{
+    DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderKind, ScrollAnchor,
+};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
 
-use crate::{host_adapter::TranscriptRow, theme::Theme};
+use crate::{host_adapter::TranscriptRow, render::wrapping::word_wrap_line, theme::Theme};
+
+/// A rich line after semantic block rendering and terminal-width wrapping.
+/// `line_index` is stable within an entry at a given width and is shared with
+/// hit testing and selection; `screen_y` is filled only by the viewport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichPaintLine {
+    pub entry_id: DshRenderEntryId,
+    pub line_index: usize,
+    pub header: bool,
+    pub screen_y: u16,
+    pub line: Line<'static>,
+}
+
+#[derive(Debug, Clone)]
+struct RichEntry {
+    id: DshRenderEntryId,
+    lines: Vec<RichPaintLine>,
+    start_y: usize,
+}
+
+/// Width-specific transcript projection used by the production AgentView.
+/// Scrollback remains the host-owned source of stable entries; this layer
+/// only supplies Grok semantic block lines and matching viewport geometry.
+#[derive(Debug, Clone)]
+pub struct RichTranscript {
+    width: usize,
+    entries: Vec<RichEntry>,
+    total_height: usize,
+}
+
+impl RichTranscript {
+    pub fn new(entries: &[DshRenderEntry], width: usize, theme: Theme) -> Self {
+        let width = width.max(1);
+        let mut projected = Vec::with_capacity(entries.len());
+        let mut start_y = 0usize;
+        for entry in entries {
+            let row = TranscriptRow::from(entry.clone());
+            let semantic_lines = render_row(&row, theme);
+            let mut lines = Vec::new();
+            for (source_index, line) in semantic_lines.iter().enumerate() {
+                let wrapped = word_wrap_line(line, width);
+                for wrapped_line in wrapped {
+                    lines.push(RichPaintLine {
+                        entry_id: entry.id,
+                        line_index: lines.len(),
+                        header: source_index == 0,
+                        screen_y: 0,
+                        line: wrapped_line,
+                    });
+                }
+            }
+            // Every entry keeps one non-selectable spacer row, matching the
+            // existing scrollback rhythm without inventing a fake identity.
+            let height = lines.len().saturating_add(1);
+            projected.push(RichEntry {
+                id: entry.id,
+                lines,
+                start_y,
+            });
+            start_y = start_y.saturating_add(height);
+        }
+        Self {
+            width,
+            entries: projected,
+            total_height: start_y,
+        }
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn total_height(&self) -> usize {
+        self.total_height
+    }
+
+    pub fn anchor_at(&self, scroll_top: usize) -> Option<ScrollAnchor> {
+        let top = scroll_top.min(self.total_height.checked_sub(1)?);
+        let entry = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.start_y <= top)?;
+        let intra = top.saturating_sub(entry.start_y);
+        Some(ScrollAnchor {
+            entry_id: entry.id,
+            intra_row: intra.min(entry.lines.len().saturating_sub(1)),
+        })
+    }
+
+    pub fn scroll_for_anchor(&self, anchor: ScrollAnchor) -> Option<usize> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == anchor.entry_id)?;
+        Some(
+            entry
+                .start_y
+                .saturating_add(anchor.intra_row.min(entry.lines.len().saturating_sub(1))),
+        )
+    }
+
+    pub fn visible_lines(&self, scroll_top: usize, viewport_height: u16) -> Vec<RichPaintLine> {
+        let top = scroll_top.min(self.total_height);
+        let bottom = top.saturating_add(viewport_height as usize);
+        let mut painted = Vec::new();
+        for entry in &self.entries {
+            for line in &entry.lines {
+                let virtual_y = entry.start_y.saturating_add(line.line_index);
+                if virtual_y < top {
+                    continue;
+                }
+                if virtual_y >= bottom {
+                    break;
+                }
+                let mut line = line.clone();
+                line.screen_y = (virtual_y.saturating_sub(top)) as u16;
+                painted.push(line);
+            }
+            if entry.start_y >= bottom {
+                break;
+            }
+        }
+        painted
+    }
+
+    pub fn line_y(&self, entry_id: DshRenderEntryId, line_index: usize) -> Option<usize> {
+        let entry = self.entries.iter().find(|entry| entry.id == entry_id)?;
+        (line_index < entry.lines.len()).then_some(entry.start_y.saturating_add(line_index))
+    }
+}
 
 /// Paint a materialized scrollback line. Scrollback owns wrapping and line
 /// identity; this helper only applies Grok's semantic role colors.
@@ -288,5 +421,131 @@ mod tests {
             style_for_paint(DshRenderKind::Error, false, "✗ result", theme).fg,
             Some(theme.accent_user)
         );
+    }
+
+    #[test]
+    fn rich_transcript_uses_structured_blocks_and_stable_identity() {
+        let row = row();
+        let entry = DshRenderEntry {
+            id: row.id,
+            source_seq: row.source_seq,
+            kind: row.kind,
+            text: row.text,
+            partial: false,
+            lineage: Vec::new(),
+            content: row.content,
+        };
+        let rich = RichTranscript::new(&[entry], 80, *Theme::current());
+        let lines = rich.visible_lines(0, 20);
+        let rendered = lines
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("src/lib.rs")));
+        assert!(rendered.iter().any(|line| line.contains("- old")));
+        assert!(rendered.iter().any(|line| line.contains("+ new")));
+        assert!(lines.iter().all(|line| line.entry_id == row.id));
+        assert_eq!(
+            lines.iter().map(|line| line.line_index).collect::<Vec<_>>(),
+            (0..lines.len()).collect::<Vec<_>>()
+        );
+        let anchor = rich.anchor_at(1).expect("anchor");
+        assert_eq!(rich.scroll_for_anchor(anchor), Some(1));
+    }
+
+    #[test]
+    fn rich_transcript_wraps_unicode_without_losing_lines() {
+        let mut row = row();
+        row.content = DshRenderContent {
+            blocks: vec![DshRenderBlock::Markdown {
+                text: "中文abcdef".into(),
+            }],
+            fallback: "中文abcdef".into(),
+        };
+        let rich = RichTranscript::new(
+            &[DshRenderEntry {
+                id: row.id,
+                source_seq: row.source_seq,
+                kind: row.kind,
+                text: row.text,
+                partial: false,
+                lineage: Vec::new(),
+                content: row.content,
+            }],
+            4,
+            *Theme::current(),
+        );
+        assert!(rich.total_height() > 4);
+        assert!(
+            rich.visible_lines(0, 20)
+                .iter()
+                .any(|line| line.line.to_string().contains("中"))
+        );
+    }
+
+    #[test]
+    fn rich_renderer_covers_all_block_fallbacks() {
+        let row = TranscriptRow {
+            id: DshRenderEntryId::Event { seq: 9 },
+            label: "Assistant".into(),
+            text: "fallback".into(),
+            kind: DshRenderKind::Assistant,
+            source_seq: 9,
+            seq: dsh_pager::DshSeq::new(9),
+            content: DshRenderContent {
+                blocks: vec![
+                    DshRenderBlock::Markdown {
+                        text: "markdown".into(),
+                    },
+                    DshRenderBlock::Reasoning {
+                        text: "thinking".into(),
+                    },
+                    DshRenderBlock::ToolCall {
+                        name: "shell".into(),
+                        call_id: None,
+                        arguments: "{}".into(),
+                        edit: None,
+                    },
+                    DshRenderBlock::ToolResult {
+                        call_id: None,
+                        blocks: vec![DshRenderBlock::Plain {
+                            text: "output".into(),
+                        }],
+                        is_error: true,
+                    },
+                    DshRenderBlock::Image {
+                        attachment_id: None,
+                        media_type: Some("image/png".into()),
+                        name: None,
+                        raw: "{}".into(),
+                    },
+                    DshRenderBlock::Unknown {
+                        kind: "future".into(),
+                        raw: "raw payload".into(),
+                    },
+                ],
+                fallback: "fallback".into(),
+            },
+        };
+        let rendered = render_row(&row, *Theme::current())
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "markdown",
+            "thinking",
+            "▸ shell",
+            "✗ result",
+            "output",
+            "[image: image/png]",
+            "[unsupported block: future]",
+            "raw payload",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected} in {rendered}"
+            );
+        }
     }
 }

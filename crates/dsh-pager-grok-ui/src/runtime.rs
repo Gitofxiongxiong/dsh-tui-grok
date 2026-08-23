@@ -61,6 +61,7 @@ use crate::views::{
     queue::{QueueRenderState, moved_selection, render_queue_content},
     status_bar::StatusBar,
     timeline::{RailViewport, compute_rail, render_rail},
+    transcript::RichTranscript,
 };
 use serde_json::json;
 
@@ -472,7 +473,8 @@ impl UiState {
     ) {
         let theme = Theme::current();
         let mut lines = Vec::new();
-        if snapshot.transcript.is_empty() {
+        let entries = scrollback.render_entries();
+        if entries.is_empty() {
             self.scroll = 0;
             self.scroll_anchor = None;
             lines.push(Line::from(Span::styled(
@@ -481,34 +483,28 @@ impl UiState {
             )));
         } else {
             let render_width = content.width.saturating_sub(1).max(1) as usize;
-            let mut total_height = scrollback.total_height(render_width);
+            let rich = RichTranscript::new(&entries, render_width, *theme);
+            let total_height = rich.total_height();
             let mut max_scroll = total_height.saturating_sub(content.height as usize);
             self.scroll = self.scroll.min(max_scroll);
             let mut scroll_top = max_scroll.saturating_sub(self.scroll);
             if self.transcript_width != Some(content.width) {
                 if let Some(anchor) = self.scroll_anchor.take()
-                    && let Some(restored) = scrollback.scroll_for_anchor(render_width, anchor)
+                    && let Some(restored) = rich.scroll_for_anchor(anchor)
                 {
                     scroll_top = restored;
                 }
                 self.transcript_width = Some(content.width);
             }
-            scroll_top =
-                scrollback.materialize_viewport(render_width, scroll_top, content.height as usize);
-            total_height = scrollback.total_height(render_width);
             max_scroll = total_height.saturating_sub(content.height as usize);
             scroll_top = scroll_top.min(max_scroll);
             self.scroll = max_scroll.saturating_sub(scroll_top);
-            for paint in scrollback.visible_lines(render_width, scroll_top, content.height) {
-                lines.push(Line::from(Span::styled(
-                    paint.text.clone(),
-                    crate::views::transcript::style_for_paint(
-                        paint.kind,
-                        paint.header,
-                        &paint.text,
-                        *theme,
-                    ),
-                )));
+            for paint in rich.visible_lines(scroll_top, content.height) {
+                let text = paint.line.to_string();
+                while lines.len() < paint.screen_y as usize {
+                    lines.push(Line::from(""));
+                }
+                lines.push(paint.line);
                 let geometry = insert_text_line(
                     &mut self.hit_map,
                     HitTarget::TranscriptEntry(paint.entry_id),
@@ -516,12 +512,12 @@ impl UiState {
                     content.x.saturating_add(1),
                     content.y.saturating_add(paint.screen_y),
                     render_width as u16,
-                    &paint.text,
-                    first_link_target(&paint.text),
+                    &text,
+                    first_link_target(&text),
                 );
                 self.geometry_lines.push(geometry);
             }
-            self.scroll_anchor = scrollback.anchor_at(render_width, scroll_top);
+            self.scroll_anchor = rich.anchor_at(scroll_top);
         }
         let block = Block::default()
             .borders(Borders::LEFT)
@@ -866,7 +862,7 @@ impl UiState {
                     PromptMode::Queue => PromptMode::Steer,
                     PromptMode::Steer => PromptMode::Queue,
                 };
-                if next == PromptMode::Steer && !snapshot.capabilities.queue_steer {
+                if next == PromptMode::Steer && !steer_capability_available(session, &snapshot) {
                     self.status = Some("Steer mode unavailable".into());
                 } else {
                     self.prompt_mode = Some(next);
@@ -1098,7 +1094,7 @@ impl UiState {
             Some(transport.control_plane()),
         );
         let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
-        if mode == PromptMode::Steer && !snapshot.capabilities.queue_steer {
+        if mode == PromptMode::Steer && !steer_capability_available(session, &snapshot) {
             self.status = Some("Steer mode unavailable".into());
             return Ok(());
         }
@@ -1111,13 +1107,10 @@ impl UiState {
             },
             &context,
         )?;
-        if matches!(
-            receipt.status,
-            UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
-        ) {
+        if prompt_receipt_admitted(&receipt.status) {
             self.record_prompt_history(&text);
             self.prompt.reset();
-            self.status = Some("Prompt queued".into());
+            self.status = Some(prompt_admission_message(&receipt.status));
         } else {
             self.status = Some(receipt_status_message(&receipt, "Prompt"));
         }
@@ -1861,8 +1854,45 @@ fn task_status_line(snapshot: &GrokHostSnapshot) -> String {
     }
 }
 
+fn steer_capability_available(session: &SessionState, snapshot: &GrokHostSnapshot) -> bool {
+    if !snapshot.capabilities.queue_steer {
+        return false;
+    }
+    let Some(value) = session.projection("capabilities") else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object
+        .get("queue_steer")
+        .or_else(|| object.get("queueSteer"))
+        .and_then(|value| value.as_bool())
+        == Some(true)
+}
+
+fn prompt_receipt_admitted(status: &UiEffectStatus) -> bool {
+    matches!(
+        status,
+        UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+    )
+}
+
+fn prompt_admission_message(status: &UiEffectStatus) -> String {
+    match status {
+        UiEffectStatus::Accepted => "Prompt accepted; waiting for host snapshot".into(),
+        UiEffectStatus::Queued => "Prompt queued".into(),
+        UiEffectStatus::Pending => "Prompt pending; waiting for host admission".into(),
+        _ => format!("Prompt status: {status:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::prompt_admission_message;
+    use super::prompt_receipt_admitted;
+    use super::steer_capability_available;
+    use crate::effects::UiEffectStatus;
     use crate::host_adapter::GrokHostSnapshot;
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
@@ -1871,6 +1901,7 @@ mod tests {
     };
     use crate::views::picker::{PickerState, render_picker_in_modal};
     use ratatui::{buffer::Buffer, layout::Rect};
+    use serde_json::json;
 
     #[test]
     fn demo_snapshot_keeps_host_data_out_of_grok_views() {
@@ -1945,5 +1976,30 @@ mod tests {
         assert!(rendered.contains("Current session"));
         assert!(rendered.contains("Workspace tasks"));
         assert!(rendered.contains("Sessions"));
+    }
+
+    #[test]
+    fn prompt_draft_is_only_cleared_after_admission() {
+        assert!(prompt_receipt_admitted(&UiEffectStatus::Accepted));
+        assert!(prompt_receipt_admitted(&UiEffectStatus::Queued));
+        assert!(prompt_receipt_admitted(&UiEffectStatus::Pending));
+        assert!(!prompt_receipt_admitted(&UiEffectStatus::Rejected));
+        assert!(!prompt_receipt_admitted(&UiEffectStatus::Conflict));
+        assert!(!prompt_receipt_admitted(&UiEffectStatus::Stale));
+        assert!(!prompt_receipt_admitted(&UiEffectStatus::Failed));
+        assert!(prompt_admission_message(&UiEffectStatus::Accepted).contains("accepted"));
+        assert!(prompt_admission_message(&UiEffectStatus::Queued).contains("queued"));
+        assert!(prompt_admission_message(&UiEffectStatus::Pending).contains("pending"));
+    }
+
+    #[test]
+    fn steer_requires_an_explicit_host_capability_projection() {
+        let mut session = dsh_pager::SessionState::new("s".into(), 1);
+        let snapshot = GrokHostSnapshot::demo();
+        assert!(!steer_capability_available(&session, &snapshot));
+        assert!(session.set_projection("capabilities", 1, json!({"queueSteer": true})));
+        assert!(steer_capability_available(&session, &snapshot));
+        assert!(session.set_projection("capabilities", 2, json!({"queueSteer": false})));
+        assert!(!steer_capability_available(&session, &snapshot));
     }
 }
