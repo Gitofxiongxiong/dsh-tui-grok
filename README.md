@@ -1,8 +1,11 @@
-# dsh-pager-grok
+# dsh-tui-grok
 
 DeepSeek Harness 的原生终端 UI 实验项目。
 
-这个目录是从 `dsh-pager` 复制出的干净 successor。原项目保留作协议、运行时和回归测试参考；本项目把 Grok Build 的 UI 组件作为默认视觉与交互实现，通过一层很薄的 host adapter 接到 DSH 的 session/runtime。
+这是一个独立仓库（`git@github.com:Gitofxiongxiong/dsh-tui-grok.git`），从 `dsh-pager`
+拆出并接入 Grok Build UI。DeepSeek Harness 原仓库只作为外部 backend/profile 宿主；
+本仓库包含自己的 Rust TUI、DSH-neutral adapter、协议/transport 和三个外置 TypeScript
+插件包，不需要把 Harness 整个仓库复制进来。
 
 ## 当前边界
 
@@ -27,7 +30,19 @@ pnpm install
 pnpm run verify:ts
 ```
 
-需要连接真实后端时，先把 `@dsh-pager-grok/tui-embedded` 安装到 `grok-tui` profile，再运行 `dsh --profile grok-tui`；也可以使用 `--backend` 和 `--backend-arg` 覆盖。
+需要连接真实后端时，开发期可以把本仓库的三个 TypeScript 包一次性 link 到隔离
+profile，再运行只读真实 E2E：
+
+```bash
+DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
+DSH_TUI_PROFILE=dsh-tui-grok-dev \
+DSH_TUI_INSTALL_LOCAL=1 \
+bash scripts/real-e2e.sh
+```
+
+正式安装时，也可以将构建后的 `@dsh-pager-grok/tui-embedded` 安装到 profile，
+再运行 `dsh --profile <profile>`；需要自定义 backend 时使用 `--backend` 和
+`--backend-arg` 覆盖。真实 prompt/多轮联调的安全边界见 [验证策略](docs/TESTING.md)。
 
 ## 文档
 

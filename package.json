@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "description": "DeepSeek Harness external TUI backend and Grok-derived pager",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/Gitofxiongxiong/dsh-tui-grok.git"
+  },
   "type": "module",
   "packageManager": "pnpm@11.20.0",
   "engines": {

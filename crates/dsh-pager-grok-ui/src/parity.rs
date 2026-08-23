@@ -383,6 +383,10 @@ pub fn render_semantic(
                 kind: row.kind,
                 text: row.text.clone(),
                 partial: false,
+                visibility: row.visibility,
+                finish: row.finish,
+                group_key: row.group_key.clone(),
+                selectable: row.selectable,
                 lineage: Vec::new(),
                 content: row.content.clone(),
             })
@@ -463,6 +467,10 @@ pub fn render_semantic(
             kind: row.kind,
             text: row.text.clone(),
             partial: false,
+            visibility: row.visibility,
+            finish: row.finish,
+            group_key: row.group_key.clone(),
+            selectable: row.selectable,
             lineage: Vec::new(),
             content: row.content.clone(),
         })

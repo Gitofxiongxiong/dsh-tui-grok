@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{PagerError, PagerResult};
-use crate::presentation::{DshInteraction, DshPresentationModel, DshQueueItem};
+use crate::presentation::{DshInteraction, DshPresentationModel, DshQueueItem, DshRenderFinish};
 use crate::scrollback::Scrollback;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,6 +254,11 @@ impl SessionState {
     }
 
     pub fn mark_disconnected(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let seq = self.tail_seq().unwrap_or(-1).saturating_add(1);
+        let _ = self
+            .scrollback
+            .finalize_stream(seq, DshRenderFinish::Eof, Some(&message));
         self.connection_phase = ConnectionPhase::Disconnected;
         self.record_diagnostic(DiagnosticLevel::Error, "disconnected", message);
     }
@@ -264,6 +269,14 @@ impl SessionState {
     }
 
     pub fn set_generation(&mut self, generation: u64) {
+        if generation != self.generation {
+            let seq = self.tail_seq().unwrap_or(-1).saturating_add(1);
+            let _ = self.scrollback.finalize_stream(
+                seq,
+                DshRenderFinish::Eof,
+                Some("session generation changed"),
+            );
+        }
         self.generation = generation;
         self.subscribed_last_seq = None;
         self.pending_events.clear();
@@ -559,11 +572,11 @@ impl SessionState {
 
     fn accept_mux(&mut self, frame: Value) -> PagerResult<SessionUpdate> {
         let frame_type = string_field(&frame, "type")?;
-        if frame_type == "stream/error" {
-            return Ok(self.accept_stream_error(&frame, "mux"));
-        }
         if self.reject_stale_generation(&frame, "mux") {
             return Ok(SessionUpdate::default());
+        }
+        if frame_type == "stream/error" {
+            return Ok(self.accept_stream_error(&frame, "mux"));
         }
         let Some(session_id) = frame.get("sessionId").and_then(Value::as_str) else {
             return Ok(SessionUpdate::default());
@@ -709,11 +722,11 @@ impl SessionState {
 
     fn accept_host(&mut self, frame: Value) -> PagerResult<SessionUpdate> {
         let frame_type = string_field(&frame, "type")?;
-        if frame_type == "stream/error" {
-            return Ok(self.accept_stream_error(&frame, "host"));
-        }
         if self.reject_stale_generation(&frame, "host") {
             return Ok(SessionUpdate::default());
+        }
+        if frame_type == "stream/error" {
+            return Ok(self.accept_stream_error(&frame, "host"));
         }
         let Some(session_id) = frame.get("sessionId").and_then(Value::as_str) else {
             return Ok(SessionUpdate::default());
@@ -740,6 +753,10 @@ impl SessionState {
                     .and_then(Value::as_str)
                     .unwrap_or("agent error");
                 self.record_diagnostic(DiagnosticLevel::Error, "agent-error", message);
+                let seq = self.tail_seq().unwrap_or(-1).saturating_add(1);
+                let _finalized =
+                    self.scrollback
+                        .finalize_stream(seq, DshRenderFinish::Failed, Some(message));
                 Ok(SessionUpdate {
                     changed: true,
                     gap_detected: false,
@@ -764,8 +781,41 @@ impl SessionState {
             format!("{stream}-stream/{code}"),
             message,
         );
+        let finish = if code.eq_ignore_ascii_case("eof")
+            || code.eq_ignore_ascii_case("closed")
+            || frame
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    let value = value.to_ascii_lowercase();
+                    value.contains("eof") || value.contains("closed")
+                }) {
+            DshRenderFinish::Eof
+        } else {
+            DshRenderFinish::Failed
+        };
+        let seq = self.tail_seq().unwrap_or(-1).saturating_add(1);
+        let _finalized = self.scrollback.finalize_stream(seq, finish, Some(message));
         SessionUpdate {
             changed: true,
+            gap_detected: false,
+        }
+    }
+
+    /// Mark the current generation's running surfaces as EOF when the reader
+    /// closes before a typed `stream/error` frame is available.
+    pub fn accept_stream_eof(&mut self, message: impl Into<String>) -> SessionUpdate {
+        let message = message.into();
+        let seq = self.tail_seq().unwrap_or(-1).saturating_add(1);
+        let finalized = self
+            .scrollback
+            .finalize_stream(seq, DshRenderFinish::Eof, Some(&message));
+        let phase_changed = self.connection_phase != ConnectionPhase::Reconnecting;
+        if phase_changed {
+            self.mark_reconnecting(message);
+        }
+        SessionUpdate {
+            changed: finalized || phase_changed,
             gap_detected: false,
         }
     }
@@ -1282,6 +1332,84 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "host-stream/internal"));
+    }
+
+    #[test]
+    fn host_stream_error_finalizes_a_partial_surface() {
+        let mut state = SessionState::new("s".into(), 3);
+        state
+            .install_initial(SessionHistoryValue {
+                events: vec![HistoryEntry {
+                    event: SessionEvent {
+                        event_type: "assistant/chunk".into(),
+                        seq: 0,
+                        time: 0.0,
+                        data: json!({
+                            "turn": 1,
+                            "step": 0,
+                            "chunk": { "type": "text-delta", "index": 0, "text": "draft" }
+                        }),
+                        source_event_seqs: None,
+                        surface_op: None,
+                        ignorable: None,
+                    },
+                    view: None,
+                }],
+                has_more: false,
+                projections: None,
+            })
+            .unwrap();
+        let note = JsonRpcNotification {
+            jsonrpc: "2.0".into(),
+            method: "events.host".into(),
+            params: Some(json!({
+                "type": "stream/error",
+                "error": { "code": "eof", "message": "host pipe closed" }
+            })),
+        };
+        assert!(state.accept_notification(note).unwrap().changed);
+        let entry = &state.presentation_model().entries[0];
+        assert_eq!(entry.finish, DshRenderFinish::Eof);
+        assert!(!entry.partial);
+        assert_eq!(entry.text, "draft");
+    }
+
+    #[test]
+    fn stale_stream_error_cannot_finalize_current_generation() {
+        let mut state = SessionState::new("s".into(), 3);
+        state
+            .install_initial(SessionHistoryValue {
+                events: vec![HistoryEntry {
+                    event: SessionEvent {
+                        event_type: "assistant/chunk".into(),
+                        seq: 0,
+                        time: 0.0,
+                        data: json!({
+                            "turn": 1,
+                            "step": 0,
+                            "chunk": { "type": "text-delta", "index": 0, "text": "draft" }
+                        }),
+                        source_event_seqs: None,
+                        surface_op: None,
+                        ignorable: None,
+                    },
+                    view: None,
+                }],
+                has_more: false,
+                projections: None,
+            })
+            .unwrap();
+        let note = JsonRpcNotification {
+            jsonrpc: "2.0".into(),
+            method: "events.mux".into(),
+            params: Some(json!({
+                "type": "stream/error",
+                "generation": 2,
+                "error": { "code": "eof", "message": "old stream closed" }
+            })),
+        };
+        assert!(!state.accept_notification(note).unwrap().changed);
+        assert!(state.presentation_model().entries[0].partial);
     }
 
     #[test]

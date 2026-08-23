@@ -5,7 +5,7 @@
 1. Grok Build 如何区分用户消息、agent 回复、thinking、tool、系统/上下文和会话状态，以及每类消息由哪些组件负责展示、折叠和分组？
 2. 结合这套语义，DSH 当前“系统提示词和 agent 注入内容全部露出”和“第一个流式消息卡住”的问题，应该怎样落地修复？
 
-本文是 `/home/leo/code/dsh-pager-grok` 的 bug tranche 设计，不在本批次直接改 Rust。源码调研基于 Grok Build 镜像：
+本文是 `/home/leo/code/dsh-pager-grok` 的 bug tranche 设计、契约和验收基线。实现进度记录在 `docs/开发进度记录/2026-08-23_20-15-24_grok_message_presentation_stream_fix_implementation.md`；本次截图调研和视觉契约澄清记录在 `docs/开发进度记录/2026-08-23_20-59-15_grok_scrollback_visual_contract_plan.md`。源码调研基于 Grok Build 镜像：
 
 - Grok mirror commit：`19d42e35c07a9c9244f03f6df0c4c353f970d4f9`
 - Grok source revision：`7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa`
@@ -135,6 +135,47 @@ host/acp event
 
 `project_to_layout` 将 span 投影为 `height=0/1`、`group_header_count`、`verb_group_header`、`group_collapse_header`。`render.rs:373-444` 每帧根据 span 计算 live label，`EntryRenderer::render_group_header`（`wrappers/entry_renderer.rs:231-376`）绘制 diamond/chrome、运行波纹和可选中 label。也就是说，“折叠”不删除 entry，而是让 layout 和 renderer 共同投影。
 
+### 3. 截图对应的视觉和交互契约（必须逐项验收）
+
+截图里的“不同底色”和“左侧连线”不是颜色微调，而是 Grok block、wrapper 和
+scrollback layout 的可观察契约。后续实现必须保留下面的组件边界，不能把所有
+entry 再压成同一个 Paragraph/row：
+
+| 屏幕对象 | Grok 来源 | 默认内容/状态 | 背景、间距和折叠 | 是否参与 dense group |
+|---|---|---|---|---|
+| 用户历史消息 | `UserPromptBlock` (`scrollback/blocks/user.rs`) | 短消息 `Expanded`；视觉行超过阈值时 `Collapsed`，展开后显示全文（默认最多三行） | `accent_background=true`，使用 `appearance.scrollback.blocks.prompt.bg`（当前默认配置为 `Light` token，不能在 runtime 里硬编码）；prompt `vpad` 控制上下留白 | 否；UserPrompt 是 VerbRun 的 break |
+| agent 历史消息 | `AgentMessageBlock` (`scrollback/blocks/agent.rs`) | `Expanded`，Markdown/代码等保持正文可读 | `background=None`、无 vpad、无额外 prompt band；与 UserPrompt 使用不同 wrapper/paint path | 否；AgentMessage 是 VerbRun 的 break |
+| thinking/reasoning | `ThinkingBlock` (`scrollback/blocks/thinking.rs`) | 运行中 `Truncated`，完成后 `Collapsed`；可手动 `Expanded`；`show_thinking_blocks=false` 时高度为 0 | 无独立背景；使用 bullet/accent、紧凑间距和运行耗时 | 已完成且折叠时可作为 `ThoughtMember` 加入 VerbRun；运行中/展开时为 `Transparent` |
+| tool call/result、subagent | `ToolCallBlock` 及 `tool/*`、`SubagentBlock` | 按工具类型决定 collapsed/truncated/expanded；Read/Execute 等默认折叠摘要，必要时展开参数、diff、stdout 或错误 | 使用工具变体自己的 accent、bullet、padding 和结果 renderer；不能退化为 agent markdown | 可作为 `Member` 连成 VerbRun，header 聚合名称/数量 |
+| group header / 左侧 rail | `groups.rs`、`verb_group.rs`、`EntryRenderer::render_group_header` | synthetic `N more` 或 “Read 2 files / Ran 3 commands”；展开后显示 header + 成员 | group 内成员 `gap_after=0`，相邻 header/member 的 accent 列连续形成左侧 rail；header 自己可 hover/select | header 锚定首个稳定 `EntryId`，不能以数组 index 作为状态 key |
+
+因此，用户截图中 user 消息的带状区域应由 UserPrompt 的 background token 和
+vpad 产生，agent 正文应走无背景的 AgentMessage wrapper；两者不能仅靠 `kind`
+标签或同一个 `bg_base` Paragraph 区分。主题切换时只替换 Appearance token，不改变
+这两个组件的职责。
+
+折叠有两个独立层级，不能混为一个布尔值：
+
+1. entry 级 `Collapsed/Truncated/Expanded` 决定单条 block 输出多少行；用户手势
+   通过 `display_mode_pinned` 保留，stream finish 再应用 block 的完成默认值。
+2. group 级 synthetic header 决定一段相邻成员是否只显示 header；成员被投影为
+   零高度但 canonical entry、stable ID、复制 payload 和顺序仍保留。展开时必须
+   恢复成员高度并保持 viewport anchor。
+
+鼠标语义必须按 Grok 的 click-count 状态机实现并写入测试矩阵。用户口语中的“点击
+展开”在实现验收中要明确为“对折叠 affordance 双击”；Grok 的单击本身是选择/定位，
+不应偷偷改变 fold 状态：
+
+| 手势 | 普通 entry | UserPrompt | group header | 特殊 tool/subagent |
+|---|---|---|---|---|
+| 单击 | 选中 entry、更新 hover/selection | 选中 prompt | 选中 header | 选中；不展开 |
+| 双击 | foldable entry 切换 fold | 切换 fold 并按 Grok 规则调整滚动 | 切换 group 展开/折叠 | 某些后台任务/子 agent 进入 viewer，不能误折叠 |
+| 三击 | 非 prompt fold + scroll-to-top | 仍遵守 prompt fold 路径 | 不重复切换 group | 由 viewer/selection owner 处理 |
+
+单击、双击、三击必须共享同一 render-time hit map；不能由绘制坐标和鼠标坐标各
+自推导。hover 时显示 Grok 的 chevron/accent，drag/copy 只改变 selection，不得
+把 synthetic header chrome 写入用户 copy payload。
+
 ## 三、DSH 当前实现与两个症状的对应关系
 
 ### 问题一：系统提示词/agent 注入内容全部展示
@@ -150,6 +191,21 @@ source.plugin == "compact"   -> DshRenderKind::Compaction
 所以 plugin、agent-instructions、system/context 注入会产生正常的 `Event { seq }`，并且 `ScrollbackPane::sync`（`crates/dsh-pager-grok-ui/src/views/transcript.rs:73-94`）把 `scrollback.render_entries()` 中的每一条都缓存、布局和绘制。`render_row`（`transcript.rs:325-348`）对每条 row 统一输出 `label + #source_seq`，再把所有 block 逐个画出；它没有 Grok 的 hidden/collapsed/group projection。
 
 因此根因是 **presentation contract 缺少 visibility/display/group 状态**，不是单纯换一个颜色或把 `Context` 标签改掉。即使 `DshRenderKind` 已有 `Thinking/ToolCall/ToolResult/Error/Compaction`，它们仍然被当作平面 entry 渲染。
+
+从截图要求反查当前 successor，还存在一组独立于分类的 scrollback parity 缺口：
+
+- `crates/dsh-pager-grok-ui/src/views/transcript.rs::ScrollbackPane::sync` 目前只
+  对 `Hidden` 置零高度，对其它 entry 按缓存行数逐条布局；没有 Grok 的
+  `DisplayMode`、`ContextGroup`、`VerbRun` 或 group header scan。
+- `render_row` 仍以统一 label/content 路径绘制，runtime transcript 外层统一填充
+  `bg_base`；因此 UserPrompt 与 AgentMessage 不可能出现截图中的不同组件底色、
+  vpad 和 wrapper 边界。
+- `runtime.rs` 的 transcript mouse 目前只处理滚动、链接、拖选/复制，没有
+  click-count、entry fold、group toggle、header hit 或左侧连续 rail 的状态机。
+
+这些不是方案之外的“像素 polish”，而是 Grok scrollback 的 M4/M8 语义出口；在
+完成前只能说 Phase 0–2 的 DSH projection/stream 修复已落地，不能说截图中的
+消息 presentation 已完成。
 
 ### 问题二：第一个流式消息卡住
 
@@ -270,13 +326,14 @@ struct DshRenderEntry {
 
 在分类和终结契约稳定后，再改 `crates/dsh-pager-grok-ui/src/views/transcript.rs` 与 DSH scrollback：
 
-1. `Scrollback::render_entries()` 保留全量 canonical entries；新增 `project_view(appearance, local_folds)`，输出可布局的 `VisibleEntry`/`GroupHeader`；
-2. `AgentContext`/`SystemInstruction` 使用独立 `ContextGroup`，默认 `Collapsed` 或 `Hidden`；不要复用 `ToolCall` 的 verb group 计数；
-3. `Thinking` 默认 `Truncated`，完成后 `Collapsed`，`show_thinking_blocks=false` 时既有 entry 高度变为 0；
-4. ToolCall/Subagent 等 typed tool 才加入 `VerbRun`，只聚合同类可命名成员；Assistant/UserPrompt 是 run breaker；
-5. group header 是 synthetic row，selection/mouse 以稳定首 entry id 作为 anchor；展开/折叠后恢复 viewport anchor；
-6. `style_for_paint` 只负责 semantic role 的样式，不能承担 visibility 或生命周期判断；
-7. narrow terminal（80x24、40x12）必须先保证 header/text 不溢出，再做像素细节。
+1. `Scrollback::render_entries()` 保留全量 canonical entries；新增 `project_view(appearance, local_folds, group_state)`，输出可布局的 `VisibleEntry`/`GroupHeader`，并让 layout、paint、hit map 共享同一投影；
+2. 为 UserPrompt、AgentMessage、Thinking、ToolCall/Subagent 建立 Grok-derived wrapper/DTO：UserPrompt 使用 prompt background/vpad，AgentMessage 使用无背景正文 wrapper；不要由 runtime 外层统一 `bg_base` 覆盖组件语义。
+3. `AgentContext`/`SystemInstruction` 使用独立 `ContextGroup`，默认 `Collapsed` 或 `Hidden`；不要复用 `ToolCall` 的 verb group 计数。ContextGroup 的 header、成员顺序和 anchor 以 stable group key/首 entry id 保存。
+4. `Thinking` 默认 `Truncated`，完成后 `Collapsed`，`show_thinking_blocks=false` 时既有 entry 高度变为 0；用户手动展开通过 pinned local state 保留，不能写回 canonical history。
+5. ToolCall/Subagent 等 typed tool 才加入 `VerbRun`，只聚合同类可命名成员；finished collapsed thinking 可作为 ThoughtMember；running/opened thinking、Assistant、UserPrompt 和 status 都是 run breaker。
+6. group scan 产生 `VerbRun`/`Truncation` span；header 是 synthetic row，成员折叠为零高度且 group 内 `gap_after=0`，左侧 accent rail 连续；展开/折叠后恢复 viewport anchor，不改变 stable IDs。
+7. `EntryRenderer`/`ScrollbackPane` 负责 header chrome、diamond/bullet、hover chevron、selection 和 mouse click-count；单击只选择，双击 fold/group toggle，特殊 tool/subagent 双击进入 viewer。
+8. `style_for_paint` 只负责 semantic role 的样式，不能承担 visibility 或生命周期判断；narrow terminal（80x24、40x12）必须先保证 header/text 不溢出，再做像素细节。
 
 这个顺序与 Grok 的 `groups.rs -> project_to_layout -> render.rs -> EntryRenderer` 一致：先扫描和生成 span，再投影高度和 header，最后绘制。
 
@@ -301,16 +358,30 @@ struct DshRenderEntry {
 
 - canonical entries 数量不因 Hidden 而减少；
 - default view 不包含 system prompt 正文；
-- ContextGroup 折叠只占一行，展开后恢复原始 block 顺序；
+- 长 user prompt 默认最多三行且可双击展开；短 user prompt 默认展开；agent 正文不出现 prompt background/vpad；
+- UserPrompt 与 AgentMessage 的 semantic style role/background/padding 不同，且不被 transcript 外层 `bg_base` 覆盖；
+- ContextGroup 折叠只占一行，展开后恢复原始 block 顺序；group header 计数和首 entry anchor 稳定；
 - thinking setting 切换会影响既有历史；
+- finished thinking/tool 默认折叠；running thinking/tool 的 `Truncated/Expanded` 状态切换不丢内容；
+- 连续 tool/thinking 成员形成 VerbRun/Truncation，header 与成员之间无 gap，左侧 accent rail 连续；Assistant/UserPrompt 会打断 group；
 - group header 展开/折叠不改变 stable ids，viewport anchor 不跳；
 - user/assistant/tool/result/status 的 copy payload 不包含 synthetic header chrome。
 
-### 3. Real Harness/PTY gate
+### 3. Visual/mouse contract 与 PTY 验收
+
+在 semantic snapshot 之外必须留下可定位的几何和输入证据：
+
+- 80×24 与 40×12：UserPrompt background band、AgentMessage 无背景、prompt vpad、三行截断、group header 文本和左侧 rail 均不溢出；
+- 单击选中、双击 entry fold、双击 group header toggle、特殊 tool 双击 viewer、三击 fold/scroll 的 state trace 与 Grok 对齐；
+- hover chevron、header hit、drag/copy 使用同一 hit map；resize 后旧 hit map 不可触发；
+- fold/group 展开前后比较 geometry、scroll anchor、stable IDs 和 copy payload，不能只比较最终文字。
+
+### 4. Real Harness/PTY gate
 
 沿用主计划的 P03/P14/P15，并新增本 bug tranche 的两个门禁：
 
-- **P19 Context visibility**：启动 DeepSeek Harness，发送一条普通 prompt；transcript 默认不逐条显示 system prompt、agent-instructions 和 plugin 注入正文；可见区域包含用户输入、assistant 回复和必要 tool/status；显式展开后上下文可读且不破坏顺序。
+- **P19-A Context default**：Phase 2 先验收默认隐藏/摘要投影：启动 DeepSeek Harness，发送一条普通 prompt；transcript 不逐条显示 system prompt、agent-instructions 和 plugin 注入正文，且可见区域包含用户输入、assistant 回复和必要 tool/status。
+- **P19-B Context interaction**：Phase 3 再验收 ContextGroup header 的双击展开/折叠、成员顺序、stable anchor 和窄屏几何；这才覆盖“显式展开后上下文可读”。
 - **P20 Stream terminal**：第一条 assistant stream 在首个 delta、多个 delta、block-end、final、turn/end-only、provider error、EOF、Ctrl-C/abort 八种路径下都能结束；没有永久 running/partial；异常路径保留可见已收到内容和 compact 状态。
 
 PTY 场景至少跑 80x24 和窄屏；记录事件 seq、turn/step、surface id、finish、visibility、最终屏幕文本。只靠 snapshot 不足以覆盖 Harness 的 error/EOF timing。
@@ -332,15 +403,18 @@ PTY 场景至少跑 80x24 和窄屏；记录事件 seq、turn/step、surface id�
 ### Phase 2：修分类与上下文可见性（解决问题一的根）
 
 - 显式分类 source kind/plugin；
-- 加入 Hidden/Collapsed projection 和 ContextGroup；
+- 加入 Hidden/Collapsed **单条 entry projection**，未知 context 安全默认 collapsed；ContextGroup synthetic header、成员零高度和交互展开留到 Phase 3；
 - 移除通用 `label + #seq` 主视觉依赖；
-- 完成 P19 与 view projection tests。
+- 完成 P19-A 与基础 view projection tests；P19-B 不得在本阶段提前宣称通过。
 
 ### Phase 3：补 Grok fold/group 和像素 parity
 
+- UserPrompt/AgentMessage 两套 wrapper、background/vpad/spacing 与统一 Appearance token；
 - Thinking 三态、finished collapse、show-thinking live toggle；
-- Tool/Subagent verb group 和 N-more truncation；
-- EntryRenderer/ScrollbackPane 的 selection、mouse、sticky header、narrow width；
+- Tool/Subagent verb group 和 N-more truncation，连续成员的零 gap 与左侧 accent rail；
+- ContextGroup synthetic header、双击展开/折叠、stable anchor 和成员恢复；
+- EntryRenderer/ScrollbackPane 的 selection、mouse click-count、hover chevron、sticky header、narrow width；
+- P19-B、semantic/geometry/mouse/PTY 证据；这不是“再调颜色”，而是 M4 scrollback component parity 的出口；
 - 对应 `GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md` 的 M4.2/M4.3/M4.6、M9.7 和 `GROK_RENDERER_PIXEL_PARITY_PLAN.md` N2/N3 门禁。
 
 ### Phase 4：回归和 rollout
@@ -357,4 +431,12 @@ PTY 场景至少跑 80x24 和窄屏；记录事件 seq、turn/step、surface id�
 - 没有 terminal finalize，任何 streaming snapshot 都可能停在 `partial=true`；
 - 没有 stable surface id，final replacement 会造成 transcript 重排，后续 sticky/group/selection 都不可靠。
 
-本批次只新增方案文档，不宣称两个 bug 已修复。下一批实现应严格按 Phase 0 -> Phase 1 -> Phase 2 推进，并以 P19/P20 作为继续扩大 renderer parity 的前置门禁。
+当前实现已完成 Phase 0 的 DTO/fixture 基线、Phase 1 的 stable surface/finalize seam、Phase 2 的默认 Hidden/Collapsed 单条 entry context projection，并已把 Phase 3 的第一条 transcript vertical slice 接入默认生产路径：UserPrompt/AgentMessage 使用不同的 view wrapper，Thinking/Tool dense group 具备 synthetic header、零高度折叠成员、连续左 rail，以及按稳定 entry ID 保存的双击 fold/group toggle。对应单测、workspace gate、clippy gate 和 PTY smoke 已通过。special-tool viewer、完整 ContextGroup 交互、三击语义、geometry golden，以及 P19-A/P19-B/P20 的真实 DeepSeek Harness 采样仍未执行，因此不能宣称完整 renderer parity 或真实 backend 验收已经完成。
+
+本次真实 Grok 调研补齐了原方案此前不够硬的三类验收：
+
+1. **视觉组件**：UserPrompt 的 prompt background/vpad 与 AgentMessage 的无背景正文必须由不同 wrapper 产生；不能再以统一 `bg_base` 行绘制替代。
+2. **折叠/分组**：entry fold 与 group fold 分开建模；VerbRun/Truncation 需要 synthetic header、零高度成员、连续 rail 和 stable anchor。
+3. **输入手势**：单击是选择，双击才是 fold/group toggle（特殊 tool/subagent 可能打开 viewer）；mouse、geometry、selection 必须共享 layout snapshot。
+
+因此，原计划并非完全漏写“折叠/分组”概念，但没有把截图中的背景 token、padding、rail/gap、click-count 和 Phase 2/3 出口写成可执行验收。本版已将这些内容提升为硬契约；实现阶段仍须按 Phase 3 和 P19-B/P20 的真实证据继续推进。

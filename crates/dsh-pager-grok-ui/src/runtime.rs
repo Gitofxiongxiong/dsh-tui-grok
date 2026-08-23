@@ -9,7 +9,7 @@
 //! a second layout or dispatch system here. Removal exits when M3 production
 //! shell and its focus/dispatch fixtures replace this entry path.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -83,6 +83,7 @@ use xai_ratatui_textarea::MouseAction;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NOTIFICATION_BUDGET: usize = 256;
+const TRANSCRIPT_DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone)]
 struct PendingQueueMutation {
@@ -214,8 +215,15 @@ fn drain_notifications_bounded(
     let mut combined = SessionUpdate::default();
     let mut processed = 0usize;
     while processed < budget {
-        let Some(note) = transport.try_notification()? else {
-            break;
+        let note = match transport.try_notification() {
+            Ok(Some(note)) => note,
+            Ok(None) => break,
+            Err(error) => {
+                let update = session.accept_stream_eof(error.to_string());
+                combined.changed |= update.changed;
+                combined.gap_detected |= update.gap_detected;
+                break;
+            }
         };
         processed += 1;
         let update = transport.route_notification(session, note)?;
@@ -276,6 +284,12 @@ struct UiState {
     hit_map: HitMap,
     geometry_lines: Vec<GeometryLine>,
     selection: SelectionModel,
+    /// Transcript target whose entry/block chrome is currently selected by a
+    /// click.  The text selection model remains responsible for copy ranges;
+    /// this stable target drives Grok's outer selection bracket, including for
+    /// a single click with an empty text range.
+    selected_transcript: Option<HitTarget>,
+    last_transcript_click: Option<(Instant, dsh_pager::DshRenderEntryId, Option<usize>)>,
     hover_link: Option<LinkTarget>,
     frame_links: Vec<dsh_grok_inline::LinkSpan>,
     pending_copy: Option<String>,
@@ -880,18 +894,33 @@ impl UiState {
                 .scrollback_pane
                 .visible_lines(scrollback, scroll_top, content.height)
             {
-                let text = paint.line.to_string();
+                let text = paint.copy_text.clone();
                 while lines.len() < paint.screen_y as usize {
                     lines.push(Line::from(""));
                 }
                 lines.push(paint.line);
+                if !paint.selectable {
+                    continue;
+                }
+                let line_x = content
+                    .x
+                    .saturating_add(1)
+                    .saturating_add(paint.content_offset);
+                let line_width = render_width.saturating_sub(usize::from(paint.content_offset));
+                let target = paint.block_index.map_or_else(
+                    || HitTarget::TranscriptEntry(paint.entry_id),
+                    |block_index| HitTarget::TranscriptBlock {
+                        entry_id: paint.entry_id,
+                        block_index,
+                    },
+                );
                 let geometry = insert_text_line(
                     &mut self.hit_map,
-                    HitTarget::TranscriptEntry(paint.entry_id),
+                    target,
                     paint.line_index,
-                    content.x.saturating_add(1),
+                    line_x,
                     content.y.saturating_add(paint.screen_y),
-                    render_width as u16,
+                    line_width as u16,
                     &text,
                     first_link_target(&text),
                 );
@@ -914,8 +943,10 @@ impl UiState {
         if let Some(selection) = self.selection.selection() {
             let buffer = frame.buffer_mut();
             for line in &self.geometry_lines {
-                let HitTarget::TranscriptEntry(entry_id) = line.target else {
-                    continue;
+                let entry_id = match line.target {
+                    HitTarget::TranscriptEntry(entry_id)
+                    | HitTarget::TranscriptBlock { entry_id, .. } => entry_id,
+                    _ => continue,
                 };
                 let grapheme_count =
                     unicode_segmentation::UnicodeSegmentation::graphemes(line.text.as_str(), true)
@@ -937,6 +968,20 @@ impl UiState {
                     Style::default().bg(theme.bg_visual),
                 );
             }
+        }
+
+        // Upstream Grok keeps the selected entry/block visibly bracketed even
+        // when a click has not produced a non-empty copy range yet.  Paint it
+        // after the paragraph and text highlight so the left `┌│└` chrome is
+        // not swallowed by the transcript's own accent/border cells.
+        if let Some(target) = self.selected_transcript.as_ref() {
+            render_transcript_selection_box(
+                frame.buffer_mut(),
+                content,
+                theme,
+                &self.geometry_lines,
+                target,
+            );
         }
 
         let turn_count = snapshot.transcript.len();
@@ -1573,9 +1618,11 @@ impl UiState {
                 self.modal = ModalWindowState::default();
                 self.hit_map.resize(area);
                 self.selection.clear();
+                self.selected_transcript = None;
                 self.hover_link = None;
                 self.frame_links.clear();
                 self.geometry_lines.clear();
+                self.last_transcript_click = None;
                 self.transcript_width = None;
                 self.status = Some(format!("Resized to {}x{}", area.width, area.height));
                 Ok(false)
@@ -1601,6 +1648,7 @@ impl UiState {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row) else {
                     self.selection.clear();
+                    self.selected_transcript = None;
                     return;
                 };
                 let Some(line) = self
@@ -1613,11 +1661,54 @@ impl UiState {
                 if let Some(point) =
                     SelectionModel::point_for_line(&region.target, line, mouse.column)
                 {
+                    let (entry_id, block_index) = match &region.target {
+                        HitTarget::TranscriptEntry(entry_id) => (*entry_id, None),
+                        HitTarget::TranscriptBlock {
+                            entry_id,
+                            block_index,
+                        } => (*entry_id, Some(*block_index)),
+                        _ => return,
+                    };
+                    let now = Instant::now();
+                    let double_click = self.last_transcript_click.is_some_and(
+                        |(previous, previous_id, previous_block)| {
+                            previous_id == entry_id
+                                && previous_block == block_index
+                                && now.duration_since(previous) <= TRANSCRIPT_DOUBLE_CLICK
+                        },
+                    );
+                    if double_click {
+                        self.last_transcript_click = None;
+                        self.selection.clear();
+                        self.selected_transcript = None;
+                        if self
+                            .scrollback_pane
+                            .toggle_fold_or_group_at(entry_id, block_index)
+                        {
+                            // Rebuild the width-specific projection on the next
+                            // frame and restore the anchor captured by the last
+                            // paint instead of jumping to the transcript tail.
+                            self.transcript_width = None;
+                            self.status = Some(if block_index.is_some() {
+                                "Toggled transcript block".into()
+                            } else if self.scrollback_pane.is_group_header(entry_id) {
+                                "Toggled transcript group".into()
+                            } else {
+                                "Toggled transcript fold".into()
+                            });
+                            return;
+                        }
+                    }
+                    self.last_transcript_click = Some((now, entry_id, block_index));
+                    self.selected_transcript = Some(region.target.clone());
                     self.selection.begin(point);
                     self.status = Some("Selecting transcript".into());
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                // A drag is a selection gesture, never the first half of a
+                // fold double-click.
+                self.last_transcript_click = None;
                 let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row) else {
                     return;
                 };
@@ -2010,6 +2101,8 @@ impl UiState {
         self.transcript_width = None;
         self.scroll_anchor = None;
         self.geometry_lines.clear();
+        self.last_transcript_click = None;
+        self.selected_transcript = None;
         self.selection.clear();
         self.hover_link = None;
         self.frame_links.clear();
@@ -2718,6 +2811,68 @@ impl UiState {
     }
 }
 
+/// Paint the entry-level selection chrome used by Grok's scrollback.  The
+/// border lives outside the text hit rectangles, so a single click can show a
+/// visible `┌│└` bracket before a non-empty copy selection exists.
+fn render_transcript_selection_box(
+    buf: &mut ratatui::buffer::Buffer,
+    content: Rect,
+    theme: &Theme,
+    lines: &[GeometryLine],
+    target: &HitTarget,
+) {
+    let mut top = None;
+    let mut bottom = None;
+    for line in lines.iter().filter(|line| &line.target == target) {
+        top = Some(top.map_or(line.rect.y, |value: u16| value.min(line.rect.y)));
+        bottom = Some(bottom.map_or(line.rect.y, |value: u16| value.max(line.rect.y)));
+    }
+    let (Some(top), Some(bottom)) = (top, bottom) else {
+        return;
+    };
+    let top = top.max(content.y);
+    let bottom = bottom.min(content.bottom().saturating_sub(1));
+    if top > bottom || content.width == 0 || content.height == 0 {
+        return;
+    }
+
+    let left = content.x;
+    let right = content.right().saturating_sub(1);
+    let style = Style::default().fg(theme.selection_border);
+    for y in top..=bottom {
+        let edge = if (y == top && top == content.y)
+            || (y == bottom && bottom.saturating_add(1) >= content.bottom())
+        {
+            '┆'
+        } else {
+            '│'
+        };
+        if let Some(cell) = buf.cell_mut((left, y)) {
+            cell.set_char(edge).set_style(style);
+        }
+        if let Some(cell) = buf.cell_mut((right, y)) {
+            cell.set_char(edge).set_style(style);
+        }
+    }
+    if top > content.y {
+        if let Some(cell) = buf.cell_mut((left, top - 1)) {
+            cell.set_char('┌').set_style(style);
+        }
+        if let Some(cell) = buf.cell_mut((right, top - 1)) {
+            cell.set_char('┐').set_style(style);
+        }
+    }
+    let bottom_corner_y = bottom.saturating_add(1);
+    if bottom_corner_y < content.bottom() {
+        if let Some(cell) = buf.cell_mut((left, bottom_corner_y)) {
+            cell.set_char('└').set_style(style);
+        }
+        if let Some(cell) = buf.cell_mut((right, bottom_corner_y)) {
+            cell.set_char('┘').set_style(style);
+        }
+    }
+}
+
 fn task_status_line(snapshot: &GrokHostSnapshot) -> String {
     if snapshot.tasks.is_empty() {
         return String::new();
@@ -2862,11 +3017,13 @@ mod tests {
     use super::prompt_admission_message;
     use super::prompt_receipt_admitted;
     use super::render_file_search_content;
+    use super::render_transcript_selection_box;
     use super::steer_capability_available;
     use super::{
         MediaPreviewBuffer, UiState, render_agent_tasks_content, render_image_preview_content,
     };
     use crate::effects::UiEffectStatus;
+    use crate::geometry::{GeometryLine, HitTarget};
     use crate::host_adapter::{
         AgentSnapshot, CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot,
         MediaSnapshot, SuggestionSnapshot,
@@ -2887,6 +3044,41 @@ mod tests {
         let snapshot = GrokHostSnapshot::demo();
         assert_eq!(snapshot.model, "deepseek-reasoner");
         assert_eq!(snapshot.picker_entries().len(), 3);
+    }
+
+    #[test]
+    fn transcript_selection_box_wraps_a_clicked_block_with_grok_corners() {
+        let target = HitTarget::TranscriptBlock {
+            entry_id: dsh_pager::DshRenderEntryId::Event { seq: 4 },
+            block_index: 2,
+        };
+        let lines = vec![
+            GeometryLine {
+                target: target.clone(),
+                line_index: 0,
+                text: "final answer".into(),
+                rect: Rect::new(4, 2, 12, 1),
+            },
+            GeometryLine {
+                target: target.clone(),
+                line_index: 1,
+                text: "second line".into(),
+                rect: Rect::new(4, 3, 12, 1),
+            },
+        ];
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 8));
+        render_transcript_selection_box(
+            &mut buffer,
+            Rect::new(0, 0, 20, 8),
+            Theme::current(),
+            &lines,
+            &target,
+        );
+        assert_eq!(buffer.cell((0, 1)).expect("top corner").symbol(), "┌");
+        assert_eq!(buffer.cell((0, 2)).expect("left edge").symbol(), "│");
+        assert_eq!(buffer.cell((0, 4)).expect("bottom corner").symbol(), "└");
+        assert_eq!(buffer.cell((19, 1)).expect("top corner").symbol(), "┐");
+        assert_eq!(buffer.cell((19, 4)).expect("bottom corner").symbol(), "┘");
     }
 
     #[test]

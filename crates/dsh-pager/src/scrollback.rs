@@ -5,11 +5,11 @@ use dsh_pager_protocol::HistoryEntry;
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
-use crate::presentation::DshRenderRole;
 use crate::presentation::{
     DshPresentationAdapter, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderKind,
     DshRenderUpdate,
 };
+use crate::presentation::{DshRenderFinish, DshRenderRole, DshRenderVisibility};
 
 /// Compatibility names retained at the scrollback API boundary. Presentation
 /// owns the actual identity and semantic kind definitions.
@@ -35,6 +35,10 @@ pub struct ScrollbackEntry {
     pub kind: EntryKind,
     pub text: String,
     pub partial: bool,
+    pub visibility: DshRenderVisibility,
+    pub finish: DshRenderFinish,
+    pub group_key: Option<String>,
+    pub selectable: bool,
     pub lineage: Vec<i64>,
     pub content: DshRenderContent,
     cache: Option<LineCache>,
@@ -42,52 +46,48 @@ pub struct ScrollbackEntry {
 }
 
 impl ScrollbackEntry {
-    fn new(
-        id: EntryId,
-        source_seq: i64,
-        kind: EntryKind,
-        text: String,
-        partial: bool,
-        lineage: Vec<i64>,
-        content: DshRenderContent,
-    ) -> Self {
+    fn new(entry: DshRenderEntry) -> Self {
         Self {
-            id,
-            source_seq,
-            kind,
-            text,
-            partial,
-            lineage,
-            content,
+            id: entry.id,
+            source_seq: entry.source_seq,
+            kind: entry.kind,
+            text: entry.text,
+            partial: entry.partial,
+            visibility: entry.visibility,
+            finish: entry.finish,
+            group_key: entry.group_key,
+            selectable: entry.selectable,
+            lineage: entry.lineage,
+            content: entry.content,
             cache: None,
             measured: None,
         }
     }
 
-    fn set(
-        &mut self,
-        source_seq: i64,
-        kind: EntryKind,
-        text: String,
-        partial: bool,
-        lineage: Vec<i64>,
-        content: DshRenderContent,
-    ) -> bool {
-        if self.source_seq == source_seq
-            && self.kind == kind
-            && self.text == text
-            && self.partial == partial
-            && self.lineage == lineage
-            && self.content == content
+    fn set(&mut self, entry: ScrollbackEntry) -> bool {
+        if self.source_seq == entry.source_seq
+            && self.kind == entry.kind
+            && self.text == entry.text
+            && self.partial == entry.partial
+            && self.visibility == entry.visibility
+            && self.finish == entry.finish
+            && self.group_key == entry.group_key
+            && self.selectable == entry.selectable
+            && self.lineage == entry.lineage
+            && self.content == entry.content
         {
             return false;
         }
-        self.source_seq = source_seq;
-        self.kind = kind;
-        self.text = text;
-        self.partial = partial;
-        self.lineage = lineage;
-        self.content = content;
+        self.source_seq = entry.source_seq;
+        self.kind = entry.kind;
+        self.text = entry.text;
+        self.partial = entry.partial;
+        self.visibility = entry.visibility;
+        self.finish = entry.finish;
+        self.group_key = entry.group_key;
+        self.selectable = entry.selectable;
+        self.lineage = entry.lineage;
+        self.content = entry.content;
         self.cache = None;
         self.measured = None;
         true
@@ -95,10 +95,26 @@ impl ScrollbackEntry {
 
     fn rendered_lines(&mut self, width: usize) -> &[String] {
         let width = width.max(1);
+        if self.visibility == DshRenderVisibility::Hidden {
+            self.cache = Some(LineCache {
+                width,
+                lines: Vec::new(),
+            });
+            self.measured = Some(MeasuredHeight { width, height: 0 });
+            return &self.cache.as_ref().expect("cache initialized").lines;
+        }
         if self.cache.as_ref().is_none_or(|cache| cache.width != width) {
             let mut lines = vec![self.kind.label().to_string()];
             let body_width = width.saturating_sub(2).max(1);
-            let display_text = if self.content.blocks.is_empty() {
+            let collapsed = self.visibility == DshRenderVisibility::Collapsed;
+            let display_text = if collapsed {
+                self.text
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or(self.kind.label())
+                    .trim()
+                    .to_string()
+            } else if self.content.blocks.is_empty() {
                 self.text.clone()
             } else {
                 self.content.display_text()
@@ -139,6 +155,12 @@ impl ScrollbackEntry {
     /// Cheap approximate layout height used before an entry enters the
     /// viewport. It scans text widths but allocates no wrapped strings.
     fn estimated_height(&self, width: usize) -> usize {
+        if self.visibility == DshRenderVisibility::Hidden {
+            return 0;
+        }
+        if self.visibility == DshRenderVisibility::Collapsed {
+            return 3;
+        }
         let body_width = width.max(1).saturating_sub(2).max(1);
         let body_rows = self
             .text
@@ -161,15 +183,7 @@ impl ScrollbackEntry {
 
 impl From<DshRenderEntry> for ScrollbackEntry {
     fn from(entry: DshRenderEntry) -> Self {
-        Self::new(
-            entry.id,
-            entry.source_seq,
-            entry.kind,
-            entry.text,
-            entry.partial,
-            entry.lineage,
-            entry.content,
-        )
+        Self::new(entry)
     }
 }
 
@@ -368,6 +382,23 @@ impl Scrollback {
         }
     }
 
+    /// Finalize any running streaming surfaces without fabricating a history
+    /// event. The canonical surface remains in the scrollback with its stable
+    /// `Partial { turn, step }` identity and a non-running finish state.
+    pub fn finalize_stream(
+        &mut self,
+        seq: i64,
+        finish: DshRenderFinish,
+        reason: Option<&str>,
+    ) -> bool {
+        let updates = self.adapter.finalize_all(seq, finish, reason);
+        let changed = !updates.is_empty();
+        for update in updates {
+            self.apply_update(update);
+        }
+        changed
+    }
+
     fn apply_update(&mut self, update: DshRenderUpdate) {
         match update {
             DshRenderUpdate::Upsert(entry) => self.upsert(ScrollbackEntry::from(entry)),
@@ -387,6 +418,10 @@ impl Scrollback {
                 kind: entry.kind,
                 text: entry.text.clone(),
                 partial: entry.partial,
+                visibility: entry.visibility,
+                finish: entry.finish,
+                group_key: entry.group_key.clone(),
+                selectable: entry.selectable,
                 lineage: entry.lineage.clone(),
                 content: entry.content.clone(),
             })
@@ -450,11 +485,34 @@ impl Scrollback {
     /// its stable identity remain owned by `Scrollback`; this boundary only
     /// replaces the width-specific height used by its Fenwick index.
     pub fn set_rendered_height(&mut self, width: usize, entry_idx: usize, height: usize) -> bool {
+        self.set_height(width, entry_idx, height, false)
+    }
+
+    /// Supply a height from a view-time projection. Unlike the regular rich
+    /// renderer boundary, a projection may intentionally assign zero height
+    /// to a canonical entry hidden behind a synthetic group header.
+    pub fn set_projected_height(&mut self, width: usize, entry_idx: usize, height: usize) -> bool {
+        self.set_height(width, entry_idx, height, true)
+    }
+
+    fn set_height(
+        &mut self,
+        width: usize,
+        entry_idx: usize,
+        height: usize,
+        allow_zero: bool,
+    ) -> bool {
         let width = width.max(1);
         self.ensure_layout(width);
-        let height = height.max(1);
         let Some(entry) = self.entries.get_mut(entry_idx) else {
             return false;
+        };
+        let height = if entry.visibility == DshRenderVisibility::Hidden {
+            0
+        } else if allow_zero {
+            height
+        } else {
+            height.max(1)
         };
         entry.measured = Some(MeasuredHeight { width, height });
         let changed = self.heights.set(entry_idx, height);
@@ -586,10 +644,13 @@ impl Scrollback {
             }
             let mut changed = false;
             for entry_idx in range.clone() {
-                let actual = self.entries[entry_idx]
-                    .rendered_lines(width)
-                    .len()
-                    .saturating_add(1);
+                let entry = &mut self.entries[entry_idx];
+                let actual = if entry.visibility == DshRenderVisibility::Hidden {
+                    entry.rendered_lines(width);
+                    0
+                } else {
+                    entry.rendered_lines(width).len().saturating_add(1)
+                };
                 if self.heights.set(entry_idx, actual) {
                     self.layout_snapshot_dirty = true;
                     changed = true;
@@ -643,10 +704,13 @@ impl Scrollback {
             }
             let mut changed = false;
             for entry_idx in range.clone() {
-                let actual = self.entries[entry_idx]
-                    .rendered_lines(width)
-                    .len()
-                    .saturating_add(1);
+                let entry = &mut self.entries[entry_idx];
+                let actual = if entry.visibility == DshRenderVisibility::Hidden {
+                    entry.rendered_lines(width);
+                    0
+                } else {
+                    entry.rendered_lines(width).len().saturating_add(1)
+                };
                 if self.heights.set(entry_idx, actual) {
                     self.layout_snapshot_dirty = true;
                     changed = true;
@@ -704,12 +768,13 @@ impl Scrollback {
         {
             return Some(measured);
         }
-        let actual = self
-            .entries
-            .get_mut(index)?
-            .rendered_lines(width)
-            .len()
-            .saturating_add(1);
+        let entry = self.entries.get_mut(index)?;
+        let actual = if entry.visibility == DshRenderVisibility::Hidden {
+            entry.rendered_lines(width);
+            0
+        } else {
+            entry.rendered_lines(width).len().saturating_add(1)
+        };
         if self.heights.height(index) != Some(actual) {
             self.heights.set(index, actual);
             self.layout_snapshot_dirty = true;
@@ -719,14 +784,7 @@ impl Scrollback {
 
     fn upsert(&mut self, entry: ScrollbackEntry) {
         if let Some(&index) = self.positions.get(&entry.id) {
-            if !self.entries[index].set(
-                entry.source_seq,
-                entry.kind,
-                entry.text,
-                entry.partial,
-                entry.lineage,
-                entry.content,
-            ) {
+            if !self.entries[index].set(entry) {
                 return;
             }
             if self.layout_width > 0
@@ -920,8 +978,38 @@ mod tests {
             }),
         ));
         assert_eq!(scrollback.entries.len(), 1);
-        assert_eq!(scrollback.entries[0].id, EntryId::Event { seq: 2 });
+        assert_eq!(
+            scrollback.entries[0].id,
+            EntryId::Partial { turn: 1, step: 0 }
+        );
         assert_eq!(scrollback.entries[0].text, "hello!");
+        assert!(!scrollback.entries[0].partial);
+    }
+
+    #[test]
+    fn hidden_context_remains_canonical_but_has_zero_layout_height() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&history(
+            0,
+            "user/message",
+            json!({
+                "source": { "kind": "system" },
+                "content": [{ "type": "text", "text": "secret" }]
+            }),
+        ));
+        scrollback.apply_event(&history(
+            1,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "visible" }]
+            }),
+        ));
+        assert_eq!(scrollback.entries.len(), 2);
+        let layout = scrollback.layout(80);
+        assert_eq!(layout.entries[0].height, 0);
+        assert!(layout.entries[1].height > 0);
+        assert!(!scrollback.plain_text().is_empty());
     }
 
     #[test]
@@ -1116,5 +1204,24 @@ mod tests {
         assert_eq!(anchor.entry_id, EntryId::Event { seq: 0 });
         assert_eq!(anchor.intra_row, 7);
         assert_eq!(scrollback.scroll_for_anchor(80, anchor), Some(7));
+    }
+
+    #[test]
+    fn projected_height_can_hide_canonical_group_member_without_deleting_it() {
+        let mut scrollback = Scrollback::default();
+        for seq in 0..2 {
+            scrollback.apply_event(&history(
+                seq,
+                "tool/call",
+                json!({ "name": format!("tool-{seq}"), "arguments": "{}" }),
+            ));
+        }
+        assert!(scrollback.set_projected_height(80, 0, 1));
+        assert!(scrollback.set_projected_height(80, 1, 0));
+        assert_eq!(scrollback.entries().len(), 2);
+        assert_eq!(scrollback.layout(80).entries[1].height, 0);
+        assert_eq!(scrollback.total_height(80), 1);
+        assert!(scrollback.set_rendered_height(80, 1, 2));
+        assert_eq!(scrollback.layout(80).entries[1].height, 2);
     }
 }

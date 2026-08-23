@@ -7,7 +7,7 @@
 use dsh_pager::{
     ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
     DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
-    DshRenderKind, DshSeq, DshSessionId, SessionState,
+    DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, SessionState,
 };
 use dsh_pager_protocol::PromptMode;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,10 @@ pub struct TranscriptRow {
     pub label: String,
     pub text: String,
     pub kind: DshRenderKind,
+    pub visibility: DshRenderVisibility,
+    pub finish: DshRenderFinish,
+    pub group_key: Option<String>,
+    pub selectable: bool,
     pub source_seq: i64,
     pub seq: DshSeq,
     pub content: DshRenderContent,
@@ -638,6 +642,10 @@ impl From<DshRenderEntry> for TranscriptRow {
             label: entry.kind.label().to_string(),
             text: entry.text,
             kind: entry.kind,
+            visibility: entry.visibility,
+            finish: entry.finish,
+            group_key: entry.group_key,
+            selectable: entry.selectable,
             source_seq: entry.source_seq,
             seq: DshSeq::new(entry.source_seq),
             content: entry.content,

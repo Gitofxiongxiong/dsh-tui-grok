@@ -116,11 +116,13 @@ fn partial_stream_and_final_message_keep_one_stable_surface() {
     )));
     assert!(updates.iter().any(|update| matches!(
         update,
-        DshRenderUpdate::Remove(DshRenderEntryId::Partial { turn: 1, step: 1 })
-    )));
-    assert!(updates.iter().any(|update| matches!(
-        update,
-        DshRenderUpdate::Upsert(DshRenderEntry { id: DshRenderEntryId::Event { seq: 2 }, text, .. }) if text == "final"
+        DshRenderUpdate::Upsert(DshRenderEntry {
+            id: DshRenderEntryId::Partial { turn: 1, step: 1 },
+            text,
+            partial: false,
+            finish: dsh_pager::DshRenderFinish::Completed,
+            ..
+        }) if text == "final"
     )));
 }
 

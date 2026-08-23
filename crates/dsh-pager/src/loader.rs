@@ -726,7 +726,17 @@ pub fn drain_notifications(
     state: &mut SessionState,
 ) -> PagerResult<SessionUpdate> {
     let mut combined = SessionUpdate::default();
-    while let Some(note) = transport.try_notification()? {
+    loop {
+        let note = match transport.try_notification() {
+            Ok(Some(note)) => note,
+            Ok(None) => break,
+            Err(error) => {
+                let update = state.accept_stream_eof(error.to_string());
+                combined.changed |= update.changed;
+                combined.gap_detected |= update.gap_detected;
+                break;
+            }
+        };
         let update = transport.route_notification(state, note)?;
         combined.changed |= update.changed;
         combined.gap_detected |= update.gap_detected;

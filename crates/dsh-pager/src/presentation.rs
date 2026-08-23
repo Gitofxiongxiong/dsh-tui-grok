@@ -21,6 +21,31 @@ pub enum DshRenderEntryId {
     Partial { turn: i64, step: i64 },
 }
 
+/// View-time visibility for a canonical transcript entry. Hidden entries are
+/// retained in history and can still be inspected through diagnostics/copy
+/// paths; they simply occupy no space in the default transcript projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DshRenderVisibility {
+    #[default]
+    Visible,
+    Collapsed,
+    Hidden,
+}
+
+/// Terminal state of a streaming render surface. `Running` is the only state
+/// that may keep a surface marked `partial`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DshRenderFinish {
+    #[default]
+    Completed,
+    Running,
+    Interrupted,
+    Failed,
+    Eof,
+}
+
 /// Presentation category used by the DSH renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -31,6 +56,8 @@ pub enum DshRenderKind {
     ToolCall,
     ToolResult,
     Context,
+    SystemInstruction,
+    AgentContext,
     Status,
     Error,
     Compaction,
@@ -45,6 +72,8 @@ impl DshRenderKind {
             Self::ToolCall => "Tool",
             Self::ToolResult => "Result",
             Self::Context => "Context",
+            Self::SystemInstruction => "System",
+            Self::AgentContext => "Context",
             Self::Status => "Status",
             Self::Error => "Error",
             Self::Compaction => "Compaction",
@@ -149,6 +178,18 @@ pub struct DshRenderEntry {
     /// uses the same stable surface lineage with this bit cleared.
     #[serde(default, skip_serializing_if = "is_false")]
     pub partial: bool,
+    /// Whether the canonical entry is visible in the default transcript.
+    #[serde(default)]
+    pub visibility: DshRenderVisibility,
+    /// Explicit terminal state for streaming surfaces and diagnostics.
+    #[serde(default)]
+    pub finish: DshRenderFinish,
+    /// Stable grouping anchor for context/tool projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
+    /// Whether this entry can be selected/copied from the default view.
+    #[serde(default = "default_selectable")]
+    pub selectable: bool,
     /// Source event ids that caused this surface replacement or projection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lineage: Vec<i64>,
@@ -195,6 +236,10 @@ impl DshRenderEntry {
             kind,
             text: text.clone(),
             partial: false,
+            visibility: default_visibility(kind),
+            finish: DshRenderFinish::Completed,
+            group_key: None,
+            selectable: default_selectable_for_kind(kind),
             lineage: Vec::new(),
             content: DshRenderContent {
                 blocks: vec![block],
@@ -206,6 +251,31 @@ impl DshRenderEntry {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn default_selectable() -> bool {
+    true
+}
+
+fn default_selectable_for_kind(kind: DshRenderKind) -> bool {
+    !matches!(
+        kind,
+        DshRenderKind::SystemInstruction
+            | DshRenderKind::AgentContext
+            | DshRenderKind::Context
+            | DshRenderKind::Status
+            | DshRenderKind::Compaction
+    )
+}
+
+fn default_visibility(kind: DshRenderKind) -> DshRenderVisibility {
+    match kind {
+        DshRenderKind::SystemInstruction => DshRenderVisibility::Hidden,
+        DshRenderKind::AgentContext | DshRenderKind::Context | DshRenderKind::Compaction => {
+            DshRenderVisibility::Collapsed
+        }
+        _ => DshRenderVisibility::Visible,
+    }
 }
 
 impl DshRenderContent {
@@ -690,6 +760,23 @@ impl DshPresentationAdapter {
         self.partials.clear();
     }
 
+    /// Finalize every currently running assistant surface. Host stream error,
+    /// EOF and generation changes can end a stream without adding a history
+    /// event, so they use this same reducer seam as `turn/end`.
+    pub fn finalize_all(
+        &mut self,
+        seq: i64,
+        finish: DshRenderFinish,
+        reason: Option<&str>,
+    ) -> Vec<DshRenderUpdate> {
+        let keys = self.partials.keys().copied().collect::<Vec<_>>();
+        let mut updates = Vec::new();
+        for key in keys {
+            self.finalize_partial(key, seq, finish, reason, &mut updates);
+        }
+        updates
+    }
+
     /// Rebuild a coherent presentation baseline from a history window.
     pub fn adapt_history(&mut self, history: &[HistoryEntry]) -> Vec<DshRenderUpdate> {
         self.reset();
@@ -722,6 +809,9 @@ impl DshPresentationAdapter {
             "command/done" => self.adapt_command(event.seq, &event.data, &mut updates),
             "llm/retry" => self.adapt_retry(event.seq, &event.data, &mut updates),
             "turn/end" => self.adapt_turn_end(event.seq, &event.data, &mut updates),
+            "agent/error" | "stream/error" | "stream/eof" => {
+                self.adapt_stream_terminal(event.seq, &event.data, &mut updates)
+            }
             "compaction/start" => self.adapt_compaction_start(event.seq, &event.data, &mut updates),
             "compaction/end" => self.adapt_compaction_end(event.seq, &event.data, &mut updates),
             "compaction/summary" => {
@@ -736,7 +826,12 @@ impl DshPresentationAdapter {
             .unwrap_or_else(|| vec![event.seq]);
         for update in &mut updates {
             if let DshRenderUpdate::Upsert(render) = update {
-                render.lineage = lineage.clone();
+                if matches!(render.id, DshRenderEntryId::Event { seq: render_seq } if render_seq == event.seq)
+                {
+                    render.lineage = lineage.clone();
+                } else {
+                    append_lineage(&mut render.lineage, &lineage);
+                }
             }
         }
         updates
@@ -747,14 +842,16 @@ impl DshPresentationAdapter {
         if content.blocks.is_empty() {
             return;
         }
-        let kind = if data.pointer("/source/kind").and_then(Value::as_str) == Some("user") {
-            DshRenderKind::User
-        } else if data.pointer("/source/plugin").and_then(Value::as_str) == Some("compact") {
-            DshRenderKind::Compaction
-        } else {
-            DshRenderKind::Context
-        };
-        updates.push(upsert_event_content(seq, kind, content));
+        let (kind, visibility, group_key, selectable) = classify_user_message(data);
+        updates.push(upsert_event_content_with_projection(
+            seq,
+            kind,
+            content,
+            visibility,
+            DshRenderFinish::Completed,
+            group_key,
+            selectable,
+        ));
     }
 
     fn adapt_assistant_message(
@@ -763,18 +860,44 @@ impl DshPresentationAdapter {
         data: &Value,
         updates: &mut Vec<DshRenderUpdate>,
     ) {
-        if let (Some(turn), Some(step)) = (integer(data, "turn"), integer(data, "step")) {
-            self.partials.remove(&(turn, step));
-            updates.push(DshRenderUpdate::Remove(DshRenderEntryId::Partial {
-                turn,
-                step,
-            }));
-        }
+        let key = integer(data, "turn").zip(integer(data, "step"));
         let Some(message) = data.get("message") else {
+            if let Some(key) = key {
+                self.finalize_partial(key, seq, DshRenderFinish::Completed, None, updates);
+            }
             return;
         };
         let content = DshRenderContent::from_message(message);
-        if !content.blocks.is_empty() {
+        if let Some(key) = key {
+            if let Some(partial) = self.partials.get_mut(&key) {
+                if partial.final_content_applied {
+                    return;
+                }
+                if matches!(
+                    partial.finish,
+                    DshRenderFinish::Interrupted | DshRenderFinish::Failed | DshRenderFinish::Eof
+                ) {
+                    // A late final frame from an older provider generation
+                    // must not resurrect a surface already terminated by an
+                    // abort/error/EOF signal.
+                    return;
+                }
+                if !content.blocks.is_empty() {
+                    partial.replace_with_final(content);
+                }
+                partial.finish = DshRenderFinish::Completed;
+                partial.final_content_applied = true;
+                if let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display)
+                {
+                    let partial = self.partials.get(&key).expect("partial exists");
+                    updates.push(DshRenderUpdate::Upsert(partial_entry(
+                        key, seq, kind, content, partial,
+                    )));
+                }
+            } else if !content.blocks.is_empty() {
+                updates.push(upsert_event_content(seq, DshRenderKind::Assistant, content));
+            }
+        } else if !content.blocks.is_empty() {
             updates.push(upsert_event_content(seq, DshRenderKind::Assistant, content));
         }
     }
@@ -790,11 +913,53 @@ impl DshPresentationAdapter {
             integer(data, "step"),
             data.get("chunk"),
         ) else {
+            updates.push(upsert_event(
+                seq,
+                DshRenderKind::Error,
+                "Malformed assistant stream chunk".into(),
+            ));
             return;
         };
+        let key = (turn, step);
         let chunk_type = chunk.get("type").and_then(Value::as_str).unwrap_or("");
+        if chunk_type == "finish" {
+            let finish = finish_from_value(
+                chunk
+                    .get("reason")
+                    .or_else(|| chunk.get("finish"))
+                    .or_else(|| chunk.get("finishReason"))
+                    .or_else(|| chunk.get("status")),
+            );
+            self.finalize_partial(key, seq, finish, None, updates);
+            return;
+        }
+        // Usage is terminal metadata, not a transcript block. Keep the
+        // surface alive until an explicit final/turn-end/error signal while
+        // still advancing the surface lineage instead of silently dropping
+        // the frame.
+        if chunk_type == "usage" {
+            let partial = self.partials.entry(key).or_default();
+            if partial.finish != DshRenderFinish::Running {
+                return;
+            }
+            append_lineage(&mut partial.lineage, &[seq]);
+            let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display) else {
+                return;
+            };
+            if !content.blocks.is_empty() {
+                let partial = self.partials.get(&key).expect("partial exists");
+                updates.push(DshRenderUpdate::Upsert(partial_entry(
+                    key, seq, kind, content, partial,
+                )));
+            }
+            return;
+        }
         let index = chunk.get("index").and_then(Value::as_i64).unwrap_or(0);
-        let partial = self.partials.entry((turn, step)).or_default();
+        let partial = self.partials.entry(key).or_default();
+        if partial.finish != DshRenderFinish::Running {
+            return;
+        }
+        append_lineage(&mut partial.lineage, &[seq]);
         match chunk_type {
             "block-start" => {
                 let kind = match chunk.get("blockType").and_then(Value::as_str) {
@@ -849,25 +1014,23 @@ impl DshPresentationAdapter {
                     *block = PartialBlock::from_render_block(parse_render_block(block_value));
                 }
             }
-            _ => return,
+            _ => {
+                updates.push(upsert_event(
+                    seq,
+                    DshRenderKind::Error,
+                    format!("Unsupported assistant chunk: {chunk_type}"),
+                ));
+                return;
+            }
         }
-        let Some((kind, content)) = self
-            .partials
-            .get(&(turn, step))
-            .map(PartialMessage::display)
-        else {
+        let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display) else {
             return;
         };
         if !content.blocks.is_empty() {
-            updates.push(DshRenderUpdate::Upsert(DshRenderEntry {
-                id: DshRenderEntryId::Partial { turn, step },
-                source_seq: seq,
-                kind,
-                text: content.fallback.clone(),
-                partial: true,
-                lineage: vec![seq],
-                content,
-            }));
+            let partial = self.partials.get(&key).expect("partial exists");
+            updates.push(DshRenderUpdate::Upsert(partial_entry(
+                key, seq, kind, content, partial,
+            )));
         }
     }
 
@@ -951,8 +1114,21 @@ impl DshPresentationAdapter {
     fn adapt_turn_end(&mut self, seq: i64, data: &Value, updates: &mut Vec<DshRenderUpdate>) {
         let kind = data
             .pointer("/reason/kind")
+            .or_else(|| data.pointer("/reason/type"))
+            .or_else(|| data.get("reason"))
             .and_then(Value::as_str)
             .unwrap_or("completed");
+        let finish = finish_from_kind(kind);
+        let turn = integer(data, "turn").or_else(|| integer(data, "turnId"));
+        let keys = self
+            .partials
+            .keys()
+            .copied()
+            .filter(|(partial_turn, _)| turn.is_none_or(|turn| turn == *partial_turn))
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.finalize_partial(key, seq, finish, Some(kind), updates);
+        }
         if kind != "completed" {
             updates.push(upsert_event(
                 seq,
@@ -960,6 +1136,65 @@ impl DshPresentationAdapter {
                 format!("Turn ended: {kind}"),
             ));
         }
+    }
+
+    fn adapt_stream_terminal(
+        &mut self,
+        seq: i64,
+        data: &Value,
+        updates: &mut Vec<DshRenderUpdate>,
+    ) {
+        let code = data
+            .pointer("/error/code")
+            .or_else(|| data.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let reason = data
+            .pointer("/error/message")
+            .or_else(|| data.get("message"))
+            .and_then(Value::as_str);
+        let finish = if code.eq_ignore_ascii_case("eof")
+            || code.eq_ignore_ascii_case("closed")
+            || reason.is_some_and(|message| {
+                let message = message.to_ascii_lowercase();
+                message.contains("eof") || message.contains("closed")
+            }) {
+            DshRenderFinish::Eof
+        } else {
+            DshRenderFinish::Failed
+        };
+        self.finalize_all(seq, finish, reason)
+            .into_iter()
+            .for_each(|update| updates.push(update));
+    }
+
+    fn finalize_partial(
+        &mut self,
+        key: (i64, i64),
+        seq: i64,
+        finish: DshRenderFinish,
+        reason: Option<&str>,
+        updates: &mut Vec<DshRenderUpdate>,
+    ) {
+        let Some(partial) = self.partials.get_mut(&key) else {
+            return;
+        };
+        if partial.finish != DshRenderFinish::Running {
+            return;
+        }
+        partial.finish = finish;
+        partial.terminal_seq = Some(seq);
+        append_lineage(&mut partial.lineage, &[seq]);
+        let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display) else {
+            return;
+        };
+        if !content.blocks.is_empty() {
+            let partial = self.partials.get(&key).expect("partial exists");
+            updates.push(DshRenderUpdate::Upsert(partial_entry(
+                key, seq, kind, content, partial,
+            )));
+        }
+        let _ = reason;
     }
 
     fn adapt_compaction_start(
@@ -1137,9 +1372,25 @@ impl PartialBlock {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PartialMessage {
     blocks: BTreeMap<i64, PartialBlock>,
+    finish: DshRenderFinish,
+    terminal_seq: Option<i64>,
+    final_content_applied: bool,
+    lineage: Vec<i64>,
+}
+
+impl Default for PartialMessage {
+    fn default() -> Self {
+        Self {
+            blocks: BTreeMap::new(),
+            finish: DshRenderFinish::Running,
+            terminal_seq: None,
+            final_content_applied: false,
+            lineage: Vec::new(),
+        }
+    }
 }
 
 impl PartialMessage {
@@ -1163,6 +1414,15 @@ impl PartialMessage {
             DshRenderContent::from_blocks(blocks),
         )
     }
+
+    fn replace_with_final(&mut self, content: DshRenderContent) {
+        self.blocks = content
+            .blocks
+            .into_iter()
+            .enumerate()
+            .map(|(index, block)| (index as i64, PartialBlock::from_render_block(block)))
+            .collect();
+    }
 }
 
 fn upsert_event(seq: i64, kind: DshRenderKind, text: String) -> DshRenderUpdate {
@@ -1178,15 +1438,182 @@ fn upsert_event_content(
     kind: DshRenderKind,
     content: DshRenderContent,
 ) -> DshRenderUpdate {
+    upsert_event_content_with_projection(
+        seq,
+        kind,
+        content,
+        default_visibility(kind),
+        DshRenderFinish::Completed,
+        None,
+        default_selectable_for_kind(kind),
+    )
+}
+
+fn upsert_event_content_with_projection(
+    seq: i64,
+    kind: DshRenderKind,
+    content: DshRenderContent,
+    visibility: DshRenderVisibility,
+    finish: DshRenderFinish,
+    group_key: Option<String>,
+    selectable: bool,
+) -> DshRenderUpdate {
     DshRenderUpdate::Upsert(DshRenderEntry {
         id: DshRenderEntryId::Event { seq },
         source_seq: seq,
         kind,
         text: content.fallback.clone(),
         partial: false,
+        visibility,
+        finish,
+        group_key,
+        selectable,
         lineage: vec![seq],
         content,
     })
+}
+
+fn partial_entry(
+    key: (i64, i64),
+    seq: i64,
+    kind: DshRenderKind,
+    content: DshRenderContent,
+    partial: &PartialMessage,
+) -> DshRenderEntry {
+    DshRenderEntry {
+        id: DshRenderEntryId::Partial {
+            turn: key.0,
+            step: key.1,
+        },
+        source_seq: seq,
+        kind,
+        text: content.fallback.clone(),
+        partial: partial.finish == DshRenderFinish::Running,
+        visibility: if partial.finish == DshRenderFinish::Running {
+            DshRenderVisibility::Visible
+        } else if kind == DshRenderKind::Thinking {
+            DshRenderVisibility::Collapsed
+        } else {
+            DshRenderVisibility::Visible
+        },
+        finish: partial.finish,
+        group_key: Some(format!("assistant:{}:{}", key.0, key.1)),
+        selectable: true,
+        lineage: partial.lineage.clone(),
+        content,
+    }
+}
+
+fn classify_user_message(
+    data: &Value,
+) -> (DshRenderKind, DshRenderVisibility, Option<String>, bool) {
+    let source_kind = data
+        .pointer("/source/kind")
+        .or_else(|| data.pointer("/source/type"))
+        .or_else(|| data.pointer("/source/role"))
+        .or_else(|| data.get("role"))
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    let plugin = data
+        .pointer("/source/plugin")
+        .or_else(|| data.pointer("/source/pluginId"))
+        .or_else(|| data.pointer("/source/pluginName"))
+        .or_else(|| data.get("plugin"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if plugin.as_deref() == Some("compact") {
+        return (
+            DshRenderKind::Compaction,
+            DshRenderVisibility::Collapsed,
+            Some("compaction".into()),
+            false,
+        );
+    }
+    match source_kind.as_deref() {
+        Some("user") => (
+            DshRenderKind::User,
+            DshRenderVisibility::Visible,
+            None,
+            true,
+        ),
+        Some("system")
+        | Some("developer")
+        | Some("agent-instructions")
+        | Some("instructions")
+        | Some("system-instruction") => (
+            DshRenderKind::SystemInstruction,
+            DshRenderVisibility::Hidden,
+            Some("system-instructions".into()),
+            false,
+        ),
+        Some("plugin")
+        | Some("agent-context")
+        | Some("context")
+        | Some("injected")
+        | Some("tool-context") => (
+            DshRenderKind::AgentContext,
+            DshRenderVisibility::Collapsed,
+            Some(format!(
+                "agent-context:{}",
+                plugin.as_deref().unwrap_or("default")
+            )),
+            false,
+        ),
+        // Unknown source kinds use a safe collapsed context projection. This
+        // prevents a new host injection type from leaking as a user row.
+        _ if plugin.is_some() => (
+            DshRenderKind::AgentContext,
+            DshRenderVisibility::Collapsed,
+            Some(format!(
+                "agent-context:{}",
+                plugin.as_deref().unwrap_or("default")
+            )),
+            false,
+        ),
+        _ => (
+            DshRenderKind::AgentContext,
+            DshRenderVisibility::Collapsed,
+            Some("agent-context:unknown".into()),
+            false,
+        ),
+    }
+}
+
+fn finish_from_kind(kind: &str) -> DshRenderFinish {
+    match kind.to_ascii_lowercase().as_str() {
+        "completed" | "complete" | "success" | "done" => DshRenderFinish::Completed,
+        "abort" | "aborted" | "cancel" | "cancelled" | "canceled" | "interrupted" => {
+            DshRenderFinish::Interrupted
+        }
+        "eof" | "closed" | "disconnect" | "disconnected" => DshRenderFinish::Eof,
+        "error" | "failed" | "failure" => DshRenderFinish::Failed,
+        _ => DshRenderFinish::Completed,
+    }
+}
+
+fn finish_from_value(value: Option<&Value>) -> DshRenderFinish {
+    let Some(value) = value else {
+        return DshRenderFinish::Completed;
+    };
+    value
+        .as_str()
+        .map(finish_from_kind)
+        .or_else(|| {
+            value
+                .get("kind")
+                .or_else(|| value.get("type"))
+                .and_then(Value::as_str)
+                .map(finish_from_kind)
+        })
+        .unwrap_or(DshRenderFinish::Completed)
+}
+
+fn append_lineage(lineage: &mut Vec<i64>, values: &[i64]) {
+    for value in values {
+        if !lineage.contains(value) {
+            lineage.push(*value);
+        }
+    }
 }
 
 fn surface_replace(surface_op: Option<&Value>) -> Option<(i64, i64)> {
@@ -1273,7 +1700,151 @@ mod tests {
     }
 
     #[test]
-    fn final_message_removes_partial_and_emits_assistant_block() {
+    fn injected_context_is_hidden_or_collapsed_by_source_semantics() {
+        let mut adapter = DshPresentationAdapter::default();
+        let system = adapter.adapt_event(&entry(
+            1,
+            "user/message",
+            json!({
+                "source": { "kind": "agent-instructions" },
+                "content": [{ "type": "text", "text": "never show this in transcript" }]
+            }),
+        ));
+        let plugin = adapter.adapt_event(&entry(
+            2,
+            "user/message",
+            json!({
+                "source": { "kind": "plugin", "plugin": "repo-context" },
+                "content": [{ "type": "text", "text": "plugin context" }]
+            }),
+        ));
+        let unknown = adapter.adapt_event(&entry(
+            3,
+            "user/message",
+            json!({
+                "source": { "kind": "future-injection" },
+                "content": [{ "type": "text", "text": "future context" }]
+            }),
+        ));
+        assert!(matches!(
+            system.as_slice(),
+            [DshRenderUpdate::Upsert(DshRenderEntry {
+                kind: DshRenderKind::SystemInstruction,
+                visibility: DshRenderVisibility::Hidden,
+                selectable: false,
+                ..
+            })]
+        ));
+        assert!(matches!(
+            plugin.as_slice(),
+            [DshRenderUpdate::Upsert(DshRenderEntry {
+                kind: DshRenderKind::AgentContext,
+                visibility: DshRenderVisibility::Collapsed,
+                group_key: Some(_),
+                ..
+            })]
+        ));
+        assert!(matches!(
+            unknown.as_slice(),
+            [DshRenderUpdate::Upsert(DshRenderEntry {
+                kind: DshRenderKind::AgentContext,
+                visibility: DshRenderVisibility::Collapsed,
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn turn_end_finalizes_partial_without_waiting_for_final_message() {
+        let mut adapter = DshPresentationAdapter::default();
+        adapter.adapt_event(&entry(
+            0,
+            "assistant/chunk",
+            json!({
+                "turn": 4,
+                "step": 0,
+                "chunk": { "type": "text-delta", "index": 0, "text": "partial" }
+            }),
+        ));
+        let updates = adapter.adapt_event(&entry(
+            1,
+            "turn/end",
+            json!({ "turn": 4, "reason": { "kind": "aborted" } }),
+        ));
+        assert!(matches!(
+            updates.first(),
+            Some(DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Partial { turn: 4, step: 0 },
+                partial: false,
+                finish: DshRenderFinish::Interrupted,
+                text,
+                ..
+            })) if text == "partial"
+        ));
+        let repeated = adapter.adapt_event(&entry(
+            2,
+            "turn/end",
+            json!({ "turn": 4, "reason": { "kind": "aborted" } }),
+        ));
+        assert!(!repeated.iter().any(|update| matches!(
+            update,
+            DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Partial { turn: 4, step: 0 },
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn stream_error_finalizes_surface_and_keeps_terminal_state_idempotent() {
+        let mut adapter = DshPresentationAdapter::default();
+        adapter.adapt_event(&entry(
+            0,
+            "assistant/chunk",
+            json!({
+                "turn": 5,
+                "step": 1,
+                "chunk": { "type": "text-delta", "index": 0, "text": "before eof" }
+            }),
+        ));
+        let updates = adapter.adapt_event(&entry(
+            1,
+            "stream/error",
+            json!({ "error": { "code": "eof", "message": "provider closed" } }),
+        ));
+        assert!(matches!(
+            updates.first(),
+            Some(DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Partial { turn: 5, step: 1 },
+                partial: false,
+                finish: DshRenderFinish::Eof,
+                ..
+            }))
+        ));
+        let repeated = adapter.finalize_all(2, DshRenderFinish::Eof, Some("closed"));
+        assert!(repeated.is_empty());
+    }
+
+    #[test]
+    fn malformed_stream_chunk_becomes_a_visible_diagnostic() {
+        let mut adapter = DshPresentationAdapter::default();
+        let updates = adapter.adapt_event(&entry(
+            9,
+            "assistant/chunk",
+            json!({ "chunk": { "type": "text-delta", "text": "orphan" } }),
+        ));
+        assert!(matches!(
+            updates.as_slice(),
+            [DshRenderUpdate::Upsert(DshRenderEntry {
+                kind: DshRenderKind::Error,
+                text,
+                ..
+            })] if text.contains("Malformed")
+        ));
+    }
+
+    #[test]
+    fn final_message_finalizes_the_same_stable_surface() {
         let mut adapter = DshPresentationAdapter::default();
         adapter.adapt_event(&entry(
             0,
@@ -1295,16 +1866,12 @@ mod tests {
         ));
         assert!(matches!(
             updates.first(),
-            Some(DshRenderUpdate::Remove(DshRenderEntryId::Partial {
-                turn: 1,
-                step: 0
-            }))
-        ));
-        assert!(matches!(
-            updates.get(1),
             Some(DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Partial { turn: 1, step: 0 },
                 kind: DshRenderKind::Assistant,
                 text,
+                partial: false,
+                finish: DshRenderFinish::Completed,
                 ..
             })) if text == "final"
         ));

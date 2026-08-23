@@ -40,7 +40,7 @@ pub use loader::{
 pub use presentation::{
     DshEditDetail, DshInteraction, DshPresentationAdapter, DshPresentationModel, DshQueueContent,
     DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
-    DshRenderKind, DshRenderRole, DshRenderUpdate,
+    DshRenderFinish, DshRenderKind, DshRenderRole, DshRenderUpdate, DshRenderVisibility,
 };
 pub use scrollback::{EntryId, EntryLayout, ScrollAnchor, ScrollbackLayout};
 pub use session::{
