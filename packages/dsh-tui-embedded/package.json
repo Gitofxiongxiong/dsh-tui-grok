@@ -1,0 +1,66 @@
+{
+  "name": "@dsh-pager-grok/tui-embedded",
+  "description": "External DSH profile bundle for the dsh-pager-grok native TUI",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "directory": "packages/dsh-tui-embedded"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --pretty false",
+    "test": "vitest run tests"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "cordis.patch.yml",
+    "lib/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-api-remotes": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-file-reference": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-file-reference-local": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-storage": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-storage-json": "0.1.0-rc.8",
+    "@dsh-pager-grok/tui-server": "workspace:*",
+    "@deepseek-ai/dsh-workspace": "0.1.0-rc.8"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.8",
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.8",
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

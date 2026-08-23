@@ -1,0 +1,15 @@
+DeepSeek Harness-derived TypeScript packages
+============================================
+
+The packages under packages/dsh-tui-* contain code extracted from the
+DeepSeek Harness repository:
+
+  https://github.com/deepseek-ai/deepseek-harness
+
+The extracted source was reviewed from the local 0.1.0-rc.8 worktree and is
+distributed under the MIT License with the original DeepSeek copyright notice.
+The external package boundary in this repository does not redistribute the
+Harness repository, its .git directory, or its unrelated packages.
+
+The Rust presentation crates also contain Grok Build-derived Apache-2.0 code;
+see NOTICE, LICENSE-APACHE, and the per-crate NOTICE files.

@@ -1,0 +1,60 @@
+# The dsh-tui-embedded bundle patch: the Embedded native-TUI backend over
+# dsh-base. Stdout is reserved for TUI JSON-RPC frames. It mounts no HTTP
+# server, Web runtime, or browser plugin. Agent tools stay in the host plane
+# (the same process-wide composition the in-process TUI uses).
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+# Shared module-reload HMR writes diagnostics onto the process streams;
+# stdout must stay a protocol pipe. The launcher's watch-only fallback still
+# keeps the user patch layers live until the run exits.
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    # Keep the same temporary process-wide Code Mode opt-in as the other
+    # surfaces. Unset keeps the schema default (native).
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # Code Mode is a core execution capability, not a Web component.
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+
+    # Browse backend: no native dialog. The pager lists directories through
+    # host.listDirectory / host.createDirectory.
+    - id: directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+
+    # The API gateway: the transport-agnostic dispatch face every client
+    # shape shares. tui-server injects ctx.apiProxy from this row.
+    - id: api-gateway
+      name: '@deepseek-ai/dsh-host-apiproxy'
+
+    # The external server adapts this public provider into its optional
+    # fileReferences.list TUI method; the Harness host API itself is untouched.
+    - id: file-reference-local
+      name: '@deepseek-ai/dsh-file-reference-local'
+
+    - id: tui-server
+      name: '@dsh-pager-grok/tui-server'

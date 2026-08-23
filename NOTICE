@@ -16,3 +16,7 @@ remain MIT; derived crates declare Apache-2.0 in their package manifests.
 
 Copyright and license details for each extracted source are retained in the
 corresponding crate NOTICE file. See LICENSE-APACHE for the Apache License 2.0.
+
+The external TypeScript TUI packages under packages/dsh-tui-* were extracted
+from DeepSeek Harness and remain MIT-licensed; their source and provenance are
+documented in THIRD-PARTY-NOTICES and the external-plugin progress record.

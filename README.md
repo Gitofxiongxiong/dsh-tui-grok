@@ -21,9 +21,13 @@ backend / RPC
 cargo check --workspace
 cargo test --workspace
 cargo run -p dsh-pager-bin -- --help
+
+# TypeScript external DSH packages
+pnpm install
+pnpm run verify:ts
 ```
 
-需要连接真实后端时，默认命令是 `dsh --profile tui-embedded`，也可以使用 `--backend` 和 `--backend-arg` 覆盖。
+需要连接真实后端时，先把 `@dsh-pager-grok/tui-embedded` 安装到 `grok-tui` profile，再运行 `dsh --profile grok-tui`；也可以使用 `--backend` 和 `--backend-arg` 覆盖。
 
 ## 文档
 
@@ -31,6 +35,7 @@ cargo run -p dsh-pager-bin -- --help
 - [迁移计划](docs/MIGRATION_PLAN.md)
 - [源码复用与许可证策略](docs/SOURCE_POLICY.md)
 - [验证策略](docs/TESTING.md)
+- [外置 DSH 插件安装与 profile](docs/EXTERNAL_DSH_PLUGIN.md)
 
 ## 许可证
 

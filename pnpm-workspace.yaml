@@ -1,0 +1,6 @@
+packages:
+  - packages/dsh-tui-protocol
+  - packages/dsh-tui-server
+  - packages/dsh-tui-embedded
+allowBuilds:
+  esbuild: true

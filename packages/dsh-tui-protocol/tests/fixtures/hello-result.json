@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": 1,
+    "clientId": "client-1",
+    "generation": 1,
+    "resumeClass": "baseline-required",
+    "serverInfo": {
+      "name": "deepseek-harness-tui",
+      "version": "0.1.0-rc.8",
+      "identityDigest": "digest-1"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "dsh-pager-grok",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DeepSeek Harness external TUI backend and Grok-derived pager",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:ts": "pnpm --filter './packages/dsh-tui-*' run build",
+    "typecheck:ts": "pnpm --filter './packages/dsh-tui-*' run typecheck",
+    "test:ts": "pnpm --filter './packages/dsh-tui-*' run test",
+    "verify:ts": "pnpm run build:ts && pnpm run typecheck:ts && pnpm run test:ts"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis-plugin-include": "1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.20.0",
+    "js-yaml": "^4.1.0",
+    "tsx": "^4.22.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

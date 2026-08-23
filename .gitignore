@@ -1,5 +1,8 @@
 /target
 scripts/__pycache__/
+/packages/dsh-tui-*/lib/
+/packages/dsh-tui-*/node_modules/
+node_modules/
 **/*.rs.bk
 .idea/
 .vscode/

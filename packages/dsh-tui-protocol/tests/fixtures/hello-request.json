@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tui.hello",
+  "params": {
+    "protocolVersion": 1,
+    "clientType": "tui",
+    "capabilities": {
+      "operator": true,
+      "observer": false,
+      "images": true
+    },
+    "identity": {
+      "profile": "tui-embedded",
+      "cwd": "/work",
+      "pluginDigest": "abc",
+      "sandbox": "off"
+    }
+  }
+}
