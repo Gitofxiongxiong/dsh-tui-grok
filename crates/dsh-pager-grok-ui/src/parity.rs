@@ -6,7 +6,7 @@
 use dsh_pager::DshRenderEntry;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{AppShell, KeyOwner, Overlay};
@@ -520,7 +520,18 @@ pub fn render_semantic(
             priority,
         });
     }
-    let mut prompt_buffer = Buffer::empty(area);
+    let mut screen_buffer = Buffer::empty(area);
+    let theme = Theme::current();
+    screen_buffer.set_style(area, Style::default().bg(theme.bg_base));
+    for row in &rows {
+        let rect = Rect::new(row.rect.x, row.rect.y, row.rect.width, row.rect.height);
+        screen_buffer.set_string(
+            rect.x,
+            rect.y,
+            &row.text,
+            semantic_row_style(&row.role, theme),
+        );
+    }
     let mut prompt = PromptEditor::default();
     let prompt_style = PromptStyleContract {
         focused: shell.owner() == KeyOwner::Prompt,
@@ -538,7 +549,7 @@ pub fn render_semantic(
         ..PromptInfoContract::default()
     };
     let prompt_result = GrokPromptRenderer::default().draw(
-        &mut prompt_buffer,
+        &mut screen_buffer,
         layout.prompt,
         prompt.textarea_mut(),
         &prompt_style,
@@ -565,8 +576,24 @@ pub fn render_semantic(
                 label: hit.label.clone(),
             })
             .collect(),
-        cells: semantic_cells(&prompt_buffer, layout.prompt),
+        cells: semantic_cells(&screen_buffer, area),
     }
+}
+
+fn semantic_row_style(role: &str, theme: &Theme) -> Style {
+    let color = match role {
+        "header" => theme.gray_bright,
+        "transcript" => theme.text_primary,
+        "tasks" | "catalog" | "queue" => theme.gray,
+        "footer" => theme.gray_dim,
+        "body-empty" => theme.gray,
+        _ => theme.text_primary,
+    };
+    let mut style = Style::default().fg(color).bg(theme.bg_base);
+    if role == "header" {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
 }
 
 fn format_key_owner(owner: KeyOwner) -> String {
@@ -619,8 +646,25 @@ mod tests {
                 .iter()
                 .all(|row| row.rect.x + row.rect.width <= 80)
         );
-        assert!(!frame.cells.is_empty());
+        assert_eq!(frame.cells.len(), 80 * 24);
         assert_eq!(cell_diff(&frame.cells, &frame.cells), Vec::new());
-        assert_eq!(frame.cells[0].symbol, "╭");
+        assert!(frame.cells.iter().any(|cell| cell.symbol == "╭"));
+    }
+
+    #[test]
+    fn full_frame_cells_include_header_and_prompt_coordinates() {
+        let runner = ReferenceRunner::new(ParityMatrix::default());
+        let mut shell = AppShell::default();
+        let frame = runner.render(
+            &GrokHostSnapshot::demo(),
+            &mut shell,
+            TerminalSize {
+                width: 40,
+                height: 12,
+            },
+        );
+        assert!(frame.cells.iter().any(|cell| cell.x == 0 && cell.y == 0));
+        assert!(frame.cells.iter().any(|cell| cell.symbol == "╭"));
+        assert!(frame.cells.iter().any(|cell| cell.y > 0));
     }
 }
