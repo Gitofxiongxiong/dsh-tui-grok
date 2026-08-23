@@ -133,11 +133,22 @@ pub enum FeatureStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSearchPreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileSearchRow {
     pub id: String,
     pub path: String,
-    pub line: u32,
-    pub snippet: String,
+    /// Path-only providers expose a kind (file/directory/etc.) but do not
+    /// imply that line preview is available.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<FileSearchPreview>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +157,10 @@ pub struct FileSearchSnapshot {
     pub query: String,
     #[serde(default)]
     pub revision: u64,
+    /// Availability of line/snippet preview is separate from path candidates.
+    /// A path-only result must never be rendered as a fabricated line 0.
+    #[serde(default)]
+    pub preview_status: FeatureStatus,
     pub selected_id: Option<String>,
     pub rows: Vec<FileSearchRow>,
     pub diagnostic: Option<String>,
@@ -650,6 +665,7 @@ fn file_search_snapshot(session: &SessionState, enabled: bool) -> FileSearchSnap
         },
         query: String::new(),
         revision: 0,
+        preview_status: FeatureStatus::Unsupported,
         selected_id: None,
         rows: Vec::new(),
         diagnostic: (!enabled).then(|| "DeepSeek Harness file search is unavailable".into()),
@@ -687,23 +703,39 @@ fn file_search_snapshot(session: &SessionState, enabled: bool) -> FileSearchSnap
                         .get("line")
                         .or_else(|| item.get("lineNumber"))
                         .and_then(Value::as_u64)
-                        .unwrap_or_default() as u32;
+                        .and_then(|value| u32::try_from(value).ok());
                     let snippet = item
                         .get("snippet")
                         .or_else(|| item.get("text"))
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
+                        .map(str::to_string);
                     let id = item
                         .get("id")
                         .and_then(Value::as_str)
                         .map(str::to_string)
-                        .unwrap_or_else(|| format!("{path}:{line}"));
+                        .unwrap_or_else(|| {
+                            line.map_or_else(|| path.clone(), |line| format!("{path}:{line}"))
+                        });
+                    let preview = match (line, snippet) {
+                        (Some(line), Some(snippet)) => Some(FileSearchPreview {
+                            line: Some(line),
+                            snippet,
+                        }),
+                        (None, Some(snippet)) => Some(FileSearchPreview {
+                            line: None,
+                            snippet,
+                        }),
+                        _ => None,
+                    };
                     Some(FileSearchRow {
                         id,
                         path,
-                        line,
-                        snippet,
+                        kind: item
+                            .get("kind")
+                            .or_else(|| item.get("type"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        preview,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -724,10 +756,20 @@ fn file_search_snapshot(session: &SessionState, enabled: bool) -> FileSearchSnap
                 }
             })
     };
+    let preview_status = if !enabled {
+        FeatureStatus::Unsupported
+    } else if status == FeatureStatus::Pending {
+        FeatureStatus::Pending
+    } else if rows.iter().any(|row| row.preview.is_some()) {
+        FeatureStatus::Available
+    } else {
+        FeatureStatus::Unsupported
+    };
     FileSearchSnapshot {
         status,
         query,
         revision,
+        preview_status,
         selected_id: object
             .get("selectedId")
             .or_else(|| object.get("selected_id"))
@@ -952,6 +994,7 @@ mod tests {
         assert_eq!(first.prompt.suggestions, vec!["/help", "/model"]);
         assert!(!first.prompt.authoritative);
         assert_eq!(first.file_search.status, FeatureStatus::Pending);
+        assert_eq!(first.file_search.preview_status, FeatureStatus::Unsupported);
         assert_eq!(first.suggestions.status, FeatureStatus::Available);
         assert_eq!(first.workspace.status, FeatureStatus::Pending);
         assert_eq!(first.agent.status, FeatureStatus::Unsupported);
@@ -977,9 +1020,44 @@ mod tests {
         assert_eq!(snapshot.file_search.revision, 4);
         assert_eq!(snapshot.file_search.rows[0].id, "src/main.rs:12");
         assert_eq!(
+            snapshot.file_search.preview_status,
+            FeatureStatus::Available
+        );
+        assert_eq!(
+            snapshot.file_search.rows[0].preview,
+            Some(FileSearchPreview {
+                line: Some(12),
+                snippet: "fn main()".into(),
+            })
+        );
+        assert_eq!(
             snapshot.file_search.selected_id.as_deref(),
             Some("src/main.rs:12")
         );
+    }
+
+    #[test]
+    fn file_search_projection_keeps_path_only_rows_without_fabricated_preview() {
+        let mut state = state();
+        assert!(state.set_projection(
+            "fileSearch",
+            10,
+            json!({
+                "status": "available",
+                "query": "src",
+                "revision": 5,
+                "rows": [{"path": "src/lib.rs", "kind": "file"}]
+            })
+        ));
+        let snapshot = GrokHostSnapshot::from_session(&state);
+        assert_eq!(snapshot.file_search.status, FeatureStatus::Available);
+        assert_eq!(
+            snapshot.file_search.preview_status,
+            FeatureStatus::Unsupported
+        );
+        assert_eq!(snapshot.file_search.rows[0].id, "src/lib.rs");
+        assert_eq!(snapshot.file_search.rows[0].kind.as_deref(), Some("file"));
+        assert_eq!(snapshot.file_search.rows[0].preview, None);
     }
 
     #[test]

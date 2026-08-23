@@ -33,8 +33,8 @@ use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::effects::{
-    DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent,
-    compile_intent, receipt_status_message,
+    DshEffectSink, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus,
+    UiIntent, compile_intent, receipt_status_message,
 };
 use crate::geometry::{
     GeometryLine, HitMap, HitTarget, LinkTarget, column_for_grapheme, first_link_target,
@@ -268,6 +268,7 @@ struct UiState {
     dashboard_peek: Option<DashboardPeek>,
     prompt_history_index: Option<usize>,
     local_prompt_history: Vec<String>,
+    effect_ledger: EffectLedger,
     next_operation: u64,
     status: Option<String>,
     frame: usize,
@@ -1670,7 +1671,7 @@ impl UiState {
             session,
             DshRequestId::new(format!("file-search-{}", self.file_search_revision)),
         );
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let receipt = sink.submit(
             UiIntent::FileSearchQuery {
                 query,
@@ -1691,10 +1692,11 @@ impl UiState {
                     .map(|item| FileSearchRow {
                         id: format!("{}:{}", item.kind, item.path),
                         path: item.path,
-                        line: 0,
-                        snippet: item.kind,
+                        kind: Some(item.kind),
+                        preview: None,
                     })
                     .collect(),
+                preview_status: FeatureStatus::Unsupported,
                 diagnostic: None,
             });
         } else if matches!(receipt.status, UiEffectStatus::Pending) {
@@ -1702,6 +1704,7 @@ impl UiState {
                 status: FeatureStatus::Pending,
                 query: self.file_search_editor.text().to_string(),
                 revision: self.file_search_revision,
+                preview_status: FeatureStatus::Pending,
                 selected_id: None,
                 rows: Vec::new(),
                 diagnostic: None,
@@ -1792,7 +1795,7 @@ impl UiState {
     ) -> PagerResult<()> {
         let request_id = DshRequestId::new(format!("media-preview:{attachment_id}"));
         let context = UiContext::for_operation(session, request_id);
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let receipt = sink.submit(
             UiIntent::PreviewMedia {
                 attachment_id: attachment_id.to_string(),
@@ -1847,7 +1850,7 @@ impl UiState {
                         mode: dsh_pager_protocol::SubagentMode::Continuable,
                     };
                     let child_id = row.id.clone();
-                    let mut sink = DshEffectSink::new(transport);
+                    let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
                     self.status = match sink.submit(
                         UiIntent::InterruptSubagent { address },
                         &UiContext::from_session(session),
@@ -1905,7 +1908,7 @@ impl UiState {
             self.status = Some("Steer mode unavailable".into());
             return Ok(());
         }
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let context = UiContext::from_session(session);
         let receipt = sink.submit(
             UiIntent::SubmitPrompt {
@@ -2147,7 +2150,7 @@ impl UiState {
         };
         let session_id = dsh_pager::DshSessionId::new(row.session_id.clone());
         let context = UiContext::from_session(session);
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let receipt = sink.submit(
             UiIntent::ArchiveSessionTarget {
                 session_id: session_id.clone(),
@@ -2203,7 +2206,7 @@ impl UiState {
                 workspace_id, row.session_id
             )),
         );
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let receipt = sink.submit(
             UiIntent::ReorderSession {
                 workspace_id,
@@ -2470,7 +2473,7 @@ impl UiState {
         let request_id = DshRequestId::new(format!("queue-{}", self.next_operation));
         self.next_operation = self.next_operation.saturating_add(1);
         let context = UiContext::for_operation(session, request_id);
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let receipt = sink.submit(
             UiIntent::QueueMutation {
                 item_id: item_id.clone(),
@@ -2632,7 +2635,7 @@ impl UiState {
     ) -> PagerResult<()> {
         let request_id = DshRequestId::new(interaction.request_id());
         let context = UiContext::for_operation(session, request_id.clone());
-        let mut sink = DshEffectSink::new(transport);
+        let mut sink = DshEffectSink::new(transport, &mut self.effect_ledger);
         let receipt = sink.submit(
             UiIntent::RespondInteraction {
                 request_id: request_id.clone(),
@@ -2845,7 +2848,17 @@ fn render_file_search_content(
                 }
                 let selected = selected_id == Some(row.id.as_str());
                 let marker = if selected { "▸" } else { " " };
-                let line = format!("{marker} {}:{}  {}", row.path, row.line, row.snippet);
+                let detail = if let Some(preview) = row.preview.as_ref() {
+                    match preview.line {
+                        Some(line) => format!("{}:{}  {}", row.path, line, preview.snippet),
+                        None => format!("{}  {}", row.path, preview.snippet),
+                    }
+                } else if let Some(kind) = row.kind.as_deref() {
+                    format!("{}  [{kind}]", row.path)
+                } else {
+                    row.path.clone()
+                };
+                let line = format!("{marker} {detail}");
                 let style = if selected {
                     Style::default().fg(theme.text_primary).bg(theme.bg_visual)
                 } else {
@@ -2858,7 +2871,11 @@ fn render_file_search_content(
     buffer.set_string(
         area.x,
         area.bottom().saturating_sub(1),
-        "Type query · ↑/↓ select · Enter preview · Esc close",
+        if snapshot.preview_status == FeatureStatus::Available {
+            "Type query · ↑/↓ select · Enter preview · Esc close"
+        } else {
+            "Type query · ↑/↓ select · Enter select · Esc close"
+        },
         Style::default().fg(theme.gray_dim).bg(theme.bg_base),
     );
 }

@@ -1,6 +1,6 @@
 //! Host-independent effects emitted by Grok UI interactions.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use dsh_pager::{
     DshGeneration, DshQueueItemId, DshRequestId, DshSeq, DshSessionId, PagerResult, RpcTransport,
@@ -212,20 +212,80 @@ pub trait UiEffectSink {
 
 /// DSH's concrete effect sink. All RPC knowledge stays here instead of in
 /// copied Grok view modules.
-pub struct DshEffectSink<'a> {
-    pub transport: &'a mut RpcTransport,
-    pub next_request: u64,
+const COMPLETED_OPERATION_LIMIT: usize = 1_024;
+
+/// Runtime-owned operation identity and duplicate ledger.
+///
+/// A sink is intentionally short-lived because it borrows the transport for
+/// one dispatch.  The ledger is not: keeping it in the UI/host coordinator
+/// preserves request sequencing and accepted-operation identity across those
+/// sink instances.
+#[derive(Debug)]
+pub struct EffectLedger {
+    next_request: u64,
     completed: HashSet<OperationKey>,
+    completed_order: VecDeque<OperationKey>,
+}
+
+impl Default for EffectLedger {
+    fn default() -> Self {
+        Self {
+            next_request: 1,
+            completed: HashSet::new(),
+            completed_order: VecDeque::new(),
+        }
+    }
+}
+
+impl EffectLedger {
+    fn prepare_operation(&mut self, operation: &mut OperationKey) {
+        if operation.request_id.as_str() == "pending" {
+            operation.request_id = DshRequestId::new(format!("ui-{}", self.next_request));
+            self.next_request = self.next_request.saturating_add(1);
+        }
+    }
+
+    fn contains(&self, operation: &OperationKey) -> bool {
+        self.completed.contains(operation)
+    }
+
+    fn complete(&mut self, operation: OperationKey) {
+        if !self.completed.insert(operation.clone()) {
+            return;
+        }
+        self.completed_order.push_back(operation);
+        while self.completed_order.len() > COMPLETED_OPERATION_LIMIT {
+            if let Some(expired) = self.completed_order.pop_front() {
+                self.completed.remove(&expired);
+            }
+        }
+    }
+
+    fn duplicate_receipt(&self, operation: OperationKey) -> UiEffectReceipt {
+        UiEffectReceipt {
+            status: UiEffectStatus::Accepted,
+            operation,
+            diagnostic: Some("duplicate operation suppressed".into()),
+            retryable: Some(false),
+        }
+    }
+}
+
+pub struct DshEffectSink<'transport, 'ledger> {
+    pub transport: &'transport mut RpcTransport,
+    ledger: &'ledger mut EffectLedger,
     last_attachment_preview: Option<dsh_pager::AttachmentPreview>,
     last_file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
 }
 
-impl DshEffectSink<'_> {
-    pub fn new(transport: &mut RpcTransport) -> DshEffectSink<'_> {
+impl<'transport, 'ledger> DshEffectSink<'transport, 'ledger> {
+    pub fn new(
+        transport: &'transport mut RpcTransport,
+        ledger: &'ledger mut EffectLedger,
+    ) -> DshEffectSink<'transport, 'ledger> {
         DshEffectSink {
             transport,
-            next_request: 1,
-            completed: HashSet::new(),
+            ledger,
             last_attachment_preview: None,
             last_file_references: None,
         }
@@ -243,7 +303,7 @@ impl DshEffectSink<'_> {
     }
 }
 
-impl UiEffectSink for DshEffectSink<'_> {
+impl UiEffectSink for DshEffectSink<'_, '_> {
     fn submit(&mut self, intent: UiIntent, context: &UiContext) -> PagerResult<UiEffectReceipt> {
         self.dispatch_effect(compile_intent(intent, context))
     }
@@ -388,7 +448,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
     }
 }
 
-impl DshEffectSink<'_> {
+impl DshEffectSink<'_, '_> {
     pub fn dispatch_effect(&mut self, effect: UiEffect) -> PagerResult<UiEffectReceipt> {
         let (operation, result) = match effect {
             UiEffect::SubmitPrompt {
@@ -396,9 +456,9 @@ impl DshEffectSink<'_> {
                 text,
                 mode,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::submit_prompt_for_session(
                     self.transport,
@@ -413,9 +473,9 @@ impl DshEffectSink<'_> {
                 item_id,
                 action,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let session =
                     SessionState::new(operation.session_id.to_string(), operation.generation.get());
@@ -428,9 +488,9 @@ impl DshEffectSink<'_> {
                 request_id,
                 interaction,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let session =
                     SessionState::new(operation.session_id.to_string(), operation.generation.get());
@@ -446,9 +506,9 @@ impl DshEffectSink<'_> {
                 mut operation,
                 title,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::rename_session_id(
                     self.transport,
@@ -461,9 +521,9 @@ impl DshEffectSink<'_> {
                 mut operation,
                 at_seq,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::fork_session_id(
                     self.transport,
@@ -473,9 +533,9 @@ impl DshEffectSink<'_> {
                 (operation, result.map(|_| true))
             }
             UiEffect::ArchiveSession { mut operation } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result =
                     dsh_pager::archive_session(self.transport, operation.session_id.as_str());
@@ -485,9 +545,9 @@ impl DshEffectSink<'_> {
                 mut operation,
                 session_id,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::archive_session(self.transport, session_id.as_str());
                 (operation, result.map(|_| true))
@@ -497,9 +557,9 @@ impl DshEffectSink<'_> {
                 query,
                 revision: _,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::list_file_references(
                     self.transport,
@@ -515,9 +575,9 @@ impl DshEffectSink<'_> {
                 mut operation,
                 attachment_id,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::fetch_attachment(
                     self.transport,
@@ -535,9 +595,9 @@ impl DshEffectSink<'_> {
                 session_id,
                 before_session_id,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::reorder_session(
                     self.transport,
@@ -548,9 +608,9 @@ impl DshEffectSink<'_> {
                 (operation, result.map(|_| true))
             }
             UiEffect::AttachSession { mut operation, .. } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 (
                     operation,
@@ -563,9 +623,9 @@ impl DshEffectSink<'_> {
                 mut operation,
                 address,
             } => {
-                self.prepare_operation(&mut operation);
-                if self.completed.contains(&operation) {
-                    return Ok(self.duplicate_receipt(operation));
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
                 }
                 let result = dsh_pager::interrupt_subagent(self.transport, &address);
                 (operation, result.map(|value| value.accepted))
@@ -573,7 +633,7 @@ impl DshEffectSink<'_> {
         };
         match result {
             Ok(true) => {
-                self.completed.insert(operation.clone());
+                self.ledger.complete(operation.clone());
                 Ok(UiEffectReceipt {
                     status: UiEffectStatus::Accepted,
                     operation,
@@ -593,23 +653,6 @@ impl DshEffectSink<'_> {
                 diagnostic: Some(error.to_string()),
                 retryable: Some(true),
             }),
-        }
-    }
-
-    fn prepare_operation(&mut self, operation: &mut OperationKey) {
-        if operation.request_id.as_str() == "pending" {
-            operation.request_id = DshRequestId::new(format!("ui-{}", self.next_request));
-            self.next_request = self.next_request.saturating_add(1);
-            operation.dedupe_key = format!("{}:{}", operation.action, operation.request_id);
-        }
-    }
-
-    fn duplicate_receipt(&self, operation: OperationKey) -> UiEffectReceipt {
-        UiEffectReceipt {
-            status: UiEffectStatus::Accepted,
-            operation,
-            diagnostic: Some("duplicate operation suppressed".into()),
-            retryable: Some(false),
         }
     }
 }
@@ -835,7 +878,64 @@ mod tests {
         };
         assert_eq!(first.dedupe_key, second.dedupe_key);
         assert_ne!(first.dedupe_key, different.dedupe_key);
-        assert_eq!(first.request_id, second.request_id);
+        assert_eq!(first.request_id.as_str(), "pending");
+        assert_eq!(second.request_id.as_str(), "pending");
+    }
+
+    #[test]
+    fn effect_ledger_allocates_identity_across_short_lived_sinks() {
+        let session = SessionState::new("s".into(), 4);
+        let context = UiContext::from_session(&session);
+        let effect = compile_intent(
+            UiIntent::SubmitPrompt {
+                text: "hello".into(),
+                mode: PromptMode::Queue,
+            },
+            &context,
+        );
+        let UiEffect::SubmitPrompt { mut operation, .. } = effect else {
+            panic!("expected submit effect");
+        };
+        let mut ledger = EffectLedger::default();
+        ledger.prepare_operation(&mut operation);
+        assert_eq!(operation.request_id.as_str(), "ui-1");
+
+        let effect = compile_intent(
+            UiIntent::SubmitPrompt {
+                text: "again".into(),
+                mode: PromptMode::Queue,
+            },
+            &context,
+        );
+        let UiEffect::SubmitPrompt { mut operation, .. } = effect else {
+            panic!("expected submit effect");
+        };
+        ledger.prepare_operation(&mut operation);
+        assert_eq!(operation.request_id.as_str(), "ui-2");
+    }
+
+    #[test]
+    fn effect_ledger_deduplicates_completed_operations_with_bounded_history() {
+        let session = SessionState::new("s".into(), 1);
+        let context = UiContext::from_session(&session);
+        let effect = compile_intent(
+            UiIntent::RenameSession {
+                title: "title".into(),
+            },
+            &context,
+        );
+        let UiEffect::RenameSession { mut operation, .. } = effect else {
+            panic!("expected rename effect");
+        };
+        let mut ledger = EffectLedger::default();
+        ledger.prepare_operation(&mut operation);
+        let duplicate = operation.clone();
+        ledger.complete(operation);
+        assert!(ledger.contains(&duplicate));
+        assert_eq!(
+            ledger.duplicate_receipt(duplicate).diagnostic.as_deref(),
+            Some("duplicate operation suppressed")
+        );
     }
 
     #[test]
