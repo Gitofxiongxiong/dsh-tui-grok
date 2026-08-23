@@ -2,7 +2,9 @@
 
 use dsh_pager_render::TerminalCapabilities;
 
-use crate::host_adapter::CapabilityMatrix;
+use crate::host_adapter::{CapabilityMatrix, FeatureStatus, MediaSnapshot};
+use crate::{render::line_utils::truncate_str, theme::Theme};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -38,6 +40,16 @@ pub enum MediaFallback {
     CapabilityUnavailable,
     InvalidDimensions,
     MissingAttachment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaPreviewBuffer {
+    pub attachment_id: String,
+    pub media_type: String,
+    pub data: String,
+    pub bytes: Option<u64>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +170,105 @@ pub fn placeholder_text(render: &MediaRender) -> String {
         }
         MediaRender::Placeholder { label, reason } => format!("[image: {label} ({reason})]"),
     }
+}
+
+/// Render the bounded attachment list and explicit host/terminal fallback.
+/// Actual image escape emission remains a backend capability outside this
+/// DTO-driven surface.
+pub fn render_image_preview_content(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &MediaSnapshot,
+    selected: usize,
+    preview: Option<&MediaPreviewBuffer>,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    match snapshot.status {
+        FeatureStatus::Unsupported => buffer.set_string(
+            area.x,
+            area.y,
+            "Image preview unavailable: terminal/host capability is unsupported",
+            Style::default().fg(theme.warning).bg(theme.bg_base),
+        ),
+        FeatureStatus::Pending => buffer.set_string(
+            area.x,
+            area.y,
+            "Waiting for authoritative media metadata...",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        ),
+        FeatureStatus::Available if snapshot.rows.is_empty() => buffer.set_string(
+            area.x,
+            area.y,
+            "No image attachments in this session",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        ),
+        FeatureStatus::Available => {
+            let index = selected.min(snapshot.rows.len().saturating_sub(1));
+            for (row_index, row) in snapshot.rows.iter().enumerate() {
+                let y = area.y.saturating_add(row_index as u16);
+                if y >= area.bottom().saturating_sub(2) {
+                    break;
+                }
+                let label = row
+                    .name
+                    .as_deref()
+                    .or(row.media_type.as_deref())
+                    .unwrap_or("image");
+                let line = format!(
+                    "{} {} · {}",
+                    if row_index == index { "▸" } else { " " },
+                    label,
+                    row.id
+                );
+                let style = if row_index == index {
+                    Style::default().fg(theme.text_primary).bg(theme.bg_visual)
+                } else {
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base)
+                };
+                buffer.set_string(area.x, y, truncate_str(&line, area.width as usize), style);
+            }
+            let preview_line = preview
+                .filter(|preview| {
+                    snapshot
+                        .rows
+                        .get(index)
+                        .and_then(|row| row.attachment_id.as_deref())
+                        == Some(preview.attachment_id.as_str())
+                })
+                .map(|preview| {
+                    format!(
+                        "Loaded {} · {} bytes · {} base64 chars · {}x{}",
+                        preview.media_type,
+                        preview
+                            .bytes
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                        preview.data.len(),
+                        preview
+                            .width
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                        preview
+                            .height
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                    )
+                })
+                .unwrap_or_else(|| "Enter to load attachment bytes from host".into());
+            buffer.set_string(
+                area.x,
+                area.bottom().saturating_sub(2),
+                truncate_str(&preview_line, area.width as usize),
+                Style::default().fg(theme.gray).bg(theme.bg_base),
+            );
+        }
+    }
+    buffer.set_string(
+        area.x,
+        area.bottom().saturating_sub(1),
+        "↑/↓ select · Esc close",
+        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+    );
 }
 
 #[cfg(test)]

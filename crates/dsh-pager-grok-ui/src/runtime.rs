@@ -45,7 +45,9 @@ use crate::host_adapter::{
     MediaSnapshot,
 };
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
-use crate::media::{MediaPreviewController, MediaPreviewDecision};
+use crate::media::{
+    MediaPreviewBuffer, MediaPreviewController, MediaPreviewDecision, render_image_preview_content,
+};
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
@@ -55,7 +57,7 @@ use crate::views::{
     agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact},
     agent_panes::{AgentPaneController, render_agent_tasks_content, render_inline_agent_panes},
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
-    file_search::controller::FileSearchController,
+    file_search::{controller::FileSearchController, line_viewer::render_file_search_content},
     interaction::{render_interaction_content, response_for},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
@@ -87,16 +89,6 @@ struct PendingQueueMutation {
     operation: OperationKey,
     item_id: DshQueueItemId,
     base_revision: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MediaPreviewBuffer {
-    attachment_id: String,
-    media_type: String,
-    data: String,
-    bytes: Option<u64>,
-    width: Option<u16>,
-    height: Option<u16>,
 }
 
 /// Run the default Grok-derived UI until the user closes it.
@@ -2758,100 +2750,6 @@ fn task_status_line(snapshot: &GrokHostSnapshot) -> String {
     }
 }
 
-fn render_file_search_content(
-    buffer: &mut ratatui::buffer::Buffer,
-    area: Rect,
-    snapshot: &FileSearchSnapshot,
-    query: &str,
-    selected_id: Option<&str>,
-    theme: &Theme,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let heading = if query.is_empty() {
-        "Query: _".to_string()
-    } else {
-        format!("Query: {query}")
-    };
-    buffer.set_string(
-        area.x,
-        area.y,
-        truncate_str(&heading, area.width as usize),
-        Style::default().fg(theme.text_primary).bg(theme.bg_base),
-    );
-
-    match snapshot.status {
-        FeatureStatus::Unsupported => {
-            buffer.set_string(
-                area.x,
-                area.y.saturating_add(2),
-                truncate_str(
-                    snapshot
-                        .diagnostic
-                        .as_deref()
-                        .unwrap_or("Filesystem search is unavailable"),
-                    area.width as usize,
-                ),
-                Style::default().fg(theme.warning).bg(theme.bg_base),
-            );
-        }
-        FeatureStatus::Pending => {
-            buffer.set_string(
-                area.x,
-                area.y.saturating_add(2),
-                "Waiting for authoritative filesystem results...",
-                Style::default().fg(theme.gray).bg(theme.bg_base),
-            );
-        }
-        FeatureStatus::Available if snapshot.rows.is_empty() => {
-            buffer.set_string(
-                area.x,
-                area.y.saturating_add(2),
-                "No file matches",
-                Style::default().fg(theme.gray).bg(theme.bg_base),
-            );
-        }
-        FeatureStatus::Available => {
-            for (index, row) in snapshot.rows.iter().enumerate() {
-                let y = area.y.saturating_add(2 + index as u16);
-                if y >= area.bottom().saturating_sub(1) {
-                    break;
-                }
-                let selected = selected_id == Some(row.id.as_str());
-                let marker = if selected { "▸" } else { " " };
-                let detail = if let Some(preview) = row.preview.as_ref() {
-                    match preview.line {
-                        Some(line) => format!("{}:{}  {}", row.path, line, preview.snippet),
-                        None => format!("{}  {}", row.path, preview.snippet),
-                    }
-                } else if let Some(kind) = row.kind.as_deref() {
-                    format!("{}  [{kind}]", row.path)
-                } else {
-                    row.path.clone()
-                };
-                let line = format!("{marker} {detail}");
-                let style = if selected {
-                    Style::default().fg(theme.text_primary).bg(theme.bg_visual)
-                } else {
-                    Style::default().fg(theme.text_secondary).bg(theme.bg_base)
-                };
-                buffer.set_string(area.x, y, truncate_str(&line, area.width as usize), style);
-            }
-        }
-    }
-    buffer.set_string(
-        area.x,
-        area.bottom().saturating_sub(1),
-        if snapshot.preview_status == FeatureStatus::Available {
-            "Type query · ↑/↓ select · Enter preview · Esc close"
-        } else {
-            "Type query · ↑/↓ select · Enter select · Esc close"
-        },
-        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
-    );
-}
-
 fn file_search_status_message(snapshot: &FileSearchSnapshot) -> String {
     match snapshot.status {
         FeatureStatus::Available => {
@@ -2892,102 +2790,6 @@ fn file_search_snapshot_from_effect(
             .collect(),
         diagnostic: None,
     }
-}
-
-fn render_image_preview_content(
-    buffer: &mut ratatui::buffer::Buffer,
-    area: Rect,
-    snapshot: &MediaSnapshot,
-    selected: usize,
-    preview: Option<&MediaPreviewBuffer>,
-    theme: &Theme,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    match snapshot.status {
-        FeatureStatus::Unsupported => buffer.set_string(
-            area.x,
-            area.y,
-            "Image preview unavailable: terminal/host capability is unsupported",
-            Style::default().fg(theme.warning).bg(theme.bg_base),
-        ),
-        FeatureStatus::Pending => buffer.set_string(
-            area.x,
-            area.y,
-            "Waiting for authoritative media metadata...",
-            Style::default().fg(theme.gray).bg(theme.bg_base),
-        ),
-        FeatureStatus::Available if snapshot.rows.is_empty() => buffer.set_string(
-            area.x,
-            area.y,
-            "No image attachments in this session",
-            Style::default().fg(theme.gray).bg(theme.bg_base),
-        ),
-        FeatureStatus::Available => {
-            let index = selected.min(snapshot.rows.len().saturating_sub(1));
-            for (row_index, row) in snapshot.rows.iter().enumerate() {
-                let y = area.y.saturating_add(row_index as u16);
-                if y >= area.bottom().saturating_sub(2) {
-                    break;
-                }
-                let label = row
-                    .name
-                    .as_deref()
-                    .or(row.media_type.as_deref())
-                    .unwrap_or("image");
-                let line = format!(
-                    "{} {} · {}",
-                    if row_index == index { "▸" } else { " " },
-                    label,
-                    row.id
-                );
-                let style = if row_index == index {
-                    Style::default().fg(theme.text_primary).bg(theme.bg_visual)
-                } else {
-                    Style::default().fg(theme.text_secondary).bg(theme.bg_base)
-                };
-                buffer.set_string(area.x, y, truncate_str(&line, area.width as usize), style);
-            }
-            let preview_line = preview
-                .filter(|preview| {
-                    snapshot
-                        .rows
-                        .get(index)
-                        .and_then(|row| row.attachment_id.as_deref())
-                        == Some(preview.attachment_id.as_str())
-                })
-                .map(|preview| {
-                    format!(
-                        "Loaded {} · {} bytes · {} base64 chars · {}x{}",
-                        preview.media_type,
-                        preview
-                            .bytes
-                            .map_or_else(|| "?".into(), |value| value.to_string()),
-                        preview.data.len(),
-                        preview
-                            .width
-                            .map_or_else(|| "?".into(), |value| value.to_string()),
-                        preview
-                            .height
-                            .map_or_else(|| "?".into(), |value| value.to_string()),
-                    )
-                })
-                .unwrap_or_else(|| "Enter to load attachment bytes from host".into());
-            buffer.set_string(
-                area.x,
-                area.bottom().saturating_sub(2),
-                truncate_str(&preview_line, area.width as usize),
-                Style::default().fg(theme.gray).bg(theme.bg_base),
-            );
-        }
-    }
-    buffer.set_string(
-        area.x,
-        area.bottom().saturating_sub(1),
-        "↑/↓ select · Esc close",
-        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
-    );
 }
 
 fn media_status_message(snapshot: &MediaSnapshot) -> String {
