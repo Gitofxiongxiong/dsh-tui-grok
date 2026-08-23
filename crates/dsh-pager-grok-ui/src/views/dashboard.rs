@@ -121,7 +121,7 @@ pub fn render_dashboard_content(
     let footer = if query_active {
         "Enter apply search · Esc search off · Backspace edit"
     } else {
-        "↑/↓ select · Enter attach · v peek · g group · a archived · / search · Esc back"
+        "↑/↓ select · Shift+↑/↓ reorder · Enter attach · x archive · v peek · g group · a archived · / search · Esc back"
     };
     put(
         buffer,

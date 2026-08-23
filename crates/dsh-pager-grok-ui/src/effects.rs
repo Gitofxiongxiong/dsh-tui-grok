@@ -35,9 +35,20 @@ pub enum UiIntent {
         at_seq: Option<DshSeq>,
     },
     ArchiveSession,
+    ArchiveSessionTarget {
+        session_id: DshSessionId,
+    },
     FileSearchQuery {
         query: String,
         revision: u64,
+    },
+    PreviewMedia {
+        attachment_id: String,
+    },
+    ReorderSession {
+        workspace_id: String,
+        session_id: DshSessionId,
+        before_session_id: Option<String>,
     },
     InterruptSubagent {
         address: SubagentAddress,
@@ -169,10 +180,24 @@ pub enum UiEffect {
     ArchiveSession {
         operation: OperationKey,
     },
+    ArchiveSessionTarget {
+        operation: OperationKey,
+        session_id: DshSessionId,
+    },
     FileSearchQuery {
         operation: OperationKey,
         query: String,
         revision: u64,
+    },
+    PreviewMedia {
+        operation: OperationKey,
+        attachment_id: String,
+    },
+    ReorderSession {
+        operation: OperationKey,
+        workspace_id: String,
+        session_id: DshSessionId,
+        before_session_id: Option<String>,
     },
     InterruptSubagent {
         operation: OperationKey,
@@ -214,6 +239,8 @@ impl UiEffectSink for DshEffectSink<'_> {
 pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
     let target_session_id = match &intent {
         UiIntent::AttachSession { session_id } => session_id.clone(),
+        UiIntent::ArchiveSessionTarget { session_id } => session_id.clone(),
+        UiIntent::ReorderSession { session_id, .. } => session_id.clone(),
         UiIntent::InterruptSubagent { address } => {
             DshSessionId::new(address.parent_session_id.clone())
         }
@@ -227,7 +254,10 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { .. } => "rename",
         UiIntent::ForkSession { .. } => "fork",
         UiIntent::ArchiveSession => "archive",
+        UiIntent::ArchiveSessionTarget { .. } => "archive",
         UiIntent::FileSearchQuery { .. } => "file-search-query",
+        UiIntent::PreviewMedia { .. } => "media-preview",
+        UiIntent::ReorderSession { .. } => "reorder-session",
         UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
     };
     let dedupe_key = match &intent {
@@ -246,9 +276,18 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { title } => format!("{action_name}:{}", prompt_digest(title)),
         UiIntent::ForkSession { at_seq } => format!("{action_name}:{at_seq:?}"),
         UiIntent::ArchiveSession => action_name.to_string(),
+        UiIntent::ArchiveSessionTarget { session_id } => format!("{action_name}:{session_id}"),
         UiIntent::FileSearchQuery { query, revision } => {
             format!("{action_name}:{revision}:{}", prompt_digest(query))
         }
+        UiIntent::PreviewMedia { attachment_id } => {
+            format!("{action_name}:{attachment_id}")
+        }
+        UiIntent::ReorderSession {
+            workspace_id,
+            session_id,
+            before_session_id,
+        } => format!("{action_name}:{workspace_id}:{session_id}:{before_session_id:?}"),
         UiIntent::InterruptSubagent { address } => {
             format!(
                 "{action_name}:{}:{}",
@@ -305,10 +344,28 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { title } => UiEffect::RenameSession { operation, title },
         UiIntent::ForkSession { at_seq } => UiEffect::ForkSession { operation, at_seq },
         UiIntent::ArchiveSession => UiEffect::ArchiveSession { operation },
+        UiIntent::ArchiveSessionTarget { session_id } => UiEffect::ArchiveSessionTarget {
+            operation,
+            session_id,
+        },
         UiIntent::FileSearchQuery { query, revision } => UiEffect::FileSearchQuery {
             operation,
             query,
             revision,
+        },
+        UiIntent::PreviewMedia { attachment_id } => UiEffect::PreviewMedia {
+            operation,
+            attachment_id,
+        },
+        UiIntent::ReorderSession {
+            workspace_id,
+            session_id,
+            before_session_id,
+        } => UiEffect::ReorderSession {
+            operation,
+            workspace_id,
+            session_id,
+            before_session_id,
         },
         UiIntent::InterruptSubagent { address } => {
             UiEffect::InterruptSubagent { operation, address }
@@ -409,6 +466,17 @@ impl DshEffectSink<'_> {
                     dsh_pager::archive_session(self.transport, operation.session_id.as_str());
                 (operation, result.map(|_| true))
             }
+            UiEffect::ArchiveSessionTarget {
+                mut operation,
+                session_id,
+            } => {
+                self.prepare_operation(&mut operation);
+                if self.completed.contains(&operation) {
+                    return Ok(self.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::archive_session(self.transport, session_id.as_str());
+                (operation, result.map(|_| true))
+            }
             UiEffect::FileSearchQuery {
                 mut operation,
                 query: _,
@@ -429,6 +497,39 @@ impl DshEffectSink<'_> {
                         "filesystem file search is unsupported by the current Harness TUI protocol",
                     )),
                 )
+            }
+            UiEffect::PreviewMedia {
+                mut operation,
+                attachment_id,
+            } => {
+                self.prepare_operation(&mut operation);
+                if self.completed.contains(&operation) {
+                    return Ok(self.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::fetch_attachment(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    &attachment_id,
+                );
+                (operation, result.map(|preview| !preview.data.is_empty()))
+            }
+            UiEffect::ReorderSession {
+                mut operation,
+                workspace_id,
+                session_id,
+                before_session_id,
+            } => {
+                self.prepare_operation(&mut operation);
+                if self.completed.contains(&operation) {
+                    return Ok(self.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::reorder_session(
+                    self.transport,
+                    &workspace_id,
+                    session_id.as_str(),
+                    before_session_id.as_deref(),
+                );
+                (operation, result.map(|_| true))
             }
             UiEffect::AttachSession { mut operation, .. } => {
                 self.prepare_operation(&mut operation);
@@ -607,6 +708,66 @@ mod tests {
         assert!(operation.dedupe_key.contains(":7:"));
         assert_eq!(query, "src/main");
         assert_eq!(revision, 7);
+    }
+
+    #[test]
+    fn media_preview_effect_preserves_attachment_identity() {
+        let session = SessionState::new("parent".into(), 9);
+        let effect = compile_intent(
+            UiIntent::PreviewMedia {
+                attachment_id: "sha256:img".into(),
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::PreviewMedia {
+            operation,
+            attachment_id,
+        } = effect
+        else {
+            panic!("expected media preview effect");
+        };
+        assert_eq!(operation.action, "media-preview");
+        assert_eq!(operation.session_id.as_str(), "parent");
+        assert_eq!(attachment_id, "sha256:img");
+    }
+
+    #[test]
+    fn workspace_mutation_effects_preserve_target_identity() {
+        let session = SessionState::new("active".into(), 9);
+        let archive = compile_intent(
+            UiIntent::ArchiveSessionTarget {
+                session_id: DshSessionId::new("selected"),
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::ArchiveSessionTarget {
+            operation,
+            session_id,
+        } = archive
+        else {
+            panic!("expected archive target effect");
+        };
+        assert_eq!(operation.session_id.as_str(), "selected");
+        assert_eq!(session_id.as_str(), "selected");
+
+        let reorder = compile_intent(
+            UiIntent::ReorderSession {
+                workspace_id: "workspace".into(),
+                session_id: DshSessionId::new("selected"),
+                before_session_id: Some("before".into()),
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::ReorderSession {
+            operation,
+            before_session_id,
+            ..
+        } = reorder
+        else {
+            panic!("expected reorder effect");
+        };
+        assert_eq!(operation.action, "reorder-session");
+        assert_eq!(before_session_id.as_deref(), Some("before"));
     }
 
     #[test]

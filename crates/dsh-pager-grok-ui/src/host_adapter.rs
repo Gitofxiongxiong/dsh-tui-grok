@@ -162,6 +162,8 @@ pub struct SuggestionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaRow {
     pub id: String,
+    #[serde(default)]
+    pub attachment_id: Option<String>,
     pub media_type: Option<String>,
     pub name: Option<String>,
 }
@@ -763,6 +765,7 @@ fn media_snapshot(transcript: &[TranscriptRow], enabled: bool) -> MediaSnapshot 
                             ..
                         } => Some(MediaRow {
                             id: format!("{}:image:{index}", render_entry_id(entry.id)),
+                            attachment_id: attachment_id.clone(),
                             media_type: media_type.clone(),
                             name: name.clone().or_else(|| attachment_id.clone()),
                         }),

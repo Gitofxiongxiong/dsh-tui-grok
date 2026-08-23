@@ -831,7 +831,7 @@ impl UiState {
     ) {
         let theme = Theme::current();
         let shortcuts = [Shortcut {
-            label: "Esc close",
+            label: "Enter load · Esc close",
             clickable: true,
             id: 1,
         }];
@@ -1214,7 +1214,7 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::ImagePreviewKey(key) => {
-                self.handle_image_preview_key(key, session);
+                self.handle_image_preview_key(key, transport, session)?;
                 Ok(false)
             }
             ShellAction::ImagePreviewMouse(_) => Ok(false),
@@ -1443,25 +1443,54 @@ impl UiState {
     fn handle_image_preview_key(
         &mut self,
         key: crossterm::event::KeyEvent,
+        transport: &mut RpcTransport,
         session: &SessionState,
-    ) {
+    ) -> PagerResult<()> {
         if key.code == KeyCode::Esc {
             self.shell.close_overlay();
             self.status = Some("Image preview closed".into());
-            return;
+            return Ok(());
         }
         let snapshot = GrokHostSnapshot::from_session(session);
         let count = snapshot.media.rows.len();
         if count == 0 {
-            return;
+            return Ok(());
         }
         match key.code {
             KeyCode::Up => self.image_selected = self.image_selected.saturating_sub(1),
             KeyCode::Down => {
                 self.image_selected = self.image_selected.saturating_add(1).min(count - 1)
             }
+            KeyCode::Enter => {
+                let row = &snapshot.media.rows[self.image_selected.min(count - 1)];
+                if let Some(attachment_id) = row.attachment_id.as_deref() {
+                    self.request_media_preview(transport, session, attachment_id)?;
+                } else {
+                    self.status = Some("Image preview unavailable: attachment id missing".into());
+                }
+            }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn request_media_preview(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        attachment_id: &str,
+    ) -> PagerResult<()> {
+        let request_id = DshRequestId::new(format!("media-preview:{attachment_id}"));
+        let context = UiContext::for_operation(session, request_id);
+        let mut sink = DshEffectSink::new(transport);
+        let receipt = sink.submit(
+            UiIntent::PreviewMedia {
+                attachment_id: attachment_id.to_string(),
+            },
+            &context,
+        )?;
+        self.status = Some(receipt_status_message(&receipt, "Image preview"));
+        Ok(())
     }
 
     fn handle_agent_tasks_key(
@@ -1749,6 +1778,12 @@ impl UiState {
                 self.shell.close_overlay();
                 self.status = Some("Dashboard closed".into());
             }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.reorder_dashboard_selection(transport, session, -1)?;
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.reorder_dashboard_selection(transport, session, 1)?;
+            }
             KeyCode::Up | KeyCode::Char('k') => self.dashboard.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.dashboard.move_selection(1),
             KeyCode::Char('/') => {
@@ -1765,6 +1800,9 @@ impl UiState {
                 self.sync_dashboard(transport.control_plane());
                 self.status = Some("Dashboard refreshed".into());
             }
+            KeyCode::Char('x') => {
+                self.archive_dashboard_selection(transport, session)?;
+            }
             KeyCode::Enter => {
                 if let Some(row) = self.dashboard.selected() {
                     let target = row.session_id.clone();
@@ -1774,6 +1812,91 @@ impl UiState {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn archive_dashboard_selection(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<()> {
+        let Some(row) = self.dashboard.selected() else {
+            self.status = Some("No session selected".into());
+            return Ok(());
+        };
+        let session_id = dsh_pager::DshSessionId::new(row.session_id.clone());
+        let context = UiContext::from_session(session);
+        let mut sink = DshEffectSink::new(transport);
+        let receipt = sink.submit(
+            UiIntent::ArchiveSessionTarget {
+                session_id: session_id.clone(),
+            },
+            &context,
+        )?;
+        self.status = Some(receipt_status_message(&receipt, "Archive session"));
+        if prompt_receipt_admitted(&receipt.status) {
+            dsh_pager::list_sessions(transport)?;
+            self.dashboard_revision = None;
+            self.sync_dashboard(transport.control_plane());
+        }
+        Ok(())
+    }
+
+    fn reorder_dashboard_selection(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        delta: isize,
+    ) -> PagerResult<()> {
+        let Some(row) = self.dashboard.selected().cloned() else {
+            self.status = Some("No session selected".into());
+            return Ok(());
+        };
+        let Some(workspace_id) = row.workspace_id.clone() else {
+            self.status = Some("Selected session has no workspace order".into());
+            return Ok(());
+        };
+        let ids = self.dashboard.session_ids_in_workspace(&workspace_id);
+        let Some(index) = ids.iter().position(|id| id == &row.session_id) else {
+            self.status = Some("Selected session is not in workspace order".into());
+            return Ok(());
+        };
+        let next = if delta < 0 {
+            index.checked_sub(1)
+        } else {
+            (index + 1 < ids.len()).then_some(index + 1)
+        };
+        let Some(next) = next else {
+            self.status = Some("Session is already at the workspace boundary".into());
+            return Ok(());
+        };
+        let before_session_id = if delta < 0 {
+            Some(ids[next].clone())
+        } else {
+            ids.get(next + 1).cloned()
+        };
+        let context = UiContext::for_operation(
+            session,
+            DshRequestId::new(format!(
+                "reorder-session:{}:{}",
+                workspace_id, row.session_id
+            )),
+        );
+        let mut sink = DshEffectSink::new(transport);
+        let receipt = sink.submit(
+            UiIntent::ReorderSession {
+                workspace_id,
+                session_id: dsh_pager::DshSessionId::new(row.session_id),
+                before_session_id,
+            },
+            &context,
+        )?;
+        self.status = Some(receipt_status_message(&receipt, "Reorder session"));
+        if prompt_receipt_admitted(&receipt.status) {
+            dsh_pager::list_sessions(transport)?;
+            self.dashboard_revision = None;
+            self.sync_dashboard(transport.control_plane());
         }
         Ok(())
     }

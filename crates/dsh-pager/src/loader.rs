@@ -21,6 +21,7 @@ use crate::transport::RpcTransport;
 
 const PAGE_MESSAGES: u64 = 50;
 const MAX_INITIAL_REPAIRS: usize = 2;
+const MAX_ATTACHMENT_PREVIEW_DATA_BYTES: usize = 1_048_576;
 static DISPATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// How the first session is chosen after hello.
@@ -109,6 +110,72 @@ pub fn search_sessions(
     query: &str,
 ) -> PagerResult<SessionSearchValue> {
     api_call(transport, "session.search", json!({ "query": query }))
+}
+
+/// Authorized image attachment bytes for the media preview surface.
+///
+/// The host returns base64 data together with the durable attachment metadata.
+/// Authorization and storage remain Harness-owned; the UI only receives this
+/// bounded value through an effect seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentPreview {
+    pub attachment_id: String,
+    pub media_type: String,
+    pub data: String,
+    pub bytes: Option<u64>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+}
+
+pub fn fetch_attachment(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    attachment_id: &str,
+) -> PagerResult<AttachmentPreview> {
+    let value: Value = api_call(
+        transport,
+        "session.attachment",
+        json!({
+            "sessionId": session_id,
+            "attachmentId": attachment_id,
+        }),
+    )?;
+    let attachment = value.get("attachment").unwrap_or(&value);
+    let data = value
+        .get("data")
+        .and_then(Value::as_str)
+        .filter(|data| !data.is_empty())
+        .ok_or_else(|| PagerError::new("session.attachment returned no image data"))?;
+    if data.len() > MAX_ATTACHMENT_PREVIEW_DATA_BYTES {
+        return Err(PagerError::new(format!(
+            "session.attachment preview exceeds {} base64 bytes",
+            MAX_ATTACHMENT_PREVIEW_DATA_BYTES
+        )));
+    }
+    let attachment_id = attachment
+        .get("attachmentId")
+        .and_then(Value::as_str)
+        .unwrap_or(attachment_id)
+        .to_string();
+    let media_type = attachment
+        .get("mediaType")
+        .and_then(Value::as_str)
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    Ok(AttachmentPreview {
+        attachment_id,
+        media_type,
+        data: data.to_string(),
+        bytes: attachment.get("bytes").and_then(Value::as_u64),
+        width: attachment
+            .get("width")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok()),
+        height: attachment
+            .get("height")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok()),
+    })
 }
 
 /// Complete the create/list -> attach -> history -> buffered-live barrier.
