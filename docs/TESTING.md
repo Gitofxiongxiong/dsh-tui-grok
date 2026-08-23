@@ -51,3 +51,32 @@ approval/question 和 queue authority 由同一 mock Harness 的 binary integrat
 tests 覆盖。真实 DeepSeek
 Harness 可通过 DSH_TUI_SERVER 注入同一 binary；没有凭据或服务时脚本仍保留
 mock 证据，并将真实后端状态记录为 unavailable，而不会伪造成功。
+
+## 真实 DeepSeek Harness
+
+本机源码 checkout 可用下面的入口执行真实主路径。加载检查默认会创建一个
+隔离的空 session（不提交 prompt、不修改 queue、不 rename/fork 已有 session）；
+指定 `REAL_E2E_SESSION` 后则改为只读 attach 到该已有 session。PTY 生命周期检查
+始终使用另一个隔离空 session，避免长历史页面影响终端退出断言：
+
+```bash
+DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness scripts/real-e2e.sh
+```
+
+```bash
+REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
+  DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness scripts/real-e2e.sh
+```
+
+默认 backend 为
+`/home/leo/code/deepseek-harness/apps/cli/lib/bin.js --profile tui-embedded`，
+并从 Harness 自己的 `$DSH_HOME` credentials/settings 层读取配置；密钥不写入本仓库。
+如果刚修改过 Harness 的 TypeScript 源码，先在该 checkout 重建 host bundle：
+
+```bash
+(cd /home/leo/code/deepseek-harness && pnpm exec tsdown --env.DSH_BUILD_FACE host)
+```
+
+也可用 `DSH_TUI_SERVER` 覆盖完整命令字符串。需要验证真实模型 prompt、queue
+mutation 或 lifecycle 时，应在确认会话和费用边界后显式运行对应 binary smoke
+flag，而不是让只读门禁隐式改变已有 session。

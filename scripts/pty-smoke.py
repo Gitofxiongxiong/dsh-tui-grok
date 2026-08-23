@@ -39,6 +39,23 @@ def main() -> int:
         type=Path,
         default=Path(__file__).parents[1] / "crates/dsh-pager-bin/tests/mock-server.mjs",
     )
+    parser.add_argument(
+        "--backend",
+        default="node",
+        help="backend executable; defaults to node for the mock Harness",
+    )
+    parser.add_argument(
+        "--backend-arg",
+        action="append",
+        default=[],
+        help="backend argument; may be repeated",
+    )
+    parser.add_argument(
+        "--pager-arg",
+        action="append",
+        default=[],
+        help="dsh-pager argument; may be repeated",
+    )
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument(
         "--full",
@@ -49,15 +66,13 @@ def main() -> int:
 
     pid, fd = pty.fork()
     if pid == 0:
+        backend_args = args.backend_arg or [str(args.mock)]
+        command = [str(args.binary), *args.pager_arg, "--backend", args.backend]
+        for value in backend_args:
+            command.extend(["--backend-arg", value])
         os.execv(
             str(args.binary),
-            [
-                str(args.binary),
-                "--backend",
-                "node",
-                "--backend-arg",
-                str(args.mock),
-            ],
+            command,
         )
     resize(fd, 30, 100)
     output = bytearray()
@@ -84,7 +99,7 @@ def main() -> int:
         while b"SessionLoaded" not in visible() and time.monotonic() < deadline:
             pump()
         if b"SessionLoaded" not in visible():
-            raise RuntimeError("timed out loading mock session")
+            raise RuntimeError("timed out loading backend session")
 
         # Grok picker vertical slice: open, exercise search input, close.
         os.write(fd, b"p")
