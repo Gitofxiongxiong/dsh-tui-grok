@@ -488,20 +488,35 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 状态只描述 successor 当前可核对的事实；旧仓库开发记录中的“已完成”不会自动
 转化为 successor 的完成状态，必须重新通过本文件的出口门禁。
 
+状态标记规则：
+
+- `✅ 已完成`：该里程碑的完整出口已满足；
+- `◐ 部分完成`：已有 baseline、vertical slice 或测试基础设施，但完整 Grok
+  parity 出口仍未满足；
+- `❌ 未开始`：该里程碑尚未进入实现，或只有前置设计没有可运行证据。
+
+当前总览：`M0-M1 ✅`，`M2-M10 ◐`，`M11 ❌`。因此当前可运行版本仍是
+“DSH 真实后端 + Grok 小组件 + 自建过渡 UI shell”，不能称为完整 Grok TUI
+适配；M10 的 semantic/reference gate 也不能替代原始 Grok UI 的视觉对照。
+
 | 里程碑 | 当前状态 | 证据/说明 | 下一步 |
 |---|---|---|---|
-| M0 治理/基线 | 已完成（M0 baseline） | Git 根/初始提交、source manifest checker、baseline.sh、fallback semantic fixtures、协议 fixture、all-features clippy 和 mock PTY 已闭合；baseline 仍明确不是 Grok reference matrix | M4 继续 reference parity |
-| M1 contract/projection/effects | 已完成（M1 contract） | typed identity、rich block/partial/lineage DTO、分区 GrokHostSnapshot、UiIntent→UiEffect→Receipt、dedupe guard、capability matrix、projection/effect/fixture tests 已闭合 | M2/M3 消费 neutral contract |
-| M2 terminal/render | 已完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；PTY restore、Unicode/wrap、inline link tests 全绿 | M4 接入 Grok scrollback/block renderer 和 reference golden |
-| M3 AppView/AgentView | 已完成（迁移基线） | 默认入口已切换为 `AppShell` reducer：KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch、picker-owned Esc ladder、adaptive pane layout、semantic focus snapshot；runtime 不再维护 picker_open 平行状态 | M4/M5 继续接入完整 AgentView pane/block/prompt surface |
-| M4 scrollback/blocks | 已完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 reference golden、selection/link map 和 50k 性能门禁 | M4.5-M4.8 rich renderer/reference/selection/perf |
-| M5 prompt | 已完成（M5.6-M5.8 completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；外部进程真实 terminal handoff 与 mouse-selection golden 仍留在 M8/M9 | M5.7 real process handoff、M8 selection golden |
-| M6 picker/dashboard | 已完成（M6.6-M6.8 completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；picker 原有 load barrier 保留；真实双 session race/reference golden 仍留在 M9/M10 | M6.8 two-session PTY、M10 reference matrix |
-| M7 queue/interactions | 已完成（M7.7-M7.8 completion slice） | queue/interaction effect RPC errors 不再冒泡为未分类失败，统一映射 conflict/stale/timeout/unsupported/failed receipt；status 文案明确 retry/convergence，Dashboard jobs/status 与 queue/approval 行为测试已进入 Grok-derived surfaces；完整 reorder drag、复杂 question 表单和 reference matrix 仍待后续 | M7.8 behavior expansion、M10 reference parity |
-| M8 mouse/media | 已完成（M8 completion slice） | `HitMap` 在 render-time 统一产出 entry/block/prompt 命中矩形；selection 使用 grapheme/display column，resize 清空旧 map；OSC52/system clipboard、OSC8 link、image placeholder 和 mouse fallback 都是 typed capability 路径；geometry/Unicode/clipboard/media tests 已闭合 | M11 删除旧 selection fallback，并继续扩充 Grok media golden |
-| M9 lifecycle/performance | 已完成（M9 completion slice） | runtime notification drain 每帧受 256 条预算约束并记录 scheduler stats；`BoundedScheduler`、`GenerationGuard`、指数退避/上限 reconnect policy、late-result 拒绝和 reader/terminal restore 已有单测与 mock lifecycle 证据 | M11 真实长时 soak 与生产指标采集 |
-| M10 parity/release | 已完成（M10 semantic/reference gate） | `ReferenceRunner` 固定 40×12 至 160×50 六档尺寸、12 状态、9 输入（648 cases）并导出 rows/rect/focus/cursor/hit map；manifest 与 Rust/Python 校验器、mock PTY full path、source/protocol checks 已接入 `scripts/e2e.sh` | M11 fallback removal；真实 Harness 需在具备服务/凭据的环境重复同一 runner |
-| M11 cleanup/other harness | 未开始 | fallback 和重复模块仍保留 | 删除旧 UI、稳定 host trait |
+| M0 治理/基线 | ✅ 已完成（M0 baseline） | Git 根/初始提交、source manifest checker、baseline.sh、fallback semantic fixtures、协议 fixture、all-features clippy 和 mock PTY 已闭合；baseline 仍明确不是 Grok reference matrix | 由 M2-M10 消费基线并逐步替换 fallback |
+| M1 contract/projection/effects | ✅ 已完成（M1 contract） | typed identity、rich block/partial/lineage DTO、分区 GrokHostSnapshot、UiIntent→UiEffect→Receipt、dedupe guard、capability matrix、projection/effect/fixture tests 已闭合 | M2/M3 消费 neutral contract |
+| M2 terminal/render | ◐ 部分完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；但完整 Grok Appearance/render primitive 和主界面组件树尚未成为默认生产路径 | 完成 Grok theme/render/scrollback primitive parity |
+| M3 AppView/AgentView | ◐ 部分完成（自建 AppShell 基线） | 已有 `AppShell` reducer、KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch、picker-owned Esc ladder、adaptive pane layout 和 semantic focus snapshot；但 `runtime.rs` 仍是手工布局，完整 Grok AppView/AgentView 未接入 | 按 M3.1-M3.8 移植完整组件树并移除 runtime 手工主屏 |
+| M4 scrollback/blocks | ◐ 部分完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 Grok scrollback/block renderer、reference golden、selection/link map 和 50k 性能门禁 | 完成 M4.1-M4.8 rich renderer/reference/selection/perf |
+| M5 prompt | ◐ 部分完成（completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；完整 Grok prompt widget、外部进程真实 terminal handoff 与 mouse-selection golden 仍缺 | 完成 M5 prompt widget/state/effect parity |
+| M6 picker/dashboard | ◐ 部分完成（completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；真实双 session race、完整 Grok picker/list pane 和 reference golden 仍缺 | 完成 M6.1-M6.8 multi-session/reference parity |
+| M7 queue/interactions | ◐ 部分完成（completion slice） | queue/interaction effect RPC errors 已映射 conflict/stale/timeout/unsupported/failed receipt；status 文案、Dashboard jobs/status 和基础 queue/approval 行为测试已接入；完整 reorder drag、复杂 question 表单、完整 Grok pane 和 reference matrix 仍缺 | 完成 M7.1-M7.8 queue/interaction/status parity |
+| M8 mouse/media | ◐ 部分完成（completion slice） | `HitMap` 在 render-time 统一产出 entry/block/prompt 命中矩形；selection 使用 grapheme/display column，resize 清空旧 map；OSC52/system clipboard、OSC8 link、image placeholder 和 mouse fallback 有 typed capability 路径；完整 Grok mouse/selection/media golden 和旧 fallback 删除仍缺 | 完成 M8.1-M8.8 Grok geometry/capability parity |
+| M9 lifecycle/performance | ◐ 部分完成（completion slice） | runtime notification drain 每帧受 256 条预算约束并记录 scheduler stats；`BoundedScheduler`、`GenerationGuard`、指数退避/上限 reconnect policy、late-result 拒绝和 reader/terminal restore 有单测与 mock lifecycle 证据；真实长时 soak、双 session race 和生产性能指标仍缺 | 完成 M9.1-M9.8 real soak/performance/restore parity |
+| M10 parity/release | ◐ 部分完成（semantic/reference gate） | `ReferenceRunner` 固定 40×12 至 160×50 六档尺寸、12 状态、9 输入（648 cases），manifest 与 Rust/Python 校验器、mock PTY full path、source/protocol checks 已接入 `scripts/e2e.sh`；真实 Harness hello/load/PTY 和 Flash prompt smoke 已通过，但尚未完成真实 Grok reference 对照、完整 stream/queue/interaction/reconnect/detach 矩阵 | 完成 M10.1-M10.8 reference、real matrix 和差异清单 |
+| M11 cleanup/other harness | ❌ 未开始 | fallback 和重复模块仍保留，完整 Grok UI 尚未成为唯一前端生产实现 | 删除旧 UI、稳定 host trait、评估其他 Harness |
+
+**状态结论**：当前唯一可称完整完成的是 M0-M1 的治理与 DSH-neutral contract；
+M2-M10 是可运行的部分切片和测试基础设施，不是完整 Grok TUI parity；M11
+尚未开始。
 
 ### 6.2 每个切片的统一工作协议
 
@@ -665,7 +680,8 @@ Grok 原实现的分叉。
 - modal/picker/queue/prompt 叠加时每个事件只有一个 owner；
 - resize、mouse、paste、notification 在统一 dispatcher 中可重放；
 - Grok app/view tests 和 DSH adapter tests 同时通过；
-- 旧 app fallback 仍可显式启用，但默认入口只有新 shell。
+- 当前门禁未满足完整出口：`runtime.rs` fallback 仍是默认入口；只有完整
+  Grok AppView/AgentView 接入并完成替换测试后，才能关闭该 fallback。
 
 **出口**：主屏幕不是 runtime.rs 的手工布局，而是 Grok AppView/AgentView
 组件树；所有后续 block/prompt/queue 功能都有正确的 owner 和 back stack。
@@ -922,8 +938,10 @@ Harness 环境采集。
 **本批次证据（2026-08-23）**：`ReferenceRunner` 和 parity manifest 固定六档
 尺寸、12 状态、9 输入共 648 个 semantic cases，输出稳定文字、rect、focus、
 cursor、hit map；`scripts/parity-matrix.py`、Rust fixture validator 和
-`scripts/e2e.sh` 形成可重放门禁。真实 DeepSeek Harness 不可用时必须显式记录
-unavailable，不以 mock 结果替代真实后端声明。
+`scripts/e2e.sh` 形成可重放门禁。真实 DeepSeek Harness 的 hello/list/dashboard/
+load/PTY 以及 Flash prompt/restore smoke 已在隔离 session 通过，但这不替代
+完整 Grok reference 对照、stream/queue/interaction/reconnect/detach 矩阵；
+mock 结果也不能替代这些尚未完成的真实 parity 出口。
 
 ### M11：清理、稳定化和其他 Harness 复用
 
