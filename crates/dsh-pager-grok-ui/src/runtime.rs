@@ -233,6 +233,8 @@ struct UiState {
     interaction_pending: Option<DshRequestId>,
     file_search_editor: PromptEditor,
     file_search_selected_id: Option<String>,
+    suggestion_selected: usize,
+    suggestion_dismissed: bool,
     dashboard: DashboardModel,
     dashboard_revision: Option<u64>,
     dashboard_query: PromptEditor,
@@ -271,12 +273,27 @@ impl UiState {
             GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
         self.sync_dashboard(control_plane);
         self.reconcile_snapshot(&snapshot);
-        let agent_layout = AgentView::layout_with_prompt(
+        let suggestions_visible = !self.suggestion_dismissed
+            && snapshot.capabilities.prompt_suggestions
+            && snapshot.suggestions.status == FeatureStatus::Available
+            && self.prompt.text().starts_with('/')
+            && snapshot
+                .suggestions
+                .items
+                .iter()
+                .any(|item| item.starts_with(self.prompt.text()));
+        let suggestion_rows = if suggestions_visible {
+            snapshot.suggestions.items.len().clamp(1, 3) as u16
+        } else {
+            0
+        };
+        let agent_layout = AgentView::layout_with_prompt_and_banner(
             &mut self.shell,
             area,
             self.prompt.text(),
             snapshot.running,
             self.status.is_some() || snapshot.status.is_some(),
+            suggestion_rows,
         );
         let header = agent_layout.header;
         let input = agent_layout.prompt;
@@ -328,6 +345,7 @@ impl UiState {
             },
             theme,
         );
+        self.render_suggestions(frame, agent_layout.banner, &snapshot);
         self.hit_map.insert(crate::geometry::HitRegion {
             target: HitTarget::Prompt,
             rect: input,
@@ -795,6 +813,61 @@ impl UiState {
         }
     }
 
+    fn render_suggestions(
+        &mut self,
+        frame: &mut Frame<'_>,
+        prompt_area: Rect,
+        snapshot: &GrokHostSnapshot,
+    ) {
+        let Some(items) = self.suggestion_items(snapshot) else {
+            return;
+        };
+        let height = prompt_area.height.min(items.len().min(3) as u16);
+        if height == 0 {
+            return;
+        }
+        let buf = frame.buffer_mut();
+        for (index, item) in items.iter().take(height as usize).enumerate() {
+            let selected = index == self.suggestion_selected.min(items.len().saturating_sub(1));
+            let marker = if selected { "▸" } else { " " };
+            let line = format!("{marker} {item}");
+            let style = if selected {
+                Style::default()
+                    .fg(Theme::current().text_primary)
+                    .bg(Theme::current().bg_visual)
+            } else {
+                Style::default()
+                    .fg(Theme::current().gray)
+                    .bg(Theme::current().bg_base)
+            };
+            buf.set_string(
+                prompt_area.x,
+                prompt_area.y + index as u16,
+                truncate_str(&line, prompt_area.width as usize),
+                style,
+            );
+        }
+    }
+
+    fn suggestion_items<'a>(&self, snapshot: &'a GrokHostSnapshot) -> Option<Vec<&'a str>> {
+        if self.suggestion_dismissed
+            || !snapshot.capabilities.prompt_suggestions
+            || snapshot.suggestions.status != FeatureStatus::Available
+            || !self.prompt.text().starts_with('/')
+        {
+            return None;
+        }
+        let prefix = self.prompt.text();
+        let items = snapshot
+            .suggestions
+            .items
+            .iter()
+            .filter(|item| item.starts_with(prefix))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        (!items.is_empty()).then_some(items)
+    }
+
     fn dispatch_event(
         &mut self,
         event: ShellEvent,
@@ -884,6 +957,15 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::ClearPrompt => {
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                if self.suggestion_items(&snapshot).is_some() {
+                    self.suggestion_dismissed = true;
+                    self.status = None;
+                    return Ok(false);
+                }
                 self.prompt.reset();
                 self.status = Some("Draft cleared".into());
                 Ok(false)
@@ -933,6 +1015,8 @@ impl UiState {
                     }
                     LineEditOutcome::TextChanged => {
                         self.prompt_history_index = None;
+                        self.suggestion_selected = 0;
+                        self.suggestion_dismissed = false;
                         self.status = None;
                     }
                 }
@@ -955,6 +1039,8 @@ impl UiState {
                 if !text.is_empty() {
                     let _ = self.prompt.insert_paste(&text);
                     self.prompt_history_index = None;
+                    self.suggestion_selected = 0;
+                    self.suggestion_dismissed = false;
                     self.status = None;
                 }
                 Ok(false)
@@ -1267,6 +1353,34 @@ impl UiState {
         snapshot: &GrokHostSnapshot,
     ) -> bool {
         use crossterm::event::KeyModifiers;
+        if let Some(items) = self.suggestion_items(snapshot) {
+            match key.code {
+                KeyCode::Up => {
+                    self.suggestion_selected = self.suggestion_selected.saturating_sub(1);
+                    return true;
+                }
+                KeyCode::Down => {
+                    self.suggestion_selected = self
+                        .suggestion_selected
+                        .saturating_add(1)
+                        .min(items.len().saturating_sub(1));
+                    return true;
+                }
+                KeyCode::Tab => {
+                    if let Some(item) = items.get(self.suggestion_selected) {
+                        let _ = self.prompt.replace_text(item);
+                        self.suggestion_selected = 0;
+                        self.suggestion_dismissed = false;
+                    }
+                    return true;
+                }
+                KeyCode::Esc => {
+                    self.suggestion_dismissed = true;
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
             self.status = if snapshot.capabilities.external_editor {
                 Some("External editor capability negotiated; terminal handoff is pending".into())
@@ -2130,18 +2244,22 @@ fn prompt_admission_message(status: &UiEffectStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::UiState;
     use super::prompt_admission_message;
     use super::prompt_receipt_admitted;
     use super::render_file_search_content;
     use super::steer_capability_available;
     use crate::effects::UiEffectStatus;
-    use crate::host_adapter::{FeatureStatus, FileSearchSnapshot, GrokHostSnapshot};
+    use crate::host_adapter::{
+        CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot, SuggestionSnapshot,
+    };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
     use crate::views::modal_window::{
         ModalSizing, ModalWindowConfig, Shortcut, render_modal_window,
     };
     use crate::views::picker::{PickerState, render_picker_in_modal};
+    use crossterm::event::KeyCode;
     use ratatui::{buffer::Buffer, layout::Rect};
     use serde_json::json;
 
@@ -2282,5 +2400,37 @@ mod tests {
                 "missing {expected}: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn suggestion_controller_filters_selects_and_accepts_authoritative_items() {
+        let mut ui = UiState::default();
+        let mut snapshot = GrokHostSnapshot::demo();
+        snapshot.capabilities = CapabilityMatrix {
+            prompt_suggestions: true,
+            ..CapabilityMatrix::default()
+        };
+        snapshot.suggestions = SuggestionSnapshot {
+            status: FeatureStatus::Available,
+            active: true,
+            selected: None,
+            items: vec!["/help".into(), "/history".into(), "/model".into()],
+        };
+        let _ = ui.prompt.replace_text("/h");
+        assert_eq!(
+            ui.suggestion_items(&snapshot),
+            Some(vec!["/help", "/history"])
+        );
+        let down =
+            crossterm::event::KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE);
+        assert!(ui.handle_prompt_command(&down, &snapshot));
+        let tab =
+            crossterm::event::KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
+        assert!(ui.handle_prompt_command(&tab, &snapshot));
+        assert_eq!(ui.prompt.text(), "/history");
+        ui.suggestion_dismissed = false;
+        let mut unsupported = snapshot.clone();
+        unsupported.capabilities.prompt_suggestions = false;
+        assert!(ui.suggestion_items(&unsupported).is_none());
     }
 }

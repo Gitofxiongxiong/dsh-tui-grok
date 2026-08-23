@@ -97,7 +97,7 @@ impl AgentViewLayout {
         let header_height = 1.min(inner.height);
         let top_gap = u16::from(outer_vpad > 0);
         let turn_status_height = turn_status_height.min(1);
-        let banner_height = banner_height.min(1);
+        let banner_height = banner_height.min(3);
         let shortcuts_height = shortcuts_height.min(1);
         let prompt_gap = u16::from(!compact && prompt_height > 0);
         let status_line_height = status_line_height.min(1);
@@ -228,6 +228,17 @@ impl AgentView {
         running: bool,
         status_visible: bool,
     ) -> AgentViewLayout {
+        Self::layout_with_prompt_and_banner(shell, area, prompt_text, running, status_visible, 0)
+    }
+
+    pub fn layout_with_prompt_and_banner(
+        shell: &mut AppShell,
+        area: Rect,
+        prompt_text: &str,
+        running: bool,
+        status_visible: bool,
+        banner_rows: u16,
+    ) -> AgentViewLayout {
         let _ = shell.layout(area);
         let compact = effective_compact(false, area.height);
         let inner_width = area.width.saturating_sub(if compact { 2 } else { 4 });
@@ -245,7 +256,7 @@ impl AgentView {
             area,
             prompt_height,
             turn_status_height: u16::from(running && !short),
-            banner_height: 0,
+            banner_height: banner_rows.min(3),
             status_line_height: u16::from(status_visible && !short),
             shortcuts_height: 1,
             compact,
@@ -636,6 +647,22 @@ mod tests {
         assert!(long.prompt.height > short.prompt.height);
         assert!(long.prompt.height <= 8);
         assert!(long.transcript.height >= SCROLLBACK_MIN_ROWS);
+    }
+
+    #[test]
+    fn suggestion_banner_is_reserved_above_prompt() {
+        let mut shell = AppShell::default();
+        let layout = AgentView::layout_with_prompt_and_banner(
+            &mut shell,
+            Rect::new(0, 0, 80, 24),
+            "/",
+            false,
+            false,
+            3,
+        );
+        assert_eq!(layout.banner.height, 3);
+        assert!(layout.banner.bottom() <= layout.prompt.y);
+        assert!(layout.transcript.bottom() <= layout.banner.y);
     }
 
     #[test]
