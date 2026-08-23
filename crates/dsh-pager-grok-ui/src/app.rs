@@ -76,6 +76,7 @@ pub enum ShellAction {
     ScrollDown(u16),
     SubmitPrompt,
     PromptNewline,
+    TogglePromptMode,
     OpenQueue,
     OpenInteraction,
     OpenDashboard,
@@ -358,6 +359,10 @@ impl AppShell {
             self.owner = KeyOwner::Prompt;
             return ShellAction::PromptKey(key);
         }
+        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::ALT) {
+            self.owner = KeyOwner::Prompt;
+            return ShellAction::TogglePromptMode;
+        }
         if prompt_empty {
             match key.code {
                 KeyCode::Char('p') if key.modifiers.is_empty() => {
@@ -507,6 +512,20 @@ mod tests {
             true,
         );
         assert!(matches!(action, ShellAction::TranscriptMouse(_)));
+    }
+
+    #[test]
+    fn alt_s_toggles_prompt_mode_without_stealing_plain_s() {
+        let mut shell = AppShell::default();
+        let alt_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(alt_s), true),
+            ShellAction::TogglePromptMode
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Char('s'))), true),
+            ShellAction::PromptKey(key(KeyCode::Char('s')))
+        );
     }
 
     #[test]

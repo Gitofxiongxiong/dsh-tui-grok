@@ -39,3 +39,4 @@ pub use scheduler::{
     BoundedScheduler, GenerationGuard, ReconnectPolicy, ReconnectState, SchedulerStats,
 };
 pub use selection::{ResolvedSelection, SelectionModel, SelectionPoint};
+pub use views::agent::{AgentView, AgentViewLayout};

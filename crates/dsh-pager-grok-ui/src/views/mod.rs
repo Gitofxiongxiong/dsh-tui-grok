@@ -3,6 +3,7 @@
 pub mod file_search {
     pub mod line_viewer;
 }
+pub mod agent;
 pub mod dashboard;
 pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]

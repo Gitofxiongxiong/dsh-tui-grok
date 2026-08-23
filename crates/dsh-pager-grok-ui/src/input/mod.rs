@@ -216,4 +216,11 @@ mod prompt_tests {
         assert!(viewport.cursor_y < 2);
         assert!(viewport.cursor_x <= 4);
     }
+
+    #[test]
+    fn prompt_paste_filters_controls_but_keeps_tabs_and_line_breaks() {
+        let mut editor = PromptEditor::default();
+        let _ = editor.insert_paste("a\0b\t\r\nc");
+        assert_eq!(editor.text(), "ab\t\nc");
+    }
 }

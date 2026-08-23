@@ -6,9 +6,10 @@
 use ratatui::layout::{Position, Rect};
 use serde::{Deserialize, Serialize};
 
-use crate::app::{AppShell, KeyOwner, Overlay, ShellLayout};
+use crate::app::{AppShell, KeyOwner, Overlay};
 use crate::geometry::{HitMap, HitTarget, insert_text_line};
 use crate::host_adapter::GrokHostSnapshot;
+use crate::views::agent::{AgentView, AgentViewLayout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticRect {
@@ -190,7 +191,7 @@ impl ReferenceRunner {
         size: TerminalSize,
     ) -> SemanticFrame {
         let area = Rect::new(0, 0, size.width, size.height);
-        let layout = shell.layout(area);
+        let layout = AgentView::layout(shell, area);
         render_semantic(snapshot, shell, layout, area)
     }
 }
@@ -198,7 +199,7 @@ impl ReferenceRunner {
 pub fn render_semantic(
     snapshot: &GrokHostSnapshot,
     shell: &AppShell,
-    layout: ShellLayout,
+    layout: AgentViewLayout,
     area: Rect,
 ) -> SemanticFrame {
     let mut rows = Vec::new();
@@ -211,19 +212,19 @@ pub fn render_semantic(
         rows.push(SemanticRow {
             role: "body-empty".into(),
             text: "No transcript events yet".into(),
-            rect: layout.body.into(),
+            rect: layout.transcript.into(),
         });
     } else {
-        let mut y = layout.body.y;
+        let mut y = layout.transcript.y;
         for entry in &snapshot.transcript {
             for text in entry.content.display_text().split('\n') {
-                if y >= layout.body.bottom() {
+                if y >= layout.transcript.bottom() {
                     break;
                 }
                 rows.push(SemanticRow {
                     role: format!("transcript-{}", entry.kind.label().to_lowercase()),
                     text: text.to_string(),
-                    rect: Rect::new(layout.body.x, y, layout.body.width, 1).into(),
+                    rect: Rect::new(layout.transcript.x, y, layout.transcript.width, 1).into(),
                 });
                 y = y.saturating_add(1);
             }
@@ -245,19 +246,19 @@ pub fn render_semantic(
     });
 
     let mut map = HitMap::new(area);
-    let mut y = layout.body.y;
+    let mut y = layout.transcript.y;
     for entry in &snapshot.transcript {
         for (line_index, text) in entry.content.display_text().split('\n').enumerate() {
-            if y >= layout.body.bottom() {
+            if y >= layout.transcript.bottom() {
                 break;
             }
             insert_text_line(
                 &mut map,
                 HitTarget::TranscriptEntry(entry.id),
                 line_index,
-                layout.body.x,
+                layout.transcript.x,
                 y,
-                layout.body.width,
+                layout.transcript.width,
                 text,
                 crate::geometry::first_link_target(text),
             );

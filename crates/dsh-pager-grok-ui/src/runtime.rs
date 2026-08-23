@@ -23,7 +23,7 @@ use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Position, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -47,6 +47,7 @@ use crate::scheduler::SchedulerStats;
 use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
+    agent::AgentView,
     dashboard::{DashboardPeek, render_dashboard_content},
     interaction::{render_interaction_content, response_for},
     modal_window::{
@@ -212,10 +213,13 @@ struct UiState {
     shell: AppShell,
     capabilities: TerminalCapabilities,
     scroll: usize,
+    transcript_width: Option<u16>,
+    scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
     picker: PickerState,
     picker_entry_count: usize,
     modal: ModalWindowState,
     prompt: PromptEditor,
+    prompt_mode: Option<PromptMode>,
     picker_selected_id: Option<String>,
     queue_selected_id: Option<String>,
     queue_editing: bool,
@@ -260,11 +264,10 @@ impl UiState {
         let background = Block::default().style(Style::default().bg(theme.bg_base));
         frame.render_widget(background, area);
 
-        let shell_layout = self.shell.layout(area);
-        let header = shell_layout.header;
-        let body = shell_layout.body;
-        let input = shell_layout.prompt;
-        let footer = shell_layout.footer;
+        let agent_layout = AgentView::layout(&mut self.shell, area);
+        let header = agent_layout.header;
+        let input = agent_layout.prompt;
+        let footer = agent_layout.footer;
 
         let snapshot =
             GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
@@ -284,7 +287,13 @@ impl UiState {
             header,
         );
 
-        self.render_transcript(frame, body, &snapshot, &mut session.scrollback);
+        self.render_transcript(
+            frame,
+            agent_layout.transcript,
+            agent_layout.rail,
+            &snapshot,
+            &mut session.scrollback,
+        );
         self.render_prompt(frame, input, &snapshot);
         let capability_notice = if !self.capabilities.bracketed_paste {
             Some("Paste unavailable")
@@ -326,7 +335,12 @@ impl UiState {
             .or(snapshot.status.as_deref())
             .or(capability_notice)
             .unwrap_or("Enter send  p sessions  q queue  i interaction  Esc quit");
-        let mut details = format!("queue r{}", snapshot.queue_revision);
+        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+        let mut details = format!(
+            "mode {} · queue r{}",
+            AgentView::mode_label(mode),
+            snapshot.queue_revision
+        );
         if let Some(pending) = &self.queue_pending {
             details.push_str(&format!(
                 " · pending {} ({})",
@@ -451,39 +465,63 @@ impl UiState {
     fn render_transcript(
         &mut self,
         frame: &mut Frame<'_>,
-        area: Rect,
+        content: Rect,
+        rail: Rect,
         snapshot: &GrokHostSnapshot,
         scrollback: &mut dsh_pager::scrollback::Scrollback,
     ) {
         let theme = Theme::current();
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1), Constraint::Length(2)])
-            .split(area);
-        let content = chunks[0];
-        let rail = chunks[1];
-
         let mut lines = Vec::new();
         if snapshot.transcript.is_empty() {
+            self.scroll = 0;
+            self.scroll_anchor = None;
             lines.push(Line::from(Span::styled(
                 "  No transcript events yet. Type a prompt below.",
                 Style::default().fg(theme.gray),
             )));
         } else {
-            let total_height = scrollback.total_height(content.width as usize);
-            let max_scroll = total_height.saturating_sub(content.height as usize);
+            let render_width = content.width.saturating_sub(1).max(1) as usize;
+            let mut total_height = scrollback.total_height(render_width);
+            let mut max_scroll = total_height.saturating_sub(content.height as usize);
             self.scroll = self.scroll.min(max_scroll);
-            let scroll_top = max_scroll.saturating_sub(self.scroll);
-            for paint in
-                scrollback.visible_lines(content.width as usize, scroll_top, content.height)
-            {
-                let style = if paint.header {
-                    Style::default().fg(theme.gray_bright)
-                } else {
-                    Style::default().fg(theme.text_primary)
-                };
-                lines.push(Line::from(Span::styled(paint.text, style)));
+            let mut scroll_top = max_scroll.saturating_sub(self.scroll);
+            if self.transcript_width != Some(content.width) {
+                if let Some(anchor) = self.scroll_anchor.take()
+                    && let Some(restored) = scrollback.scroll_for_anchor(render_width, anchor)
+                {
+                    scroll_top = restored;
+                }
+                self.transcript_width = Some(content.width);
             }
+            scroll_top =
+                scrollback.materialize_viewport(render_width, scroll_top, content.height as usize);
+            total_height = scrollback.total_height(render_width);
+            max_scroll = total_height.saturating_sub(content.height as usize);
+            scroll_top = scroll_top.min(max_scroll);
+            self.scroll = max_scroll.saturating_sub(scroll_top);
+            for paint in scrollback.visible_lines(render_width, scroll_top, content.height) {
+                lines.push(Line::from(Span::styled(
+                    paint.text.clone(),
+                    crate::views::transcript::style_for_paint(
+                        paint.kind,
+                        paint.header,
+                        &paint.text,
+                        *theme,
+                    ),
+                )));
+                let geometry = insert_text_line(
+                    &mut self.hit_map,
+                    HitTarget::TranscriptEntry(paint.entry_id),
+                    paint.line_index,
+                    content.x.saturating_add(1),
+                    content.y.saturating_add(paint.screen_y),
+                    render_width as u16,
+                    &paint.text,
+                    first_link_target(&paint.text),
+                );
+                self.geometry_lines.push(geometry);
+            }
+            self.scroll_anchor = scrollback.anchor_at(render_width, scroll_top);
         }
         let block = Block::default()
             .borders(Borders::LEFT)
@@ -493,34 +531,9 @@ impl UiState {
             Paragraph::new(Text::from(lines))
                 .block(block)
                 .style(Style::default().bg(theme.bg_base))
-                .wrap(Wrap { trim: false })
                 .scroll((0, 0)),
             content,
         );
-
-        let mut y = content.y;
-        for row in &snapshot.transcript {
-            for (line_index, text) in row.content.display_text().split('\n').enumerate() {
-                if y >= content.bottom() {
-                    break;
-                }
-                let geometry = insert_text_line(
-                    &mut self.hit_map,
-                    HitTarget::TranscriptEntry(row.id),
-                    line_index,
-                    content.x.saturating_add(1),
-                    y,
-                    content.width.saturating_sub(1),
-                    text,
-                    first_link_target(text),
-                );
-                self.geometry_lines.push(geometry);
-                y = y.saturating_add(1);
-            }
-            if y >= content.bottom() {
-                break;
-            }
-        }
 
         if let Some(selection) = self.selection.selection() {
             let buffer = frame.buffer_mut();
@@ -569,7 +582,8 @@ impl UiState {
 
     fn render_prompt(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
         let theme = Theme::current();
-        let label = if snapshot.running { " > " } else { " · " };
+        let mode_value = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+        let label = AgentView::prompt_label(mode_value, snapshot.running);
         let available = area.width.saturating_sub(label.len() as u16 + 1) as usize;
         let viewport = self
             .prompt
@@ -584,6 +598,7 @@ impl UiState {
         } else {
             Style::default().fg(theme.text_primary)
         };
+        let mode = AgentView::mode_label(mode_value);
         frame.render_widget(
             Paragraph::new(if placeholder.is_empty() {
                 Text::from(
@@ -600,6 +615,7 @@ impl UiState {
             .block(
                 Block::default()
                     .borders(Borders::TOP)
+                    .title(format!(" {mode} "))
                     .border_style(Style::default().fg(theme.bg_light)),
             )
             .wrap(Wrap { trim: false }),
@@ -840,6 +856,24 @@ impl UiState {
                 self.status = Some("Draft cleared".into());
                 Ok(false)
             }
+            ShellAction::TogglePromptMode => {
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                let current = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+                let next = match current {
+                    PromptMode::Queue => PromptMode::Steer,
+                    PromptMode::Steer => PromptMode::Queue,
+                };
+                if next == PromptMode::Steer && !snapshot.capabilities.queue_steer {
+                    self.status = Some("Steer mode unavailable".into());
+                } else {
+                    self.prompt_mode = Some(next);
+                    self.status = Some(format!("Prompt mode: {}", AgentView::mode_label(next)));
+                }
+                Ok(false)
+            }
             ShellAction::ScrollUp(amount) => {
                 self.scroll = self.scroll.saturating_add(amount as usize);
                 Ok(false)
@@ -951,6 +985,8 @@ impl UiState {
                 self.selection.clear();
                 self.hover_link = None;
                 self.frame_links.clear();
+                self.geometry_lines.clear();
+                self.transcript_width = None;
                 self.status = Some(format!("Resized to {}x{}", area.width, area.height));
                 Ok(false)
             }
@@ -1057,12 +1093,21 @@ impl UiState {
             self.status = Some("Prompt is empty".into());
             return Ok(());
         }
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+        if mode == PromptMode::Steer && !snapshot.capabilities.queue_steer {
+            self.status = Some("Steer mode unavailable".into());
+            return Ok(());
+        }
         let mut sink = DshEffectSink::new(transport);
         let context = UiContext::from_session(session);
         let receipt = sink.submit(
             UiIntent::SubmitPrompt {
                 text: text.clone(),
-                mode: PromptMode::Queue,
+                mode,
             },
             &context,
         )?;
@@ -1171,6 +1216,16 @@ impl UiState {
             self.local_prompt_history.drain(..drop_count);
         }
         self.prompt_history_index = None;
+    }
+
+    fn reset_transcript_view(&mut self) {
+        self.scroll = 0;
+        self.transcript_width = None;
+        self.scroll_anchor = None;
+        self.geometry_lines.clear();
+        self.selection.clear();
+        self.hover_link = None;
+        self.frame_links.clear();
     }
 
     fn handle_dashboard_key(
@@ -1309,7 +1364,7 @@ impl UiState {
         match load_session_id(transport, session.generation(), target.to_string()) {
             Ok(next) => {
                 *session = next;
-                self.scroll = 0;
+                self.reset_transcript_view();
                 self.dashboard_peek = None;
                 self.dashboard_query_active = false;
                 self.dashboard_revision = None;
@@ -1753,7 +1808,7 @@ impl UiState {
                 ) {
                     Ok(next) => {
                         *session = next;
-                        self.scroll = 0;
+                        self.reset_transcript_view();
                         self.picker.reset();
                         self.picker_selected_id = None;
                         self.shell.close_overlay();

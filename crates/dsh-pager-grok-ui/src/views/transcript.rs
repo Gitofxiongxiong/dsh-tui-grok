@@ -12,6 +12,28 @@ use ratatui::{
 
 use crate::{host_adapter::TranscriptRow, theme::Theme};
 
+/// Paint a materialized scrollback line. Scrollback owns wrapping and line
+/// identity; this helper only applies Grok's semantic role colors.
+pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: Theme) -> Style {
+    if header {
+        return Style::default()
+            .fg(color_for_kind(kind, theme))
+            .add_modifier(Modifier::BOLD);
+    }
+    let color = if text.starts_with("▸ ") || text.starts_with('✓') {
+        theme.gray_bright
+    } else if text.starts_with('✗') || text.starts_with("[unsupported") {
+        theme.accent_user
+    } else if text.starts_with("diff ") || text.starts_with('+') {
+        theme.text_primary
+    } else if text.starts_with('-') {
+        theme.accent_user
+    } else {
+        color_for_kind(kind, theme)
+    };
+    Style::default().fg(color)
+}
+
 /// Render one transcript row using the same role hierarchy as the imported
 /// Grok block widgets. A row always starts with a stable kind/sequence header;
 /// every typed block then contributes its own spacing and semantic color.
@@ -253,5 +275,18 @@ mod tests {
         assert!(rendered.contains("- old"));
         assert!(rendered.contains("+ new"));
         assert!(copy_row(&row).contains("diff src/lib.rs"));
+    }
+
+    #[test]
+    fn materialized_tool_lines_keep_semantic_roles() {
+        let theme = *Theme::current();
+        assert_eq!(
+            style_for_paint(DshRenderKind::ToolCall, false, "▸ edit", theme).fg,
+            Some(theme.gray_bright)
+        );
+        assert_eq!(
+            style_for_paint(DshRenderKind::Error, false, "✗ result", theme).fg,
+            Some(theme.accent_user)
+        );
     }
 }
