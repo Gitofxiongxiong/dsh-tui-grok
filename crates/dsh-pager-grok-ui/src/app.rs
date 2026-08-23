@@ -15,6 +15,8 @@ pub enum KeyOwner {
     Queue,
     Interaction,
     FileSearch,
+    ImagePreview,
+    AgentTasks,
     Modal,
     Dashboard,
 }
@@ -26,6 +28,8 @@ pub enum Overlay {
     Queue,
     Interaction,
     FileSearch,
+    ImagePreview,
+    AgentTasks,
     Modal,
     Dashboard,
 }
@@ -35,12 +39,14 @@ impl KeyOwner {
         match self {
             Self::Interaction => 0,
             Self::FileSearch => 2,
+            Self::ImagePreview => 3,
+            Self::AgentTasks => 4,
             Self::Modal => 1,
-            Self::Picker => 3,
-            Self::Queue => 4,
-            Self::Dashboard => 5,
-            Self::Prompt => 6,
-            Self::Transcript => 7,
+            Self::Picker => 5,
+            Self::Queue => 6,
+            Self::Dashboard => 7,
+            Self::Prompt => 8,
+            Self::Transcript => 9,
         }
     }
 }
@@ -53,6 +59,8 @@ impl Overlay {
             Self::Queue => KeyOwner::Queue,
             Self::Interaction => KeyOwner::Interaction,
             Self::FileSearch => KeyOwner::FileSearch,
+            Self::ImagePreview => KeyOwner::ImagePreview,
+            Self::AgentTasks => KeyOwner::AgentTasks,
             Self::Modal => KeyOwner::Modal,
             Self::Dashboard => KeyOwner::Dashboard,
         }
@@ -84,6 +92,8 @@ pub enum ShellAction {
     OpenQueue,
     OpenInteraction,
     OpenFileSearch,
+    OpenImagePreview,
+    OpenAgentTasks,
     OpenDashboard,
     PromptKey(KeyEvent),
     PickerKey(KeyEvent),
@@ -99,6 +109,10 @@ pub enum ShellAction {
     FileSearchKey(KeyEvent),
     FileSearchMouse(MouseEvent),
     FileSearchPaste(String),
+    ImagePreviewKey(KeyEvent),
+    ImagePreviewMouse(MouseEvent),
+    AgentTasksKey(KeyEvent),
+    AgentTasksMouse(MouseEvent),
     DashboardKey(KeyEvent),
     DashboardMouse(MouseEvent),
     DashboardPaste(String),
@@ -282,6 +296,18 @@ impl AppShell {
         self.owner = KeyOwner::FileSearch;
     }
 
+    pub fn open_image_preview(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::ImagePreview;
+        self.owner = KeyOwner::ImagePreview;
+    }
+
+    pub fn open_agent_tasks(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::AgentTasks;
+        self.owner = KeyOwner::AgentTasks;
+    }
+
     pub fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
         self.owner = self.previous_owner;
@@ -317,6 +343,12 @@ impl AppShell {
                 if self.overlay == Overlay::FileSearch {
                     return ShellAction::FileSearchMouse(mouse);
                 }
+                if self.overlay == Overlay::ImagePreview {
+                    return ShellAction::ImagePreviewMouse(mouse);
+                }
+                if self.overlay == Overlay::AgentTasks {
+                    return ShellAction::AgentTasksMouse(mouse);
+                }
                 if self.overlay == Overlay::Dashboard {
                     return ShellAction::DashboardMouse(mouse);
                 }
@@ -345,6 +377,12 @@ impl AppShell {
             }
             if self.overlay == Overlay::FileSearch {
                 return ShellAction::FileSearchKey(key);
+            }
+            if self.overlay == Overlay::ImagePreview {
+                return ShellAction::ImagePreviewKey(key);
+            }
+            if self.overlay == Overlay::AgentTasks {
+                return ShellAction::AgentTasksKey(key);
             }
             if self.overlay == Overlay::Dashboard {
                 return ShellAction::DashboardKey(key);
@@ -394,13 +432,21 @@ impl AppShell {
                     self.open_queue();
                     return ShellAction::OpenQueue;
                 }
-                KeyCode::Char('i') => {
+                KeyCode::Char('i') if key.modifiers.is_empty() => {
                     self.open_interaction();
                     return ShellAction::OpenInteraction;
                 }
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.open_file_search();
                     return ShellAction::OpenFileSearch;
+                }
+                KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.open_image_preview();
+                    return ShellAction::OpenImagePreview;
+                }
+                KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.open_agent_tasks();
+                    return ShellAction::OpenAgentTasks;
                 }
                 KeyCode::Char('d') => {
                     self.previous_owner = self.owner;
@@ -591,6 +637,24 @@ mod tests {
             shell.dispatch(ShellEvent::Key(key(KeyCode::Char('f'))), true),
             ShellAction::PromptKey(_)
         ));
+    }
+
+    #[test]
+    fn media_and_agent_task_overlays_have_explicit_ctrl_shortcuts() {
+        let mut shell = AppShell::default();
+        let ctrl_i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_i), true),
+            ShellAction::OpenImagePreview
+        );
+        assert_eq!(shell.owner(), KeyOwner::ImagePreview);
+        shell.close_overlay();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_t), true),
+            ShellAction::OpenAgentTasks
+        );
+        assert_eq!(shell.owner(), KeyOwner::AgentTasks);
     }
 
     #[test]

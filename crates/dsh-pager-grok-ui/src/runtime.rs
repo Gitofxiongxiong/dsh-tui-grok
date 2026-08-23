@@ -39,7 +39,9 @@ use crate::geometry::{
     GeometryLine, HitMap, HitTarget, LinkTarget, column_for_grapheme, first_link_target,
     insert_text_line,
 };
-use crate::host_adapter::{FeatureStatus, FileSearchSnapshot, GrokHostSnapshot};
+use crate::host_adapter::{
+    AgentSnapshot, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot, MediaSnapshot,
+};
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
@@ -235,6 +237,8 @@ struct UiState {
     file_search_selected_id: Option<String>,
     suggestion_selected: usize,
     suggestion_dismissed: bool,
+    image_selected: usize,
+    agent_task_selected: usize,
     dashboard: DashboardModel,
     dashboard_revision: Option<u64>,
     dashboard_query: PromptEditor,
@@ -380,6 +384,10 @@ impl UiState {
             self.render_interaction(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::FileSearch {
             self.render_file_search(frame, area, &snapshot);
+        } else if self.shell.overlay() == Overlay::ImagePreview {
+            self.render_image_preview(frame, area, &snapshot);
+        } else if self.shell.overlay() == Overlay::AgentTasks {
+            self.render_agent_tasks(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::Dashboard {
             self.render_dashboard(frame, area);
         }
@@ -813,6 +821,68 @@ impl UiState {
         }
     }
 
+    fn render_image_preview(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        snapshot: &GrokHostSnapshot,
+    ) {
+        let theme = Theme::current();
+        let shortcuts = [Shortcut {
+            label: "Esc close",
+            clickable: true,
+            id: 1,
+        }];
+        let config = ModalWindowConfig {
+            title: "Image Preview · host media",
+            tabs: None,
+            shortcuts: &shortcuts,
+            sizing: ModalSizing::large(),
+            fold_info: None,
+        };
+        let buf = frame.buffer_mut();
+        if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
+            render_image_preview_content(
+                buf,
+                content.content,
+                &snapshot.media,
+                self.image_selected,
+                theme,
+            );
+        }
+    }
+
+    fn render_agent_tasks(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        snapshot: &GrokHostSnapshot,
+    ) {
+        let theme = Theme::current();
+        let shortcuts = [Shortcut {
+            label: "Esc close",
+            clickable: true,
+            id: 1,
+        }];
+        let config = ModalWindowConfig {
+            title: "Agent Tasks · DeepSeek host",
+            tabs: Some(&["tasks", "subagents"]),
+            shortcuts: &shortcuts,
+            sizing: ModalSizing::large(),
+            fold_info: None,
+        };
+        let buf = frame.buffer_mut();
+        if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
+            render_agent_tasks_content(
+                buf,
+                content.content,
+                &snapshot.agent,
+                self.agent_task_selected,
+                theme,
+            );
+        }
+    }
+
     fn render_suggestions(
         &mut self,
         frame: &mut Frame<'_>,
@@ -937,6 +1007,24 @@ impl UiState {
                     FeatureStatus::Pending => "File search waiting for host result".into(),
                     FeatureStatus::Unsupported => "File search unavailable".into(),
                 });
+                Ok(false)
+            }
+            ShellAction::OpenImagePreview => {
+                self.image_selected = 0;
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                self.status = Some(media_status_message(&snapshot.media));
+                Ok(false)
+            }
+            ShellAction::OpenAgentTasks => {
+                self.agent_task_selected = 0;
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                self.status = Some(agent_status_message(&snapshot.agent));
                 Ok(false)
             }
             ShellAction::OpenDashboard => {
@@ -1091,6 +1179,16 @@ impl UiState {
                 }
                 Ok(false)
             }
+            ShellAction::ImagePreviewKey(key) => {
+                self.handle_image_preview_key(key, session);
+                Ok(false)
+            }
+            ShellAction::ImagePreviewMouse(_) => Ok(false),
+            ShellAction::AgentTasksKey(key) => {
+                self.handle_agent_tasks_key(key, session);
+                Ok(false)
+            }
+            ShellAction::AgentTasksMouse(_) => Ok(false),
             ShellAction::DashboardKey(key) => {
                 self.handle_dashboard_key(key, transport, session)?;
                 Ok(false)
@@ -1283,6 +1381,50 @@ impl UiState {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.move_file_search_selection(-1, session),
             MouseEventKind::ScrollDown => self.move_file_search_selection(1, session),
+            _ => {}
+        }
+    }
+
+    fn handle_image_preview_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        session: &SessionState,
+    ) {
+        if key.code == KeyCode::Esc {
+            self.shell.close_overlay();
+            self.status = Some("Image preview closed".into());
+            return;
+        }
+        let snapshot = GrokHostSnapshot::from_session(session);
+        let count = snapshot.media.rows.len();
+        if count == 0 {
+            return;
+        }
+        match key.code {
+            KeyCode::Up => self.image_selected = self.image_selected.saturating_sub(1),
+            KeyCode::Down => {
+                self.image_selected = self.image_selected.saturating_add(1).min(count - 1)
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_agent_tasks_key(&mut self, key: crossterm::event::KeyEvent, session: &SessionState) {
+        if key.code == KeyCode::Esc {
+            self.shell.close_overlay();
+            self.status = Some("Agent tasks closed".into());
+            return;
+        }
+        let snapshot = GrokHostSnapshot::from_session(session);
+        let count = snapshot.agent.tasks.len() + snapshot.agent.subagents.len();
+        if count == 0 {
+            return;
+        }
+        match key.code {
+            KeyCode::Up => self.agent_task_selected = self.agent_task_selected.saturating_sub(1),
+            KeyCode::Down => {
+                self.agent_task_selected = self.agent_task_selected.saturating_add(1).min(count - 1)
+            }
             _ => {}
         }
     }
@@ -2209,6 +2351,175 @@ fn file_search_status_message(snapshot: &FileSearchSnapshot) -> String {
     }
 }
 
+fn render_image_preview_content(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    snapshot: &MediaSnapshot,
+    selected: usize,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    match snapshot.status {
+        FeatureStatus::Unsupported => buffer.set_string(
+            area.x,
+            area.y,
+            "Image preview unavailable: terminal/host capability is unsupported",
+            Style::default().fg(theme.warning).bg(theme.bg_base),
+        ),
+        FeatureStatus::Pending => buffer.set_string(
+            area.x,
+            area.y,
+            "Waiting for authoritative media metadata...",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        ),
+        FeatureStatus::Available if snapshot.rows.is_empty() => buffer.set_string(
+            area.x,
+            area.y,
+            "No image attachments in this session",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        ),
+        FeatureStatus::Available => {
+            let index = selected.min(snapshot.rows.len().saturating_sub(1));
+            for (row_index, row) in snapshot.rows.iter().enumerate() {
+                let y = area.y.saturating_add(row_index as u16);
+                if y >= area.bottom().saturating_sub(2) {
+                    break;
+                }
+                let label = row
+                    .name
+                    .as_deref()
+                    .or(row.media_type.as_deref())
+                    .unwrap_or("image");
+                let line = format!(
+                    "{} {} · {}",
+                    if row_index == index { "▸" } else { " " },
+                    label,
+                    row.id
+                );
+                let style = if row_index == index {
+                    Style::default().fg(theme.text_primary).bg(theme.bg_visual)
+                } else {
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base)
+                };
+                buffer.set_string(area.x, y, truncate_str(&line, area.width as usize), style);
+            }
+            buffer.set_string(
+                area.x,
+                area.bottom().saturating_sub(2),
+                "Metadata available; bitmap bytes/preview effect are still pending from host",
+                Style::default().fg(theme.gray).bg(theme.bg_base),
+            );
+        }
+    }
+    buffer.set_string(
+        area.x,
+        area.bottom().saturating_sub(1),
+        "↑/↓ select · Esc close",
+        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+    );
+}
+
+fn render_agent_tasks_content(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    snapshot: &AgentSnapshot,
+    selected: usize,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    match snapshot.status {
+        FeatureStatus::Unsupported => buffer.set_string(
+            area.x,
+            area.y,
+            "Agent task/subagent state unavailable",
+            Style::default().fg(theme.warning).bg(theme.bg_base),
+        ),
+        FeatureStatus::Pending => buffer.set_string(
+            area.x,
+            area.y,
+            "Waiting for authoritative agent task snapshot...",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        ),
+        FeatureStatus::Available => {
+            let mut index = 0usize;
+            for task in &snapshot.tasks {
+                let y = area.y.saturating_add(index as u16);
+                if y >= area.bottom().saturating_sub(2) {
+                    break;
+                }
+                let marker = if index == selected { "▸" } else { " " };
+                let line = format!("{marker} task {} [{}] {}", task.id, task.status, task.label);
+                buffer.set_string(
+                    area.x,
+                    y,
+                    truncate_str(&line, area.width as usize),
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+                );
+                index += 1;
+            }
+            for subagent in &snapshot.subagents {
+                let y = area.y.saturating_add(index as u16);
+                if y >= area.bottom().saturating_sub(2) {
+                    break;
+                }
+                let line = format!(
+                    "  subagent {} [{}] {}",
+                    subagent.id,
+                    subagent.status.as_deref().unwrap_or("unknown"),
+                    subagent.label
+                );
+                buffer.set_string(
+                    area.x,
+                    y,
+                    truncate_str(&line, area.width as usize),
+                    Style::default()
+                        .fg(theme.accent_assistant)
+                        .bg(theme.bg_base),
+                );
+                index += 1;
+            }
+            if index == 0 {
+                buffer.set_string(
+                    area.x,
+                    area.y,
+                    "No active tasks or subagents",
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                );
+            }
+        }
+    }
+    buffer.set_string(
+        area.x,
+        area.bottom().saturating_sub(1),
+        "↑/↓ select · Esc close",
+        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+    );
+}
+
+fn media_status_message(snapshot: &MediaSnapshot) -> String {
+    match snapshot.status {
+        FeatureStatus::Available => format!("{} media attachment(s)", snapshot.rows.len()),
+        FeatureStatus::Pending => "Media preview pending host snapshot".into(),
+        FeatureStatus::Unsupported => "Image preview unavailable".into(),
+    }
+}
+
+fn agent_status_message(snapshot: &AgentSnapshot) -> String {
+    match snapshot.status {
+        FeatureStatus::Available => format!(
+            "{} task(s), {} subagent(s)",
+            snapshot.tasks.len(),
+            snapshot.subagents.len()
+        ),
+        FeatureStatus::Pending => "Agent task state pending host snapshot".into(),
+        FeatureStatus::Unsupported => "Agent task state unavailable".into(),
+    }
+}
+
 fn steer_capability_available(session: &SessionState, snapshot: &GrokHostSnapshot) -> bool {
     if !snapshot.capabilities.queue_steer {
         return false;
@@ -2244,14 +2555,15 @@ fn prompt_admission_message(status: &UiEffectStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::UiState;
     use super::prompt_admission_message;
     use super::prompt_receipt_admitted;
     use super::render_file_search_content;
     use super::steer_capability_available;
+    use super::{UiState, render_agent_tasks_content, render_image_preview_content};
     use crate::effects::UiEffectStatus;
     use crate::host_adapter::{
-        CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot, SuggestionSnapshot,
+        AgentSnapshot, CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot,
+        MediaSnapshot, SuggestionSnapshot,
     };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
@@ -2432,5 +2744,44 @@ mod tests {
         let mut unsupported = snapshot.clone();
         unsupported.capabilities.prompt_suggestions = false;
         assert!(ui.suggestion_items(&unsupported).is_none());
+    }
+
+    #[test]
+    fn media_and_agent_surfaces_keep_fallback_states_explicit() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        render_image_preview_content(
+            &mut buffer,
+            Rect::new(1, 1, 78, 10),
+            &MediaSnapshot {
+                status: FeatureStatus::Unsupported,
+                rows: Vec::new(),
+            },
+            0,
+            Theme::current(),
+        );
+        let image_text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(image_text.contains("Image preview unavailable"));
+
+        let mut task_buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        render_agent_tasks_content(
+            &mut task_buffer,
+            Rect::new(1, 1, 78, 10),
+            &AgentSnapshot {
+                status: FeatureStatus::Pending,
+                ..Default::default()
+            },
+            0,
+            Theme::current(),
+        );
+        let task_text = task_buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(task_text.contains("Waiting for authoritative agent task snapshot"));
     }
 }
