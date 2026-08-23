@@ -235,6 +235,7 @@ struct UiState {
     interaction_pending: Option<DshRequestId>,
     file_search_editor: PromptEditor,
     file_search_selected_id: Option<String>,
+    file_search_revision: u64,
     suggestion_selected: usize,
     suggestion_dismissed: bool,
     image_selected: usize,
@@ -1001,6 +1002,7 @@ impl UiState {
             ShellAction::OpenFileSearch => {
                 self.file_search_editor.reset();
                 self.file_search_selected_id = None;
+                self.file_search_revision = 0;
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
@@ -1202,7 +1204,12 @@ impl UiState {
             }
             ShellAction::FileSearchPaste(text) => {
                 if !text.is_empty() {
-                    let _ = self.file_search_editor.insert_paste(&text);
+                    if !matches!(
+                        self.file_search_editor.insert_paste(&text),
+                        LineEditOutcome::Unhandled
+                    ) {
+                        self.request_file_search(transport, session)?;
+                    }
                 }
                 Ok(false)
             }
@@ -1321,7 +1328,7 @@ impl UiState {
     fn handle_file_search_key(
         &mut self,
         key: crossterm::event::KeyEvent,
-        _transport: &mut RpcTransport,
+        transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<()> {
         match key.code {
@@ -1329,6 +1336,7 @@ impl UiState {
                 self.shell.close_overlay();
                 self.file_search_editor.reset();
                 self.file_search_selected_id = None;
+                self.file_search_revision = 0;
                 self.status = Some("File search closed".into());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1340,7 +1348,7 @@ impl UiState {
             KeyCode::Enter => {
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
-                    Some(_transport.control_plane()),
+                    Some(transport.control_plane()),
                 );
                 if let Some(row) =
                     snapshot.file_search.rows.iter().find(|row| {
@@ -1356,6 +1364,7 @@ impl UiState {
                 && key.code == KeyCode::Char('u') =>
             {
                 self.file_search_editor.reset();
+                self.request_file_search(transport, session)?;
             }
             _ => {
                 if !matches!(
@@ -1363,14 +1372,33 @@ impl UiState {
                     LineEditOutcome::Unhandled
                 ) {
                     self.file_search_selected_id = None;
-                    let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-                        session,
-                        Some(_transport.control_plane()),
-                    );
-                    self.status = Some(file_search_status_message(&snapshot.file_search));
+                    self.request_file_search(transport, session)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    fn request_file_search(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<()> {
+        self.file_search_revision = self.file_search_revision.saturating_add(1);
+        let query = self.file_search_editor.text().to_string();
+        let context = UiContext::for_operation(
+            session,
+            DshRequestId::new(format!("file-search-{}", self.file_search_revision)),
+        );
+        let mut sink = DshEffectSink::new(transport);
+        let receipt = sink.submit(
+            UiIntent::FileSearchQuery {
+                query,
+                revision: self.file_search_revision,
+            },
+            &context,
+        )?;
+        self.status = Some(receipt_status_message(&receipt, "File search"));
         Ok(())
     }
 

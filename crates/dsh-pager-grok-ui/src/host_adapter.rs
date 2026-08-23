@@ -11,6 +11,7 @@ use dsh_pager::{
 };
 use dsh_pager_protocol::PromptMode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// A renderer-facing transcript row.  It deliberately contains no protocol
 /// or `SessionState` references, which keeps view code host-agnostic.
@@ -143,6 +144,8 @@ pub struct FileSearchRow {
 pub struct FileSearchSnapshot {
     pub status: FeatureStatus,
     pub query: String,
+    #[serde(default)]
+    pub revision: u64,
     pub selected_id: Option<String>,
     pub rows: Vec<FileSearchRow>,
     pub diagnostic: Option<String>,
@@ -416,21 +419,7 @@ impl GrokHostSnapshot {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let file_search = FileSearchSnapshot {
-            // A capability bit only says the host can serve this surface. A
-            // query/result snapshot is still required before the renderer may
-            // call it available.
-            status: if capabilities.file_search {
-                FeatureStatus::Pending
-            } else {
-                FeatureStatus::Unsupported
-            },
-            query: String::new(),
-            selected_id: None,
-            rows: Vec::new(),
-            diagnostic: (!capabilities.file_search)
-                .then(|| "DeepSeek Harness file search is unavailable".into()),
-        };
+        let file_search = file_search_snapshot(session, capabilities.file_search);
         let suggestion_snapshot = SuggestionSnapshot {
             status: feature_status(capabilities.prompt_suggestions),
             active: false,
@@ -647,6 +636,119 @@ fn feature_status(enabled: bool) -> FeatureStatus {
     }
 }
 
+/// Project the optional host-owned file search result. The projection is
+/// deliberately permissive at this boundary: older hosts may omit `status`
+/// or stable row ids, while the renderer still receives deterministic DTOs.
+fn file_search_snapshot(session: &SessionState, enabled: bool) -> FileSearchSnapshot {
+    let fallback = || FileSearchSnapshot {
+        status: if enabled {
+            FeatureStatus::Pending
+        } else {
+            FeatureStatus::Unsupported
+        },
+        query: String::new(),
+        revision: 0,
+        selected_id: None,
+        rows: Vec::new(),
+        diagnostic: (!enabled).then(|| "DeepSeek Harness file search is unavailable".into()),
+    };
+    let Some(value) = ["fileSearch", "file_search"]
+        .iter()
+        .find_map(|key| session.projection(key))
+    else {
+        return fallback();
+    };
+    let Some(object) = value.as_object() else {
+        return fallback();
+    };
+    let query = object
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let revision = object
+        .get("revision")
+        .or_else(|| object.get("generation"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let rows = object
+        .get("rows")
+        .or_else(|| object.get("items"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let item = item.as_object()?;
+                    let path = item.get("path").and_then(Value::as_str)?.to_string();
+                    let line = item
+                        .get("line")
+                        .or_else(|| item.get("lineNumber"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default() as u32;
+                    let snippet = item
+                        .get("snippet")
+                        .or_else(|| item.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{path}:{line}"));
+                    Some(FileSearchRow {
+                        id,
+                        path,
+                        line,
+                        snippet,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let status = if !enabled {
+        FeatureStatus::Unsupported
+    } else {
+        object
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(parse_feature_status)
+            .unwrap_or_else(|| {
+                if object.contains_key("rows") || object.contains_key("items") {
+                    FeatureStatus::Available
+                } else {
+                    FeatureStatus::Pending
+                }
+            })
+    };
+    FileSearchSnapshot {
+        status,
+        query,
+        revision,
+        selected_id: object
+            .get("selectedId")
+            .or_else(|| object.get("selected_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        rows,
+        diagnostic: object
+            .get("diagnostic")
+            .or_else(|| object.get("error"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+fn parse_feature_status(value: &str) -> Option<FeatureStatus> {
+    match value.to_ascii_lowercase().as_str() {
+        "available" | "ready" | "complete" | "completed" => Some(FeatureStatus::Available),
+        "pending" | "loading" | "searching" => Some(FeatureStatus::Pending),
+        "unsupported" | "unavailable" | "error" | "failed" => Some(FeatureStatus::Unsupported),
+        _ => None,
+    }
+}
+
 fn media_snapshot(transcript: &[TranscriptRow], enabled: bool) -> MediaSnapshot {
     let rows =
         transcript
@@ -850,6 +952,31 @@ mod tests {
         assert_eq!(first.suggestions.status, FeatureStatus::Available);
         assert_eq!(first.workspace.status, FeatureStatus::Pending);
         assert_eq!(first.agent.status, FeatureStatus::Unsupported);
+    }
+
+    #[test]
+    fn file_search_projection_is_authoritative_and_keeps_revision() {
+        let mut state = state();
+        assert!(state.set_projection(
+            "fileSearch",
+            10,
+            json!({
+                "status": "available",
+                "query": "src",
+                "revision": 4,
+                "rows": [{"path": "src/main.rs", "line": 12, "snippet": "fn main()"}],
+                "selectedId": "src/main.rs:12"
+            })
+        ));
+        let snapshot = GrokHostSnapshot::from_session(&state);
+        assert_eq!(snapshot.file_search.status, FeatureStatus::Available);
+        assert_eq!(snapshot.file_search.query, "src");
+        assert_eq!(snapshot.file_search.revision, 4);
+        assert_eq!(snapshot.file_search.rows[0].id, "src/main.rs:12");
+        assert_eq!(
+            snapshot.file_search.selected_id.as_deref(),
+            Some("src/main.rs:12")
+        );
     }
 
     #[test]

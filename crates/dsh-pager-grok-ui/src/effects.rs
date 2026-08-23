@@ -35,6 +35,10 @@ pub enum UiIntent {
         at_seq: Option<DshSeq>,
     },
     ArchiveSession,
+    FileSearchQuery {
+        query: String,
+        revision: u64,
+    },
     InterruptSubagent {
         address: SubagentAddress,
     },
@@ -165,6 +169,11 @@ pub enum UiEffect {
     ArchiveSession {
         operation: OperationKey,
     },
+    FileSearchQuery {
+        operation: OperationKey,
+        query: String,
+        revision: u64,
+    },
     InterruptSubagent {
         operation: OperationKey,
         address: SubagentAddress,
@@ -218,6 +227,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { .. } => "rename",
         UiIntent::ForkSession { .. } => "fork",
         UiIntent::ArchiveSession => "archive",
+        UiIntent::FileSearchQuery { .. } => "file-search-query",
         UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
     };
     let dedupe_key = match &intent {
@@ -236,6 +246,9 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { title } => format!("{action_name}:{}", prompt_digest(title)),
         UiIntent::ForkSession { at_seq } => format!("{action_name}:{at_seq:?}"),
         UiIntent::ArchiveSession => action_name.to_string(),
+        UiIntent::FileSearchQuery { query, revision } => {
+            format!("{action_name}:{revision}:{}", prompt_digest(query))
+        }
         UiIntent::InterruptSubagent { address } => {
             format!(
                 "{action_name}:{}:{}",
@@ -292,6 +305,11 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::RenameSession { title } => UiEffect::RenameSession { operation, title },
         UiIntent::ForkSession { at_seq } => UiEffect::ForkSession { operation, at_seq },
         UiIntent::ArchiveSession => UiEffect::ArchiveSession { operation },
+        UiIntent::FileSearchQuery { query, revision } => UiEffect::FileSearchQuery {
+            operation,
+            query,
+            revision,
+        },
         UiIntent::InterruptSubagent { address } => {
             UiEffect::InterruptSubagent { operation, address }
         }
@@ -390,6 +408,27 @@ impl DshEffectSink<'_> {
                 let result =
                     dsh_pager::archive_session(self.transport, operation.session_id.as_str());
                 (operation, result.map(|_| true))
+            }
+            UiEffect::FileSearchQuery {
+                mut operation,
+                query: _,
+                revision: _,
+            } => {
+                self.prepare_operation(&mut operation);
+                if self.completed.contains(&operation) {
+                    return Ok(self.duplicate_receipt(operation));
+                }
+                // The current Harness TUI protocol has no file-reference
+                // discovery method. Keep this explicit so a capability bit
+                // cannot turn an unregistered RPC into a fake successful
+                // search. The effect remains the stable seam for the host
+                // protocol addition.
+                (
+                    operation,
+                    Err(dsh_pager::PagerError::new(
+                        "filesystem file search is unsupported by the current Harness TUI protocol",
+                    )),
+                )
             }
             UiEffect::AttachSession { mut operation, .. } => {
                 self.prepare_operation(&mut operation);
@@ -544,6 +583,30 @@ mod tests {
         assert_eq!(operation.session_id.as_str(), "parent");
         assert_eq!(address.parent_session_id, "parent");
         assert_eq!(address.child_session_id, "child");
+    }
+
+    #[test]
+    fn file_search_effect_preserves_query_revision_and_digest_identity() {
+        let session = SessionState::new("parent".into(), 9);
+        let effect = compile_intent(
+            UiIntent::FileSearchQuery {
+                query: "src/main".into(),
+                revision: 7,
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::FileSearchQuery {
+            operation,
+            query,
+            revision,
+        } = effect
+        else {
+            panic!("expected file-search effect");
+        };
+        assert_eq!(operation.action, "file-search-query");
+        assert!(operation.dedupe_key.contains(":7:"));
+        assert_eq!(query, "src/main");
+        assert_eq!(revision, 7);
     }
 
     #[test]
