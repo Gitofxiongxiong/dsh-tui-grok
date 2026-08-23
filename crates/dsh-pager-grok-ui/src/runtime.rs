@@ -29,7 +29,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{AppShell, Overlay, ShellAction, ShellEvent};
+use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent,
@@ -286,22 +286,19 @@ impl UiState {
             if snapshot.running { "running" } else { "idle" }
         );
         let compact_header = agent_layout.compact || header.width < 70;
-        let header_center = if compact_header {
-            "GROK UI"
-        } else {
-            "DSH · GROK UI"
-        };
         let header_right = if compact_header {
             if snapshot.running { "running" } else { "idle" }.to_string()
         } else {
             format!(" · {connection}")
         };
-        frame.render_widget(
-            StatusBar::new(&snapshot.session_title)
-                .center(header_center)
-                .right(&header_right),
-            header,
-        );
+        let status_bar = StatusBar::new(&snapshot.session_title).right(&header_right);
+        // The upstream status row is left/right aligned. Keep the compact
+        // branding chip only where it cannot collide with the right status.
+        if compact_header {
+            frame.render_widget(status_bar.center("GROK UI"), header);
+        } else {
+            frame.render_widget(status_bar, header);
+        }
 
         self.render_transcript(
             frame,
@@ -314,13 +311,14 @@ impl UiState {
         let prompt_width = input.width.saturating_sub(6).max(1) as usize;
         let viewport = self
             .prompt
-            .viewport(prompt_width, input.height.saturating_sub(3).max(1) as usize);
+            .viewport(prompt_width, input.height.saturating_sub(2).max(1) as usize);
         AgentView::render_prompt(
             frame,
             input,
             crate::views::agent::PromptRenderState {
                 mode,
                 running: snapshot.running,
+                focused: self.shell.owner() == KeyOwner::Prompt,
                 title: &snapshot.session_title,
                 model: &snapshot.model,
                 viewport: &viewport,

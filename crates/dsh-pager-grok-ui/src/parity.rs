@@ -4,13 +4,17 @@
 //! focus ownership. ANSI bytes remain the responsibility of PTY tests.
 
 use dsh_pager::DshRenderEntry;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{AppShell, KeyOwner, Overlay};
 use crate::geometry::{HitMap, HitTarget, insert_text_line};
 use crate::host_adapter::GrokHostSnapshot;
+use crate::input::PromptViewport;
 use crate::theme::Theme;
+use crate::views::agent::PromptRenderState;
 use crate::views::agent::{AgentView, AgentViewLayout};
 use crate::views::transcript::RichTranscript;
 
@@ -62,6 +66,27 @@ pub struct SemanticHit {
     pub label: String,
 }
 
+/// Terminal-independent signature for one rendered cell. Colors are emitted
+/// as stable theme roles so a reference comparison does not depend on RGB
+/// choices made by a terminal profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticCell {
+    pub x: u16,
+    pub y: u16,
+    pub symbol: String,
+    pub fg: String,
+    pub bg: String,
+    pub modifiers: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticCellDiff {
+    pub x: u16,
+    pub y: u16,
+    pub expected: Option<SemanticCell>,
+    pub actual: Option<SemanticCell>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticFrame {
     pub width: u16,
@@ -73,6 +98,8 @@ pub struct SemanticFrame {
     pub layout_revision: u64,
     pub hit_map_revision: u64,
     pub hits: Vec<SemanticHit>,
+    /// Cell-level contract for the prompt chrome and editor surface.
+    pub cells: Vec<SemanticCell>,
 }
 
 impl SemanticFrame {
@@ -82,6 +109,79 @@ impl SemanticFrame {
             .find(|row| row.role == role)
             .map(|row| row.text.as_str())
     }
+}
+
+/// Extract a stable cell signature from a ratatui buffer region.
+pub fn semantic_cells(buffer: &Buffer, area: Rect) -> Vec<SemanticCell> {
+    let theme = Theme::current();
+    let mut cells = Vec::with_capacity(area.width as usize * area.height as usize);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let Some(cell) = buffer.cell((x, y)) else {
+                continue;
+            };
+            cells.push(SemanticCell {
+                x,
+                y,
+                symbol: cell.symbol().to_string(),
+                fg: color_role(cell.fg, theme),
+                bg: color_role(cell.bg, theme),
+                modifiers: cell.modifier.bits(),
+            });
+        }
+    }
+    cells
+}
+
+/// Compare two cell signatures by screen coordinate, retaining only changed
+/// cells. This is intentionally independent of terminal escape sequences.
+pub fn cell_diff(reference: &[SemanticCell], actual: &[SemanticCell]) -> Vec<SemanticCellDiff> {
+    use std::collections::BTreeMap;
+    let mut expected = BTreeMap::new();
+    let mut observed = BTreeMap::new();
+    for cell in reference {
+        expected.insert((cell.x, cell.y), cell);
+    }
+    for cell in actual {
+        observed.insert((cell.x, cell.y), cell);
+    }
+    expected
+        .keys()
+        .chain(observed.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|(x, y)| {
+            let left = expected.get(&(x, y)).copied();
+            let right = observed.get(&(x, y)).copied();
+            (left != right).then(|| SemanticCellDiff {
+                x,
+                y,
+                expected: left.cloned(),
+                actual: right.cloned(),
+            })
+        })
+        .collect()
+}
+
+fn color_role(color: Color, theme: &Theme) -> String {
+    [
+        (theme.accent_user, "accent_user"),
+        (theme.bg_base, "bg_base"),
+        (theme.bg_highlight, "bg_highlight"),
+        (theme.bg_hover, "bg_hover"),
+        (theme.bg_light, "bg_light"),
+        (theme.bg_visual, "bg_visual"),
+        (theme.gray, "gray"),
+        (theme.gray_bright, "gray_bright"),
+        (theme.gray_dim, "gray_dim"),
+        (theme.fuzzy_accent, "fuzzy_accent"),
+        (theme.text_secondary, "text_secondary"),
+        (theme.text_primary, "text_primary"),
+    ]
+    .into_iter()
+    .find_map(|(candidate, role)| (candidate == color).then_some(role.to_string()))
+    .unwrap_or_else(|| format!("{color:?}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,9 +306,16 @@ pub fn render_semantic(
     area: Rect,
 ) -> SemanticFrame {
     let mut rows = Vec::new();
+    let connection = format!(
+        "{} · {} · q{} · {}",
+        snapshot.connection,
+        snapshot.model,
+        snapshot.queue_revision,
+        if snapshot.running { "running" } else { "idle" }
+    );
     rows.push(SemanticRow {
         role: "header".into(),
-        text: format!("DSH · GROK UI · {}", snapshot.session_title),
+        text: format!("{} · {}", snapshot.session_title, connection),
         rect: layout.header.into(),
     });
     if snapshot.transcript.is_empty() {
@@ -314,6 +421,26 @@ pub fn render_semantic(
         link: None,
         priority: 15,
     });
+    let mut prompt_buffer = Buffer::empty(area);
+    let viewport = PromptViewport {
+        lines: vec![String::new()],
+        cursor_x: 0,
+        cursor_y: 0,
+    };
+    AgentView::render_prompt_buffer(
+        &mut prompt_buffer,
+        layout.prompt,
+        PromptRenderState {
+            mode: snapshot.prompt.default_mode,
+            running: snapshot.running,
+            focused: shell.owner() == KeyOwner::Prompt,
+            title: &snapshot.session_title,
+            model: &snapshot.model,
+            viewport: &viewport,
+            empty: true,
+        },
+        Theme::current(),
+    );
     SemanticFrame {
         width: area.width,
         height: area.height,
@@ -333,6 +460,7 @@ pub fn render_semantic(
                 label: hit.label.clone(),
             })
             .collect(),
+        cells: semantic_cells(&prompt_buffer, layout.prompt),
     }
 }
 
@@ -386,5 +514,8 @@ mod tests {
                 .iter()
                 .all(|row| row.rect.x + row.rect.width <= 80)
         );
+        assert!(!frame.cells.is_empty());
+        assert_eq!(cell_diff(&frame.cells, &frame.cells), Vec::new());
+        assert_eq!(frame.cells[0].symbol, "╭");
     }
 }

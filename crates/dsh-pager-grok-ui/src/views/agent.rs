@@ -10,10 +10,11 @@ use std::borrow::Cow;
 use crossterm::event::KeyCode;
 use dsh_pager_protocol::PromptMode;
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AppShell, ShellLayout};
@@ -72,7 +73,7 @@ impl AgentViewLayout {
             compact,
         } = params;
         let outer_hpad = if compact { 1 } else { 2 };
-        let outer_vpad = if area.height <= SHORT_TERMINAL_ROWS {
+        let outer_vpad = if compact || area.height <= SHORT_TERMINAL_ROWS {
             0
         } else {
             1
@@ -96,114 +97,80 @@ impl AgentViewLayout {
         }
 
         let header_height = 1.min(inner.height);
-        let top_gap = u16::from(!compact && inner.height > header_height);
+        let top_gap = u16::from(outer_vpad > 0);
         let turn_status_height = turn_status_height.min(1);
         let banner_height = banner_height.min(1);
         let shortcuts_height = shortcuts_height.min(1);
         let prompt_gap = u16::from(!compact && prompt_height > 0);
-
-        let fixed_without_prompt = header_height
-            .saturating_add(top_gap)
-            .saturating_add(SCROLLBACK_MIN_ROWS)
-            .saturating_add(turn_status_height)
-            .saturating_add(u16::from(turn_status_height > 0 && !compact))
-            .saturating_add(banner_height)
-            .saturating_add(u16::from(banner_height > 0 && !compact))
-            .saturating_add(prompt_gap)
-            .saturating_add(status_line_height.min(1))
+        let status_line_height = status_line_height.min(1);
+        let mut constraints = vec![Constraint::Length(header_height)];
+        if top_gap > 0 {
+            constraints.push(Constraint::Length(top_gap));
+        }
+        constraints.push(Constraint::Min(SCROLLBACK_MIN_ROWS));
+        if turn_status_height > 0 {
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(turn_status_height));
+        }
+        if banner_height > 0 {
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(banner_height));
+        }
+        if prompt_gap > 0 {
+            constraints.push(Constraint::Length(prompt_gap));
+        }
+        constraints.push(Constraint::Length(prompt_height));
+        let reserved = constraints
+            .iter()
+            .map(|constraint| match constraint {
+                Constraint::Length(rows) | Constraint::Min(rows) => *rows,
+                _ => 0,
+            })
+            .fold(0u16, u16::saturating_add)
             .saturating_add(shortcuts_height);
-        let prompt_height = prompt_height.min(inner.height.saturating_sub(fixed_without_prompt));
-
-        let status_line_height = status_line_height.min(1).min(
-            inner.height.saturating_sub(
-                header_height
-                    .saturating_add(top_gap)
-                    .saturating_add(SCROLLBACK_MIN_ROWS)
-                    .saturating_add(turn_status_height)
-                    .saturating_add(u16::from(turn_status_height > 0 && !compact))
-                    .saturating_add(banner_height)
-                    .saturating_add(u16::from(banner_height > 0 && !compact))
-                    .saturating_add(prompt_gap)
-                    .saturating_add(prompt_height)
-                    .saturating_add(shortcuts_height),
-            ),
-        );
-
-        let header = Rect::new(inner.x, inner.y, inner.width, header_height);
-        let transcript_y = header.bottom().saturating_add(top_gap);
-        let shortcuts = Rect::new(
-            inner.x,
-            inner.bottom().saturating_sub(shortcuts_height),
-            inner.width,
-            shortcuts_height,
-        );
-        let status_line = if status_line_height > 0 {
-            Rect::new(
-                inner.x,
-                shortcuts.y.saturating_sub(status_line_height),
-                inner.width,
-                status_line_height,
-            )
-        } else {
-            Rect::default()
-        };
-        let prompt_bottom = if status_line.height > 0 {
-            status_line.y
-        } else {
-            shortcuts.y
-        };
-        let prompt = if prompt_height > 0 {
-            Rect::new(
-                inner.x,
-                prompt_bottom
-                    .saturating_sub(prompt_height)
-                    .saturating_sub(prompt_gap),
-                inner.width,
-                prompt_height,
-            )
+        let status_line_height = status_line_height.min(inner.height.saturating_sub(reserved));
+        if status_line_height > 0 {
+            constraints.push(Constraint::Length(status_line_height));
+        }
+        constraints.push(Constraint::Length(shortcuts_height));
+        let chunks = Layout::vertical(constraints).split(inner);
+        let mut index = 0usize;
+        let header = chunks[index];
+        index += 1;
+        if top_gap > 0 {
+            index += 1;
+        }
+        let (transcript, rail) = split_transcript(chunks[index]);
+        index += 1;
+        let turn_status = if turn_status_height > 0 {
+            index += 1;
+            let rect = chunks[index];
+            index += 1;
+            rect
         } else {
             Rect::default()
         };
         let banner = if banner_height > 0 {
-            let bottom = prompt.y.saturating_sub(u16::from(!compact));
-            Rect::new(
-                inner.x,
-                bottom.saturating_sub(banner_height),
-                inner.width,
-                banner_height,
-            )
+            index += 1;
+            let rect = chunks[index];
+            index += 1;
+            rect
         } else {
             Rect::default()
         };
-        let turn_status = if turn_status_height > 0 {
-            let banner_anchor = if banner.height > 0 {
-                banner.y.saturating_sub(u16::from(!compact))
-            } else {
-                prompt.y
-            };
-            Rect::new(
-                inner.x,
-                banner_anchor.saturating_sub(turn_status_height),
-                inner.width,
-                turn_status_height,
-            )
+        if prompt_gap > 0 {
+            index += 1;
+        }
+        let prompt = chunks[index];
+        index += 1;
+        let status_line = if status_line_height > 0 {
+            let rect = chunks[index];
+            index += 1;
+            rect
         } else {
             Rect::default()
         };
-        let transcript_bottom = if turn_status.height > 0 {
-            turn_status.y.saturating_sub(u16::from(!compact))
-        } else if banner.height > 0 {
-            banner.y.saturating_sub(u16::from(!compact))
-        } else {
-            prompt.y
-        };
-        let transcript_height = transcript_bottom.saturating_sub(transcript_y);
-        let (transcript, rail) = split_transcript(Rect::new(
-            inner.x,
-            transcript_y,
-            inner.width,
-            transcript_height,
-        ));
+        let shortcuts = chunks[index];
 
         Self {
             header,
@@ -240,6 +207,7 @@ pub struct AgentViewLayoutParams {
 pub(crate) struct PromptRenderState<'a> {
     pub mode: PromptMode,
     pub running: bool,
+    pub focused: bool,
     pub title: &'a str,
     pub model: &'a str,
     pub viewport: &'a PromptViewport,
@@ -267,7 +235,9 @@ impl AgentView {
         let inner_width = area.width.saturating_sub(if compact { 2 } else { 4 });
         let prompt_width = inner_width.saturating_sub(6).max(1) as usize;
         let wrapped = wrapped_prompt_lines(prompt_text, prompt_width);
-        let prompt_floor: u16 = if compact { 3 } else { 4 };
+        // Grok's prompt is vpad_top + textarea rows + one info/divider row.
+        // The one-line empty prompt is therefore three rows in every mode.
+        let prompt_floor: u16 = 3;
         let prompt_cap: u16 = if compact { 6 } else { 8 };
         let prompt_height = prompt_floor
             .saturating_add(wrapped.saturating_sub(1) as u16)
@@ -285,12 +255,8 @@ impl AgentView {
     }
 
     pub fn prompt_label(mode: PromptMode, running: bool) -> &'static str {
-        match (mode, running) {
-            (PromptMode::Steer, true) => " ! ",
-            (PromptMode::Steer, false) => " ~ ",
-            (PromptMode::Queue, true) => " > ",
-            (PromptMode::Queue, false) => " · ",
-        }
+        let _ = (mode, running);
+        "❯ "
     }
 
     pub fn mode_label(mode: PromptMode) -> &'static str {
@@ -307,129 +273,154 @@ impl AgentView {
         state: PromptRenderState<'_>,
         theme: &Theme,
     ) {
-        if area.width == 0 || area.height == 0 {
+        if area.width < 4 || area.height == 0 {
             return;
         }
-        let accent = theme.accent_user;
-        let border = if state.running {
-            accent
-        } else {
-            theme.bg_light
-        };
-        let mode_name = Self::mode_label(state.mode);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border).bg(theme.bg_base))
-            .style(Style::default().bg(theme.bg_base))
-            .title(Span::styled(
-                format!(" {mode_name} "),
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            ))
-            .title_alignment(ratatui::layout::Alignment::Right);
-        frame.render_widget(block, area);
+        let focused = state.focused;
+        let cursor = Self::render_prompt_buffer(frame.buffer_mut(), area, state, theme);
+        if focused && let Some((x, y)) = cursor {
+            frame.set_cursor_position(Position::new(x, y));
+        }
+    }
 
-        let inner = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
+    /// Buffer-level prompt renderer. Keeping this separate from `Frame` makes
+    /// the exact cell contract testable without a terminal backend.
+    pub(crate) fn render_prompt_buffer(
+        buf: &mut Buffer,
+        area: Rect,
+        state: PromptRenderState<'_>,
+        theme: &Theme,
+    ) -> Option<(u16, u16)> {
+        let bg = theme.bg_base;
+        let border = if state.focused {
+            theme.text_primary
+        } else {
+            theme.gray_dim
+        };
+        buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
+
+        let content = Rect::new(
+            area.x.saturating_add(2),
+            area.y,
+            area.width.saturating_sub(4),
+            area.height,
         );
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
-        let accent_x = inner.x;
-        for y in inner.y..inner.bottom() {
-            if let Some(cell) = frame.buffer_mut().cell_mut((accent_x, y)) {
-                cell.set_char('┃');
-                cell.set_style(Style::default().fg(accent).bg(theme.bg_base));
+        let info_block = u16::from(area.height >= 3);
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(info_block),
+        ])
+        .split(content);
+        let text_area = chunks[1];
+
+        if area.height >= 3 {
+            draw_horizontal_divider(buf, area, area.y, '╭', '╮', border, bg);
+            let title = state.title.trim();
+            if !title.is_empty() && area.width >= 12 {
+                let label = format!(" {title} ");
+                let max_width = area.width.saturating_sub(6) as usize;
+                let label = fit_text(&label, max_width);
+                let x = area.right().saturating_sub(3 + label.width() as u16);
+                buf.set_string(x, area.y, label, Style::default().fg(theme.gray).bg(bg));
             }
         }
-        let text_x = inner.x.saturating_add(2);
-        let text_width = inner.width.saturating_sub(2).max(1);
-        let info_height = u16::from(inner.height >= 3);
-        let input_height = inner.height.saturating_sub(info_height).max(1);
-        let input_area = Rect::new(text_x, inner.y, text_width, input_height);
+
         let prefix = Self::prompt_label(state.mode, state.running);
         let prefix_width = prefix.width() as u16;
-        let placeholder = if state.empty {
-            "Ask DeepSeek anything…"
-        } else {
-            ""
-        };
-        let lines = if state.empty {
-            vec![Line::from(vec![
-                Span::styled(prefix, Style::default().fg(accent)),
-                Span::styled(
-                    fit_text(
-                        placeholder,
-                        text_width.saturating_sub(prefix_width) as usize,
-                    ),
-                    Style::default().fg(theme.gray_dim),
-                ),
-            ])]
-        } else {
-            state
-                .viewport
-                .lines
-                .iter()
-                .enumerate()
-                .map(|(index, line)| {
-                    let lead = if index == 0 {
-                        prefix.to_string()
-                    } else {
-                        " ".repeat(prefix_width as usize)
-                    };
-                    Line::from(Span::styled(
-                        format!("{lead}{line}"),
-                        Style::default().fg(theme.text_primary),
-                    ))
-                })
-                .collect::<Vec<_>>()
-        };
-        frame.render_widget(
-            Paragraph::new(Text::from(lines))
-                .style(Style::default().bg(theme.bg_base))
-                .wrap(Wrap { trim: false }),
-            input_area,
-        );
-
-        if info_height > 0 {
-            let info_y = inner.bottom().saturating_sub(1);
-            let left = fit_text(
-                &format!("{} · {}", state.model, state.title),
-                text_width as usize,
-            );
-            let right = if state.running { "running" } else { "idle" };
-            let right_width = right.width() as u16;
-            let buf = frame.buffer_mut();
+        if text_area.width > prefix_width {
             buf.set_string(
-                text_x,
-                info_y,
-                left,
-                Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                text_area.x,
+                text_area.y,
+                prefix,
+                Style::default().fg(theme.accent_user).bg(bg),
             );
-            if right_width < text_width {
+        }
+        let input = Rect::new(
+            text_area.x.saturating_add(prefix_width),
+            text_area.y,
+            text_area.width.saturating_sub(prefix_width),
+            text_area.height,
+        );
+        let placeholder = "Build anything";
+        for (row, line) in state.viewport.lines.iter().enumerate() {
+            let y = input.y.saturating_add(row as u16);
+            if y >= input.bottom() {
+                break;
+            }
+            let text = fit_text(line, input.width as usize);
+            if !text.is_empty() {
                 buf.set_string(
-                    text_x + text_width.saturating_sub(right_width),
-                    info_y,
+                    input.x,
+                    y,
+                    text,
+                    Style::default().fg(theme.text_primary).bg(bg),
+                );
+            }
+        }
+        if state.empty && !state.focused && input.height > 0 {
+            buf.set_string(
+                input.x,
+                input.y,
+                fit_text(placeholder, input.width as usize),
+                Style::default().fg(theme.gray).bg(bg),
+            );
+        }
+
+        if area.height >= 3 {
+            let divider_y = area.bottom().saturating_sub(1);
+            draw_horizontal_divider(buf, area, divider_y, '╰', '╯', border, bg);
+            let left = fit_text(
+                &format!(" {} · {} ", state.model, Self::mode_label(state.mode)),
+                content.width as usize,
+            );
+            buf.set_string(
+                content.x,
+                divider_y,
+                left,
+                Style::default().fg(theme.gray).bg(bg),
+            );
+            if state.viewport.lines.len() > 1 {
+                let right = " multiline ";
+                let right_x = content.right().saturating_sub(right.width() as u16);
+                buf.set_string(
+                    right_x,
+                    divider_y,
                     right,
-                    Style::default()
-                        .fg(if state.running { accent } else { theme.gray })
-                        .bg(theme.bg_base),
+                    Style::default().fg(theme.gray).bg(bg),
                 );
             }
         }
 
-        let cursor_x = text_x
-            .saturating_add(prefix_width)
-            .saturating_add(state.viewport.cursor_x as u16)
-            .min(area.right().saturating_sub(2));
-        let cursor_y = inner
-            .y
-            .saturating_add(state.viewport.cursor_y as u16)
-            .min(input_area.bottom().saturating_sub(1));
-        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+        for y in text_area.y..text_area.bottom() {
+            set_cell(buf, area.x, y, '│', border, bg);
+            set_cell(buf, area.right().saturating_sub(1), y, '│', border, bg);
+        }
+
+        if !state.focused {
+            // Grok dims unfocused content while retaining the chrome geometry.
+            for y in input.y..input.bottom() {
+                for x in input.x..input.right() {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.fg = theme.gray_dim;
+                    }
+                }
+            }
+        }
+
+        if state.focused {
+            let cursor_x = input
+                .x
+                .saturating_add(state.viewport.cursor_x as u16)
+                .min(input.right().saturating_sub(1));
+            let cursor_y = input
+                .y
+                .saturating_add(state.viewport.cursor_y as u16)
+                .min(input.bottom().saturating_sub(1));
+            Some((cursor_x, cursor_y))
+        } else {
+            None
+        }
     }
 
     pub fn render_turn_status(
@@ -495,6 +486,44 @@ impl AgentView {
             ShortcutsBar::new(&hints)
         };
         frame.render_widget(widget, area);
+    }
+}
+
+fn set_cell(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    symbol: char,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        cell.set_char(symbol);
+        cell.set_style(Style::default().fg(fg).bg(bg));
+    }
+}
+
+fn draw_horizontal_divider(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    left: char,
+    right: char,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) {
+    if area.width == 0 {
+        return;
+    }
+    for x in area.x..area.right() {
+        let symbol = if x == area.x {
+            left
+        } else if x == area.right().saturating_sub(1) {
+            right
+        } else {
+            '─'
+        };
+        set_cell(buf, x, y, symbol, fg, bg);
     }
 }
 
@@ -608,8 +637,66 @@ mod tests {
 
     #[test]
     fn prompt_labels_expose_queue_and_steer_modes() {
-        assert_eq!(AgentView::prompt_label(PromptMode::Queue, true), " > ");
-        assert_eq!(AgentView::prompt_label(PromptMode::Steer, true), " ! ");
+        assert_eq!(AgentView::prompt_label(PromptMode::Queue, true), "❯ ");
+        assert_eq!(AgentView::prompt_label(PromptMode::Steer, true), "❯ ");
         assert_eq!(AgentView::mode_label(PromptMode::Steer), "steer");
+    }
+
+    #[test]
+    fn prompt_uses_grok_box_geometry_and_arrow_prefix() {
+        let area = Rect::new(0, 0, 32, 3);
+        let mut buffer = Buffer::empty(area);
+        let viewport = PromptViewport {
+            lines: vec![String::new()],
+            cursor_x: 0,
+            cursor_y: 0,
+        };
+        AgentView::render_prompt_buffer(
+            &mut buffer,
+            area,
+            PromptRenderState {
+                mode: PromptMode::Queue,
+                running: false,
+                focused: true,
+                title: "Session 1",
+                model: "deepseek",
+                viewport: &viewport,
+                empty: true,
+            },
+            Theme::current(),
+        );
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
+        assert_eq!(buffer[(31, 0)].symbol(), "╮");
+        assert_eq!(buffer[(0, 1)].symbol(), "│");
+        assert_eq!(buffer[(2, 1)].symbol(), "❯");
+        assert_eq!(buffer[(0, 2)].symbol(), "╰");
+        assert_eq!(buffer[(31, 2)].symbol(), "╯");
+    }
+
+    #[test]
+    fn reference_sizes_keep_all_rows_inside_the_terminal() {
+        let mut shell = AppShell::default();
+        for (width, height) in [(40, 12), (80, 24), (120, 40)] {
+            let layout = AgentView::layout_with_prompt(
+                &mut shell,
+                Rect::new(0, 0, width, height),
+                "hello",
+                true,
+                true,
+            );
+            for rect in [
+                layout.header,
+                layout.transcript,
+                layout.turn_status,
+                layout.banner,
+                layout.prompt,
+                layout.status_line,
+                layout.shortcuts,
+            ] {
+                assert!(rect.right() <= width);
+                assert!(rect.bottom() <= height);
+            }
+            assert!(layout.transcript.y + layout.transcript.height <= layout.prompt.y);
+        }
     }
 }
