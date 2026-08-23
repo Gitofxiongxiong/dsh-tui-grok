@@ -438,6 +438,19 @@ pub struct SessionSearchValue {
     pub has_more: bool,
 }
 
+/// One path-only file reference candidate returned by the host provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileReferenceCandidate {
+    pub path: String,
+    pub kind: String,
+}
+
+/// Value returned by `fileReferences.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileReferencesListValue {
+    pub items: Vec<FileReferenceCandidate>,
+}
+
 /// Value returned by `session.create`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

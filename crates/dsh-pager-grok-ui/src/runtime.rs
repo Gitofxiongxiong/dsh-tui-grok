@@ -40,7 +40,8 @@ use crate::geometry::{
     insert_text_line,
 };
 use crate::host_adapter::{
-    AgentSnapshot, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot, MediaSnapshot,
+    AgentSnapshot, FeatureStatus, FileSearchRow, FileSearchSnapshot, GrokHostSnapshot,
+    MediaSnapshot,
 };
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
 use crate::modal_window_state::ModalWindowState;
@@ -75,6 +76,16 @@ struct PendingQueueMutation {
     operation: OperationKey,
     item_id: DshQueueItemId,
     base_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MediaPreviewBuffer {
+    attachment_id: String,
+    media_type: String,
+    data: String,
+    bytes: Option<u64>,
+    width: Option<u16>,
+    height: Option<u16>,
 }
 
 /// Run the default Grok-derived UI until the user closes it.
@@ -236,9 +247,11 @@ struct UiState {
     file_search_editor: PromptEditor,
     file_search_selected_id: Option<String>,
     file_search_revision: u64,
+    file_search_result: Option<FileSearchSnapshot>,
     suggestion_selected: usize,
     suggestion_dismissed: bool,
     image_selected: usize,
+    media_preview: Option<MediaPreviewBuffer>,
     agent_task_selected: usize,
     agent_subagents: Vec<crate::host_adapter::SubagentRow>,
     dashboard: DashboardModel,
@@ -275,8 +288,9 @@ impl UiState {
         let background = Block::default().style(Style::default().bg(theme.bg_base));
         frame.render_widget(background, area);
 
-        let snapshot =
+        let mut snapshot =
             GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
+        self.apply_file_search_result(&mut snapshot);
         self.sync_dashboard(control_plane);
         self.reconcile_snapshot(&snapshot);
         let suggestions_visible = !self.suggestion_dismissed
@@ -485,6 +499,17 @@ impl UiState {
                 .queue
                 .first()
                 .map(|item| DshQueueItemId::new(item.id.clone()).to_string());
+        }
+    }
+
+    fn apply_file_search_result(&self, snapshot: &mut GrokHostSnapshot) {
+        let Some(result) = self.file_search_result.as_ref() else {
+            return;
+        };
+        if result.revision >= snapshot.file_search.revision
+            && result.query == self.file_search_editor.text()
+        {
+            snapshot.file_search = result.clone();
         }
     }
 
@@ -849,6 +874,7 @@ impl UiState {
                 content.content,
                 &snapshot.media,
                 self.image_selected,
+                self.media_preview.as_ref(),
                 theme,
             );
         }
@@ -1003,6 +1029,7 @@ impl UiState {
                 self.file_search_editor.reset();
                 self.file_search_selected_id = None;
                 self.file_search_revision = 0;
+                self.file_search_result = None;
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
@@ -1016,6 +1043,7 @@ impl UiState {
             }
             ShellAction::OpenImagePreview => {
                 self.image_selected = 0;
+                self.media_preview = None;
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
@@ -1337,6 +1365,7 @@ impl UiState {
                 self.file_search_editor.reset();
                 self.file_search_selected_id = None;
                 self.file_search_revision = 0;
+                self.file_search_result = None;
                 self.status = Some("File search closed".into());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1346,16 +1375,20 @@ impl UiState {
                 self.move_file_search_selection(1, session);
             }
             KeyCode::Enter => {
-                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                let mut snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
                 );
+                self.apply_file_search_result(&mut snapshot);
                 if let Some(row) =
                     snapshot.file_search.rows.iter().find(|row| {
                         Some(row.id.as_str()) == self.file_search_selected_id.as_deref()
                     })
                 {
-                    self.status = Some(format!("File preview pending: {}:{}", row.path, row.line));
+                    let mention = format_file_reference(&row.path);
+                    self.prompt.insert_paste(&mention);
+                    self.shell.close_overlay();
+                    self.status = Some(format!("Added file reference {mention}"));
                 } else {
                     self.status = Some(file_search_status_message(&snapshot.file_search));
                 }
@@ -1398,12 +1431,42 @@ impl UiState {
             },
             &context,
         )?;
+        if let Some(value) = sink.take_file_references() {
+            let query = self.file_search_editor.text().to_string();
+            self.file_search_result = Some(FileSearchSnapshot {
+                status: FeatureStatus::Available,
+                query,
+                revision: self.file_search_revision,
+                selected_id: None,
+                rows: value
+                    .items
+                    .into_iter()
+                    .map(|item| FileSearchRow {
+                        id: format!("{}:{}", item.kind, item.path),
+                        path: item.path,
+                        line: 0,
+                        snippet: item.kind,
+                    })
+                    .collect(),
+                diagnostic: None,
+            });
+        } else if matches!(receipt.status, UiEffectStatus::Pending) {
+            self.file_search_result = Some(FileSearchSnapshot {
+                status: FeatureStatus::Pending,
+                query: self.file_search_editor.text().to_string(),
+                revision: self.file_search_revision,
+                selected_id: None,
+                rows: Vec::new(),
+                diagnostic: None,
+            });
+        }
         self.status = Some(receipt_status_message(&receipt, "File search"));
         Ok(())
     }
 
     fn move_file_search_selection(&mut self, delta: isize, session: &SessionState) {
-        let snapshot = GrokHostSnapshot::from_session_with_control_plane(session, None);
+        let mut snapshot = GrokHostSnapshot::from_session_with_control_plane(session, None);
+        self.apply_file_search_result(&mut snapshot);
         if snapshot.file_search.rows.is_empty() {
             return;
         }
@@ -1489,6 +1552,16 @@ impl UiState {
             },
             &context,
         )?;
+        if let Some(preview) = sink.take_attachment_preview() {
+            self.media_preview = Some(MediaPreviewBuffer {
+                attachment_id: preview.attachment_id,
+                media_type: preview.media_type,
+                data: preview.data,
+                bytes: preview.bytes,
+                width: preview.width,
+                height: preview.height,
+            });
+        }
         self.status = Some(receipt_status_message(&receipt, "Image preview"));
         Ok(())
     }
@@ -2565,6 +2638,7 @@ fn render_image_preview_content(
     area: Rect,
     snapshot: &MediaSnapshot,
     selected: usize,
+    preview: Option<&MediaPreviewBuffer>,
     theme: &Theme,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -2614,10 +2688,35 @@ fn render_image_preview_content(
                 };
                 buffer.set_string(area.x, y, truncate_str(&line, area.width as usize), style);
             }
+            let preview_line = preview
+                .filter(|preview| {
+                    snapshot
+                        .rows
+                        .get(index)
+                        .and_then(|row| row.attachment_id.as_deref())
+                        == Some(preview.attachment_id.as_str())
+                })
+                .map(|preview| {
+                    format!(
+                        "Loaded {} · {} bytes · {} base64 chars · {}x{}",
+                        preview.media_type,
+                        preview
+                            .bytes
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                        preview.data.len(),
+                        preview
+                            .width
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                        preview
+                            .height
+                            .map_or_else(|| "?".into(), |value| value.to_string()),
+                    )
+                })
+                .unwrap_or_else(|| "Enter to load attachment bytes from host".into());
             buffer.set_string(
                 area.x,
                 area.bottom().saturating_sub(2),
-                "Metadata available; bitmap bytes/preview effect are still pending from host",
+                truncate_str(&preview_line, area.width as usize),
                 Style::default().fg(theme.gray).bg(theme.bg_base),
             );
         }
@@ -2717,6 +2816,20 @@ fn media_status_message(snapshot: &MediaSnapshot) -> String {
     }
 }
 
+fn format_file_reference(path: &str) -> String {
+    if path
+        .chars()
+        .any(|character| character.is_whitespace() || character == '"')
+    {
+        format!(
+            "@{}",
+            serde_json::to_string(path).unwrap_or_else(|_| format!("\"{path}\""))
+        )
+    } else {
+        format!("@{path}")
+    }
+}
+
 fn agent_status_message_with_subagents(snapshot: &AgentSnapshot, subagents: usize) -> String {
     match snapshot.status {
         FeatureStatus::Available => format!(
@@ -2764,11 +2877,14 @@ fn prompt_admission_message(status: &UiEffectStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::format_file_reference;
     use super::prompt_admission_message;
     use super::prompt_receipt_admitted;
     use super::render_file_search_content;
     use super::steer_capability_available;
-    use super::{UiState, render_agent_tasks_content, render_image_preview_content};
+    use super::{
+        MediaPreviewBuffer, UiState, render_agent_tasks_content, render_image_preview_content,
+    };
     use crate::effects::UiEffectStatus;
     use crate::host_adapter::{
         AgentSnapshot, CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot,
@@ -2966,6 +3082,7 @@ mod tests {
                 rows: Vec::new(),
             },
             0,
+            None,
             Theme::current(),
         );
         let image_text = buffer
@@ -2992,5 +3109,52 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(task_text.contains("Waiting for authoritative agent task snapshot"));
+    }
+
+    #[test]
+    fn media_preview_buffer_is_rendered_only_for_matching_attachment() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        let snapshot = MediaSnapshot {
+            status: FeatureStatus::Available,
+            rows: vec![crate::host_adapter::MediaRow {
+                id: "row:1".into(),
+                attachment_id: Some("img-1".into()),
+                media_type: Some("image/png".into()),
+                name: Some("plot".into()),
+            }],
+        };
+        let preview = MediaPreviewBuffer {
+            attachment_id: "img-1".into(),
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+            bytes: Some(5),
+            width: Some(4),
+            height: Some(3),
+        };
+        render_image_preview_content(
+            &mut buffer,
+            Rect::new(1, 1, 78, 10),
+            &snapshot,
+            0,
+            Some(&preview),
+            Theme::current(),
+        );
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Loaded image/png"));
+        assert!(text.contains("5 bytes"));
+        assert!(text.contains("8 base64 chars"));
+    }
+
+    #[test]
+    fn file_reference_mentions_quote_paths_with_spaces() {
+        assert_eq!(format_file_reference("src/main.rs"), "@src/main.rs");
+        assert_eq!(
+            format_file_reference("docs/my file.md"),
+            "@\"docs/my file.md\""
+        );
     }
 }

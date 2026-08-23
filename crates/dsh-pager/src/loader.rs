@@ -1,14 +1,14 @@
 use dsh_pager_protocol::{
-    AcceptedResult, ApiResult, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
-    SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
-    SessionListValue, SessionPromptParams, SessionPromptResult, SessionRenameParams,
-    SessionRenameResult, SessionSearchValue, SessionUpdateQueueParams, SubagentAddress,
-    SubagentHistoryValue, SubagentInterruptParams, SubagentInterruptResult, SubagentListValue,
-    SubagentMode, SubagentPromptParams, SubagentPromptResult, TuiAttachParams, TuiAttachResult,
-    TuiDetachParams, TuiHelloResult, TuiInteractionResponse, TuiRespondParams, TuiRespondResult,
-    TuiSubscribeParams, TuiSubscribeResult, TuiSubscribeScope, WorkspaceArchiveSessionParams,
-    WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
-    WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
+    AcceptedResult, ApiResult, FileReferencesListValue, PromptContentPart, PromptMode, QueueAction,
+    SessionCancelParams, SessionCreateValue, SessionForkParams, SessionForkResult,
+    SessionHistoryValue, SessionListValue, SessionPromptParams, SessionPromptResult,
+    SessionRenameParams, SessionRenameResult, SessionSearchValue, SessionUpdateQueueParams,
+    SubagentAddress, SubagentHistoryValue, SubagentInterruptParams, SubagentInterruptResult,
+    SubagentListValue, SubagentMode, SubagentPromptParams, SubagentPromptResult, TuiAttachParams,
+    TuiAttachResult, TuiDetachParams, TuiHelloResult, TuiInteractionResponse, TuiRespondParams,
+    TuiRespondResult, TuiSubscribeParams, TuiSubscribeResult, TuiSubscribeScope,
+    WorkspaceArchiveSessionParams, WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams,
+    WorkspaceInsertSessionBeforeParams, WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -110,6 +110,20 @@ pub fn search_sessions(
     query: &str,
 ) -> PagerResult<SessionSearchValue> {
     api_call(transport, "session.search", json!({ "query": query }))
+}
+
+/// Discover path-only file references through the host provider. This is
+/// distinct from `session.search`, which searches durable conversation text.
+pub fn list_file_references(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    query: &str,
+) -> PagerResult<FileReferencesListValue> {
+    api_call(
+        transport,
+        "fileReferences.list",
+        json!({ "sessionId": session_id, "query": query }),
+    )
 }
 
 /// Authorized image attachment bytes for the media preview surface.

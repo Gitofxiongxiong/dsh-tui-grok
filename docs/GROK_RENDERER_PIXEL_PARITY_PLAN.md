@@ -78,6 +78,34 @@ DSH SessionState / ControlPlaneStore
 因此，当前界面“接近但不一致”的根因不是缺少 ratatui 能力，而是核心 renderer
 仍然是 DSH 自建实现。
 
+### 2.1 2026-08-23 执行状态
+
+本表只记录能力链路是否闭合，不把它等同于 Grok 像素级 renderer 已迁移：
+
+| 能力 | Host/Effect 状态 | Renderer 状态 | 下一出口 |
+|---|---|---|---|
+| Markdown / Diff | 结构化 block、stable ID、copy/link 已保留 | 仍是 `RichTranscript` 简化实现 | vendor Grok markdown/diff + scrollback block 闭包 |
+| File Search | `fileReferences.list` 正式 ApiProxy/TUI 方法；query revision、stable row、unsupported/error 已接入 | overlay 仍是过渡 renderer | vendor Grok file-search controller/list，并接同一 result DTO |
+| Suggestion / history | host projection、候选 viewport、accept/dismiss、prompt history 已接入 | 仍是 runtime 简化 banner/controller | vendor Grok suggestion/history 状态机 |
+| Image / media | `session.attachment`、1 MiB 有界读取、独立 preview buffer 已接入 | 当前只显示列表和已加载元数据 | vendor Grok image block/preview，按终端能力绘制或 fallback |
+| Workspace | list/group/peek/attach、archive、session reorder 已接真实 RPC | 当前是简化 Dashboard modal | vendor Grok workspace/dashboard tree；补 create/rename/delete/workspace reorder |
+| Agent / task / subagent | job/subagent catalog、stream status、interrupt effect 已接 | 当前是简化 task surface | vendor Grok AgentView/task/subagent pane 与主绘制顺序 |
+
+已经建立并必须继续沿用的动作边界：
+
+```text
+Grok-derived input
+    -> UiIntent
+    -> UiEffect
+    -> UiEffectReceipt
+    -> authoritative query/snapshot/notification
+    -> renderer DTO
+```
+
+其中 File Search 的权威结果来自有 revision 的 unary query response，Media preview
+来自有界的 attachment response；两者都只进入 host adapter 的临时 result buffer，
+不写入 `SessionState`，也不允许 view 直接调用 RPC。
+
 ## 3. 复用边界
 
 ### 3.1 必须直接复用的前端代码和能力闭包
@@ -320,6 +348,21 @@ width/grapheme/hit-map 规则，不能另造 line viewer 几何。
 
 完成标准：生产 runtime 不再存在第二套同职责 renderer；所有临时 fallback 都有
 删除记录或明确保留理由。
+
+### P6：执行顺序（当前）
+
+能力 seam 已经具备后，不再继续扩展 `runtime.rs` 的平行视觉实现。后续按以下顺序
+推进，每一项都必须同时迁移上游 renderer、上游交互测试和 DSH adapter fixture：
+
+1. `PromptWidget` + `AgentViewLayout`，替换手写 prompt/header/footer 几何；
+2. `ScrollbackPane` + Markdown/Diff/Image block，替换 `RichTranscript` 生产路径；
+3. File Search + Suggestion/history controller，复用同一 prompt/focus/Esc ladder；
+4. Workspace/Dashboard + Agent/Task/Subagent pane，替换当前简化 modal；
+5. reference runner、semantic cell diff、PTY/backend matrix 全通过后删除 frozen
+   `runtime.rs` fallback shell。
+
+门禁：前四项任一能力仍依赖简化 renderer 时，不得执行第 5 项；也不得以“真实
+RPC 已接通”为理由把对应 Grok renderer 闭包标记为完成。
 
 ## 4A. 能力状态和 host contract
 

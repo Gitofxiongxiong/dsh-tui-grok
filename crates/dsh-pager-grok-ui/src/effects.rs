@@ -216,6 +216,8 @@ pub struct DshEffectSink<'a> {
     pub transport: &'a mut RpcTransport,
     pub next_request: u64,
     completed: HashSet<OperationKey>,
+    last_attachment_preview: Option<dsh_pager::AttachmentPreview>,
+    last_file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
 }
 
 impl DshEffectSink<'_> {
@@ -224,7 +226,20 @@ impl DshEffectSink<'_> {
             transport,
             next_request: 1,
             completed: HashSet::new(),
+            last_attachment_preview: None,
+            last_file_references: None,
         }
+    }
+
+    /// Return the bounded attachment payload admitted by the most recent
+    /// media-preview effect. The receipt remains admission-only; this buffer
+    /// is a host adapter handoff for the ephemeral preview surface.
+    pub fn take_attachment_preview(&mut self) -> Option<dsh_pager::AttachmentPreview> {
+        self.last_attachment_preview.take()
+    }
+
+    pub fn take_file_references(&mut self) -> Option<dsh_pager_protocol::FileReferencesListValue> {
+        self.last_file_references.take()
     }
 }
 
@@ -479,24 +494,22 @@ impl DshEffectSink<'_> {
             }
             UiEffect::FileSearchQuery {
                 mut operation,
-                query: _,
+                query,
                 revision: _,
             } => {
                 self.prepare_operation(&mut operation);
                 if self.completed.contains(&operation) {
                     return Ok(self.duplicate_receipt(operation));
                 }
-                // The current Harness TUI protocol has no file-reference
-                // discovery method. Keep this explicit so a capability bit
-                // cannot turn an unregistered RPC into a fake successful
-                // search. The effect remains the stable seam for the host
-                // protocol addition.
-                (
-                    operation,
-                    Err(dsh_pager::PagerError::new(
-                        "filesystem file search is unsupported by the current Harness TUI protocol",
-                    )),
-                )
+                let result = dsh_pager::list_file_references(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    &query,
+                );
+                if let Ok(rows) = &result {
+                    self.last_file_references = Some(rows.clone());
+                }
+                (operation, result.map(|_| true))
             }
             UiEffect::PreviewMedia {
                 mut operation,
@@ -511,6 +524,9 @@ impl DshEffectSink<'_> {
                     operation.session_id.as_str(),
                     &attachment_id,
                 );
+                if let Ok(preview) = &result {
+                    self.last_attachment_preview = Some(preview.clone());
+                }
                 (operation, result.map(|preview| !preview.data.is_empty()))
             }
             UiEffect::ReorderSession {
