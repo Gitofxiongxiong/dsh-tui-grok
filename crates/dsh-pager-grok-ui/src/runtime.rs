@@ -72,7 +72,7 @@ use crate::views::{
     status_bar::StatusBar,
     suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
-    transcript::RichTranscript,
+    transcript::ScrollbackPane,
 };
 use serde_json::json;
 use xai_ratatui_textarea::MouseAction;
@@ -241,6 +241,7 @@ struct UiState {
     scroll: usize,
     transcript_width: Option<u16>,
     scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
+    scrollback_pane: ScrollbackPane,
     picker: PickerState,
     picker_entry_count: usize,
     modal: ModalWindowState,
@@ -890,8 +891,9 @@ impl UiState {
     ) {
         let theme = Theme::current();
         let mut lines = Vec::new();
-        let entries = scrollback.render_entries();
-        if entries.is_empty() {
+        let render_width = content.width.saturating_sub(1).max(1) as usize;
+        self.scrollback_pane.sync(scrollback, render_width, *theme);
+        if self.scrollback_pane.is_empty() {
             self.scroll = 0;
             self.scroll_anchor = None;
             lines.push(Line::from(Span::styled(
@@ -899,15 +901,14 @@ impl UiState {
                 Style::default().fg(theme.gray),
             )));
         } else {
-            let render_width = content.width.saturating_sub(1).max(1) as usize;
-            let rich = RichTranscript::new(&entries, render_width, *theme);
-            let total_height = rich.total_height();
+            let total_height = self.scrollback_pane.total_height(scrollback);
             let mut max_scroll = total_height.saturating_sub(content.height as usize);
             self.scroll = self.scroll.min(max_scroll);
             let mut scroll_top = max_scroll.saturating_sub(self.scroll);
             if self.transcript_width != Some(content.width) {
                 if let Some(anchor) = self.scroll_anchor.take()
-                    && let Some(restored) = rich.scroll_for_anchor(anchor)
+                    && let Some(restored) =
+                        self.scrollback_pane.scroll_for_anchor(scrollback, anchor)
                 {
                     scroll_top = restored;
                 }
@@ -916,7 +917,10 @@ impl UiState {
             max_scroll = total_height.saturating_sub(content.height as usize);
             scroll_top = scroll_top.min(max_scroll);
             self.scroll = max_scroll.saturating_sub(scroll_top);
-            for paint in rich.visible_lines(scroll_top, content.height) {
+            for paint in self
+                .scrollback_pane
+                .visible_lines(scrollback, scroll_top, content.height)
+            {
                 let text = paint.line.to_string();
                 while lines.len() < paint.screen_y as usize {
                     lines.push(Line::from(""));
@@ -934,7 +938,7 @@ impl UiState {
                 );
                 self.geometry_lines.push(geometry);
             }
-            self.scroll_anchor = rich.anchor_at(scroll_top);
+            self.scroll_anchor = self.scrollback_pane.anchor_at(scrollback, scroll_top);
         }
         let block = Block::default()
             .borders(Borders::LEFT)

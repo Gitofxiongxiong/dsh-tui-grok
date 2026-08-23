@@ -4,6 +4,9 @@
 //! user-visible role, indentation and copy projection so the runtime never
 //! needs to inspect protocol JSON or flatten a tool result itself.
 
+use std::collections::HashMap;
+
+use dsh_pager::scrollback::{Scrollback, compute_paint_window};
 use dsh_pager::{
     DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderKind, ScrollAnchor,
 };
@@ -41,6 +44,156 @@ pub struct RichTranscript {
     width: usize,
     entries: Vec<RichEntry>,
     total_height: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPaneEntry {
+    entry: DshRenderEntry,
+    lines: Vec<RichPaintLine>,
+}
+
+/// Production scrollback adapter.
+///
+/// DSH `Scrollback` owns entry identity, partial replacement, height indexing
+/// and anchor restoration.  This cache owns only the Grok semantic block lines
+/// for entries that are currently known.  It reports those actual heights back
+/// to the DSH index and then paints through the shared `ScrollbackLayout`.
+#[derive(Debug, Default)]
+pub struct ScrollbackPane {
+    width: usize,
+    entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
+}
+
+impl ScrollbackPane {
+    pub fn clear(&mut self) {
+        self.width = 0;
+        self.entries.clear();
+    }
+
+    pub fn sync(&mut self, scrollback: &mut Scrollback, width: usize, theme: Theme) {
+        let width = width.max(1);
+        if self.width != width {
+            self.entries.clear();
+        }
+        self.width = width;
+        let entries = scrollback.render_entries();
+        let mut live = HashMap::with_capacity(entries.len());
+        for (entry_idx, entry) in entries.into_iter().enumerate() {
+            let cached = self.entries.remove(&entry.id);
+            let cached = match cached {
+                Some(cached) if cached.entry == entry => cached,
+                _ => CachedPaneEntry {
+                    lines: semantic_lines(&entry, width, theme),
+                    entry: entry.clone(),
+                },
+            };
+            scrollback.set_rendered_height(width, entry_idx, cached.lines.len().saturating_add(1));
+            live.insert(entry.id, cached);
+        }
+        self.entries = live;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn total_height(&mut self, scrollback: &mut Scrollback) -> usize {
+        scrollback.total_height(self.width.max(1))
+    }
+
+    pub fn anchor_at(
+        &mut self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+    ) -> Option<ScrollAnchor> {
+        let (total_height, entries) = {
+            let layout = scrollback.layout(self.width.max(1));
+            (layout.total_height, layout.entries.to_vec())
+        };
+        let top = scroll_top.min(total_height.checked_sub(1)?);
+        let item = entries.iter().rev().find(|item| item.start_y <= top)?;
+        let entry = scrollback.entries().get(item.entry_idx)?;
+        Some(ScrollAnchor {
+            entry_id: entry.id,
+            intra_row: top
+                .saturating_sub(item.start_y)
+                .min(item.height.saturating_sub(1)),
+        })
+    }
+
+    pub fn scroll_for_anchor(
+        &mut self,
+        scrollback: &mut Scrollback,
+        anchor: ScrollAnchor,
+    ) -> Option<usize> {
+        let entry_idx = scrollback.entry_index(anchor.entry_id)?;
+        let item = {
+            let layout = scrollback.layout(self.width.max(1));
+            *layout.entries.get(entry_idx)?
+        };
+        Some(
+            item.start_y
+                .saturating_add(anchor.intra_row.min(item.height.saturating_sub(1))),
+        )
+    }
+
+    pub fn visible_lines(
+        &mut self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+        viewport_height: u16,
+    ) -> Vec<RichPaintLine> {
+        if viewport_height == 0 {
+            return Vec::new();
+        }
+        let (total_height, entries) = {
+            let layout = scrollback.layout(self.width.max(1));
+            (layout.total_height, layout.entries.to_vec())
+        };
+        let top = scroll_top.min(total_height);
+        let range = compute_paint_window(&entries, top, viewport_height as usize);
+        let mut painted = Vec::new();
+        for entry_idx in range {
+            let Some(entry) = scrollback.entries().get(entry_idx) else {
+                continue;
+            };
+            let Some(cached) = self.entries.get(&entry.id) else {
+                continue;
+            };
+            for line in &cached.lines {
+                let virtual_y = entries[entry_idx].start_y.saturating_add(line.line_index);
+                if virtual_y < top {
+                    continue;
+                }
+                let screen_y = virtual_y.saturating_sub(top);
+                if screen_y >= viewport_height as usize {
+                    break;
+                }
+                let mut line = line.clone();
+                line.screen_y = screen_y as u16;
+                painted.push(line);
+            }
+        }
+        painted
+    }
+}
+
+fn semantic_lines(entry: &DshRenderEntry, width: usize, theme: Theme) -> Vec<RichPaintLine> {
+    let row = TranscriptRow::from(entry.clone());
+    let semantic = render_row(&row, theme);
+    let mut lines = Vec::new();
+    for (source_index, line) in semantic.iter().enumerate() {
+        for wrapped_line in word_wrap_line(line, width) {
+            lines.push(RichPaintLine {
+                entry_id: entry.id,
+                line_index: lines.len(),
+                header: source_index == 0,
+                screen_y: 0,
+                line: wrapped_line,
+            });
+        }
+    }
+    lines
 }
 
 impl RichTranscript {
@@ -440,6 +593,8 @@ fn color_for_kind(kind: DshRenderKind, theme: Theme) -> ratatui::style::Color {
 mod tests {
     use super::*;
     use dsh_pager::{DshRenderBlock, DshRenderContent, DshRenderEntryId};
+    use dsh_pager_protocol::{HistoryEntry, SessionEvent};
+    use serde_json::json;
 
     fn row() -> TranscriptRow {
         TranscriptRow {
@@ -636,5 +791,39 @@ mod tests {
         render_diff(&mut diff, None, "old", "new", theme, 0);
         assert_eq!(diff[0].spans[0].style.bg, Some(theme.diff_delete_bg));
         assert_eq!(diff[1].spans[0].style.bg, Some(theme.diff_insert_bg));
+    }
+
+    #[test]
+    fn scrollback_pane_uses_dsh_identity_and_semantic_height() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "assistant/message".into(),
+                seq: 4,
+                time: 1.0,
+                data: json!({
+                    "turn": 0,
+                    "step": 0,
+                    "message": {
+                        "content": [{ "type": "text", "text": "a semantic block" }]
+                    }
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        });
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, *Theme::current());
+        let lines = pane.visible_lines(&mut scrollback, 0, 20);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.line.to_string().contains("semantic block"))
+        );
+        let anchor = pane.anchor_at(&mut scrollback, 1).expect("pane anchor");
+        assert_eq!(anchor.entry_id, DshRenderEntryId::Event { seq: 4 });
+        assert_eq!(pane.scroll_for_anchor(&mut scrollback, anchor), Some(1));
     }
 }

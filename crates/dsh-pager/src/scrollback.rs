@@ -445,6 +445,25 @@ impl Scrollback {
         Some(self.entry_lines(width, index)?.to_vec())
     }
 
+    /// Supply the measured height from a renderer that owns richer semantic
+    /// block layout than the compatibility plain-text cache.  The entry and
+    /// its stable identity remain owned by `Scrollback`; this boundary only
+    /// replaces the width-specific height used by its Fenwick index.
+    pub fn set_rendered_height(&mut self, width: usize, entry_idx: usize, height: usize) -> bool {
+        let width = width.max(1);
+        self.ensure_layout(width);
+        let height = height.max(1);
+        let Some(entry) = self.entries.get_mut(entry_idx) else {
+            return false;
+        };
+        entry.measured = Some(MeasuredHeight { width, height });
+        let changed = self.heights.set(entry_idx, height);
+        if changed {
+            self.layout_snapshot_dirty = true;
+        }
+        changed
+    }
+
     pub fn entry_index(&self, id: EntryId) -> Option<usize> {
         self.positions.get(&id).copied()
     }
@@ -678,6 +697,13 @@ impl Scrollback {
     }
 
     fn measure_entry(&mut self, width: usize, index: usize) -> Option<usize> {
+        if let Some(measured) = self
+            .entries
+            .get(index)
+            .and_then(|entry| entry.measured_height(width))
+        {
+            return Some(measured);
+        }
         let actual = self
             .entries
             .get_mut(index)?
@@ -1070,5 +1096,25 @@ mod tests {
         assert!(scrollback.entries[0].cache.is_none());
         assert!(scrollback.entries[500].cache.is_none());
         assert!(scrollback.materialized_entry_count(32) < 64);
+    }
+
+    #[test]
+    fn renderer_height_boundary_drives_shared_anchor_geometry() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&history(
+            0,
+            "assistant/message",
+            json!({
+                "turn": 0,
+                "step": 0,
+                "message": { "content": [{ "type": "text", "text": "short" }] }
+            }),
+        ));
+        assert!(scrollback.set_rendered_height(80, 0, 9));
+        assert_eq!(scrollback.total_height(80), 9);
+        let anchor = scrollback.anchor_at(80, 7).expect("shared anchor");
+        assert_eq!(anchor.entry_id, EntryId::Event { seq: 0 });
+        assert_eq!(anchor.intra_row, 7);
+        assert_eq!(scrollback.scroll_for_anchor(80, anchor), Some(7));
     }
 }
