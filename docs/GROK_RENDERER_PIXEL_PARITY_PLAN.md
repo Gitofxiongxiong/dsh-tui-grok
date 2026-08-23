@@ -381,11 +381,33 @@ P6.1 进一步拆成以下可审计门禁，避免把“字段 contract 已存�
    follow-ups/voice/status/scrollbar/timeline），让绘制与 hit map 共用一个 snapshot；
 5. File Search、Suggestion/history 和 Image controller 接入后，P6.1 才可标记完成。
 
-当前第 1-3 项完成：`PromptEditor` 已由 Grok `TextArea` 持有编辑/selection/
+当前第 1-4 项完成：`PromptEditor` 已由 Grok `TextArea` 持有编辑/selection/
 viewport/cursor/mouse 状态，production 与 semantic runner 共用 upstream-derived
 `GrokPromptRenderer`，`views/agent.rs::render_prompt_buffer` 和 `PromptViewport` 已
-删除。第 4-5 项仍未完成，因此这里只声明 prompt draw core 收敛，不把 P6.1、完整
-TUI 或像素级 Renderer 标记为完成。
+删除；完整 `LayoutConfig`/`ScrollbarConfig`、`AgentViewLayoutParams`、pane solver、
+`rows_available_for_prompt`、scrollbar/timeline carve-out 和 `PaneAreas` 已接入，
+runtime/parity 的主 pane、prompt、hit map、cursor 使用同一布局快照。第 5 项仍未
+完成，因此这里只声明 P6.1 第 4 门禁收敛，不把 P6.1、完整 TUI 或像素级 Renderer
+标记为完成。
+
+### 3.3 P6.1 第 4 门禁实际结果（2026-08-23）
+
+- 固定上游 `AgentViewLayout::compute` 的 pane 顺序已迁移：status bar、tasks、
+  catalog、todo、scrollback、btw、queue、turn status、banner、CTA、follow-ups、
+  prompt、voice、status line、shortcuts。
+- 只有 scrollback 使用 `Min(5)`；optional pane 高度为 0 时其 gap 同时省略；短
+  终端抑制 CTA/follow-ups 并取消底部 padding；status line 自我 clamp。
+- `rows_available_for_prompt` 先 probe 再 clamp；scrollbar/timeline 共用 gutter，
+  `scrollback_content` 不会越过 rail/track；`PaneAreas::hit_test` 保持上游优先级。
+- runtime 的 tasks/catalog/queue 高度只来自当前 `GrokHostSnapshot`；subagent catalog
+  的异步列表先经 host effect reducer 合并到单帧 snapshot。没有 authoritative DTO 的
+  todo、btw、CTA、follow-ups、voice 仍显式为 0，没有伪造内容。
+- 保留现有 File Search、Suggestion/history、Image、Workspace、Agent task overlay
+  和对应 UiIntent/UiEffect/receipt 边界；本门禁没有删除或重写这些能力。
+
+第 5 门禁仍需迁移 File Search、Suggestion/history、Image controller；随后还要迁移
+Scrollback Markdown/Diff/Image block renderer、Workspace dashboard 和专用 Agent/Task/
+Subagent pane renderer，才能继续关闭完整 TUI 门禁。
 
 ## 4A. 能力状态和 host contract
 

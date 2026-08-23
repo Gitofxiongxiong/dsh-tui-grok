@@ -30,7 +30,7 @@ use ratatui::{
 };
 
 use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
-use crate::appearance::GrokAppearanceSnapshot;
+use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::effects::{
     DshEffectSink, OperationKey, UiContext, UiEffect, UiEffectSink, UiEffectStatus, UiIntent,
@@ -51,7 +51,7 @@ use crate::scheduler::SchedulerStats;
 use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
-    agent::{AgentView, effective_compact},
+    agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact},
     dashboard::{DashboardPeek, render_dashboard_content},
     interaction::{render_interaction_content, response_for},
     modal_window::{
@@ -299,6 +299,10 @@ impl UiState {
             GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
         self.apply_file_search_result(&mut snapshot);
         self.sync_dashboard(control_plane);
+        // Subagent catalog responses are host-authoritative but arrive through
+        // the effect reducer after the base session projection. Fold the
+        // latest stable-ID result into this frame's single render snapshot.
+        snapshot.agent.subagents = self.agent_subagents.clone();
         self.reconcile_snapshot(&snapshot);
         let suggestions_visible = !self.suggestion_dismissed
             && snapshot.capabilities.prompt_suggestions
@@ -318,9 +322,10 @@ impl UiState {
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
         let appearance = GrokAppearanceSnapshot::for_area(area, compact);
-        let prompt_outer_width = area
-            .width
-            .saturating_sub(appearance.outer_hpad.saturating_mul(2));
+        let layout_cfg = LayoutConfig::default();
+        let scrollbar_cfg = ScrollbarConfig::default();
+        let inner_width = AgentViewLayout::inner_width(area, &layout_cfg, compact);
+        let prompt_outer_width = inner_width;
         let prompt_style = PromptStyleContract {
             focused,
             compact,
@@ -357,15 +362,62 @@ impl UiState {
             Some(&prompt_info),
             prompt_cap,
         );
-        let agent_layout = AgentView::layout_with_prompt_and_banner(
-            &mut self.shell,
+        let tasks_height = if snapshot.tasks.is_empty() {
+            0
+        } else {
+            (snapshot.tasks.len() as u16)
+                .min(8)
+                .min((area.height as f32 * 0.15).floor() as u16)
+                .max(1)
+        };
+        let catalog_height = if snapshot.agent.subagents.is_empty() {
+            0
+        } else {
+            (snapshot.agent.subagents.len() as u16)
+                .min(8)
+                .min((area.height as f32 * 0.15).floor() as u16)
+                .max(1)
+        };
+        let queue_height = if snapshot.queue.is_empty() {
+            0
+        } else {
+            (snapshot.queue.len() as u16).clamp(1, 3)
+        };
+        let timeline_width =
+            crate::views::timeline::rail_width(true, false, area.width, snapshot.transcript.len());
+        let short = area.height <= crate::views::agent::SHORT_TERMINAL_ROWS;
+        let mut layout_params = AgentViewLayoutParams {
             area,
+            layout_cfg,
+            scrollbar_cfg,
+            timeline_width,
             prompt_height,
-            snapshot.running,
-            self.status.is_some() || snapshot.status.is_some(),
-            suggestion_rows,
+            tasks_height,
+            catalog_height,
+            todo_height: 0,
+            queue_height,
+            btw_height: 0,
+            turn_status_height: u16::from(snapshot.running && !short),
+            banner_height: suggestion_rows,
+            cta_height: 0,
+            follow_ups_height: 0,
+            prompt_gap: u16::from(!compact && !short && prompt_height > 0),
+            voice_recording_height: 0,
+            shortcuts_height: 1,
+            status_line_height: u16::from(
+                (self.status.is_some() || snapshot.status.is_some()) && !short,
+            ),
+            compact,
+        };
+        layout_params.prompt_height = prompt_height.min(
+            AgentViewLayout::rows_available_for_prompt(layout_params).max(if compact {
+                3
+            } else {
+                2
+            }),
         );
-        let header = agent_layout.header;
+        let agent_layout = AgentView::layout(&mut self.shell, layout_params);
+        let header = agent_layout.status_bar;
         let input = agent_layout.prompt;
         let connection = format!(
             "{} · {} · q{} · {}",
@@ -374,7 +426,7 @@ impl UiState {
             snapshot.queue_revision,
             if snapshot.running { "running" } else { "idle" }
         );
-        let compact_header = agent_layout.compact || header.width < 70;
+        let compact_header = compact || header.width < 70;
         let header_right = if compact_header {
             if snapshot.running { "running" } else { "idle" }.to_string()
         } else {
@@ -391,8 +443,13 @@ impl UiState {
 
         self.render_transcript(
             frame,
-            agent_layout.transcript,
-            agent_layout.rail,
+            agent_layout.scrollback_content,
+            Rect::new(
+                agent_layout.timeline_x,
+                agent_layout.scrollback.y,
+                agent_layout.timeline_width,
+                agent_layout.scrollback.height,
+            ),
             &snapshot,
             &mut session.scrollback,
         );
@@ -415,6 +472,47 @@ impl UiState {
             link: None,
             priority: 15,
         });
+        self.hit_map.insert(crate::geometry::HitRegion {
+            target: HitTarget::Overlay("scrollback".into()),
+            rect: agent_layout.scrollback_content,
+            label: "scrollback".into(),
+            link: None,
+            priority: 1,
+        });
+        if agent_layout.timeline_width > 0 {
+            self.hit_map.insert(crate::geometry::HitRegion {
+                target: HitTarget::Overlay("timeline".into()),
+                rect: Rect::new(
+                    agent_layout.timeline_x,
+                    agent_layout.scrollback.y,
+                    agent_layout.timeline_width,
+                    agent_layout.scrollback.height,
+                ),
+                label: "timeline".into(),
+                link: None,
+                priority: 2,
+            });
+        }
+        for (rect, label) in [
+            (agent_layout.tasks, "tasks"),
+            (agent_layout.catalog, "catalog"),
+            (agent_layout.todo, "todo"),
+            (agent_layout.queue, "queue-pane"),
+            (agent_layout.btw, "btw"),
+            (agent_layout.turn_status, "turn-status"),
+            (agent_layout.banner, "banner"),
+            (agent_layout.plugin_cta, "plugin-cta"),
+            (agent_layout.follow_ups, "follow-ups"),
+            (agent_layout.voice_recording, "voice-recording"),
+        ] {
+            self.hit_map.insert(crate::geometry::HitRegion {
+                target: HitTarget::Overlay(label.into()),
+                rect,
+                label: label.into(),
+                link: None,
+                priority: 5,
+            });
+        }
         AgentView::render_turn_status(
             frame,
             agent_layout.turn_status,
@@ -432,7 +530,9 @@ impl UiState {
         let task_status = task_status_line(&snapshot);
         let footer_text = self.status_line(&snapshot, capability_notice, &task_status);
         AgentView::render_status_line(frame, agent_layout.status_line, &footer_text, theme);
-        AgentView::render_shortcuts(frame, agent_layout.shortcuts, agent_layout.compact);
+        AgentView::render_shortcuts(frame, agent_layout.shortcuts, compact);
+
+        self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
 
         if self.shell.overlay() == Overlay::Picker {
             self.render_picker(frame, area, &snapshot);
@@ -451,6 +551,83 @@ impl UiState {
         }
         self.frame_links = self.hit_map.link_spans();
         self.frame = self.frame.wrapping_add(1);
+    }
+
+    fn render_inline_panes(
+        &mut self,
+        frame: &mut Frame<'_>,
+        layout: &AgentViewLayout,
+        snapshot: &GrokHostSnapshot,
+        theme: &Theme,
+    ) {
+        let buf = frame.buffer_mut();
+        if layout.tasks.height > 0 {
+            buf.set_string(
+                layout.tasks.x,
+                layout.tasks.y,
+                "Tasks",
+                Style::default().fg(theme.gray_bright).bg(theme.bg_base),
+            );
+            for (index, task) in snapshot.tasks.iter().enumerate() {
+                let y = layout.tasks.y.saturating_add(index as u16 + 1);
+                if y >= layout.tasks.bottom() {
+                    break;
+                }
+                let line = format!("{} [{}] {}", task.status, task.id, task.label);
+                buf.set_string(
+                    layout.tasks.x,
+                    y,
+                    truncate_str(&line, layout.tasks.width as usize),
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+                );
+            }
+        }
+        if layout.catalog.height > 0 {
+            buf.set_string(
+                layout.catalog.x,
+                layout.catalog.y,
+                "Subagents",
+                Style::default().fg(theme.gray_bright).bg(theme.bg_base),
+            );
+            for (index, subagent) in snapshot.agent.subagents.iter().enumerate() {
+                let y = layout.catalog.y.saturating_add(index as u16 + 1);
+                if y >= layout.catalog.bottom() {
+                    break;
+                }
+                let line = format!(
+                    "{} [{}] {}",
+                    subagent.status.as_deref().unwrap_or("unknown"),
+                    subagent.id,
+                    subagent.label
+                );
+                buf.set_string(
+                    layout.catalog.x,
+                    y,
+                    truncate_str(&line, layout.catalog.width as usize),
+                    Style::default()
+                        .fg(theme.accent_assistant)
+                        .bg(theme.bg_base),
+                );
+            }
+        }
+        if layout.queue.height > 0 {
+            render_queue_content(
+                buf,
+                layout.queue,
+                &snapshot.queue,
+                QueueRenderState {
+                    selected_id: self.queue_selected_id.as_deref(),
+                    editing: self.queue_editing,
+                    editor_text: self.queue_editor.text(),
+                    pending_id: self
+                        .queue_pending
+                        .as_ref()
+                        .map(|pending| pending.item_id.as_str()),
+                    revision: snapshot.queue_revision,
+                },
+                theme,
+            );
+        }
     }
 
     fn status_line(

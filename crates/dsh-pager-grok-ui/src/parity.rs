@@ -10,11 +10,12 @@ use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{AppShell, KeyOwner, Overlay};
+use crate::appearance::{LayoutConfig, ScrollbarConfig};
 use crate::geometry::{HitMap, HitTarget, insert_text_line};
 use crate::host_adapter::GrokHostSnapshot;
 use crate::input::PromptEditor;
 use crate::theme::Theme;
-use crate::views::agent::{AgentView, AgentViewLayout};
+use crate::views::agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact};
 use crate::views::prompt_contract::{PromptFlagContract, PromptInfoContract, PromptStyleContract};
 use crate::views::prompt_widget::GrokPromptRenderer;
 use crate::views::transcript::RichTranscript;
@@ -316,7 +317,33 @@ impl ReferenceRunner {
         size: TerminalSize,
     ) -> SemanticFrame {
         let area = Rect::new(0, 0, size.width, size.height);
-        let layout = AgentView::layout(shell, area);
+        let compact = effective_compact(false, area.height);
+        let short = area.height <= crate::views::agent::SHORT_TERMINAL_ROWS;
+        let layout = AgentView::layout(
+            shell,
+            AgentViewLayoutParams {
+                area,
+                layout_cfg: LayoutConfig::default(),
+                scrollbar_cfg: ScrollbarConfig::default(),
+                timeline_width: crate::views::timeline::rail_width(
+                    true,
+                    false,
+                    area.width,
+                    snapshot.transcript.len(),
+                ),
+                prompt_height: 3,
+                tasks_height: (snapshot.tasks.len() as u16).min(8),
+                catalog_height: (snapshot.agent.subagents.len() as u16).min(8),
+                queue_height: (snapshot.queue.len() as u16).clamp(0, 3),
+                turn_status_height: u16::from(snapshot.running && !short),
+                banner_height: u16::from(!snapshot.prompt.suggestions.is_empty()),
+                status_line_height: u16::from(snapshot.status.is_some() && !short),
+                prompt_gap: u16::from(!compact && !short),
+                shortcuts_height: 1,
+                compact,
+                ..AgentViewLayoutParams::default()
+            },
+        );
         render_semantic(snapshot, shell, layout, area)
     }
 }
@@ -338,13 +365,13 @@ pub fn render_semantic(
     rows.push(SemanticRow {
         role: "header".into(),
         text: format!("{} · {}", snapshot.session_title, connection),
-        rect: layout.header.into(),
+        rect: layout.status_bar.into(),
     });
     if snapshot.transcript.is_empty() {
         rows.push(SemanticRow {
             role: "body-empty".into(),
             text: "No transcript events yet".into(),
-            rect: layout.transcript.into(),
+            rect: layout.scrollback.into(),
         });
     } else {
         let entries = snapshot
@@ -362,20 +389,20 @@ pub fn render_semantic(
             .collect::<Vec<_>>();
         let rich = RichTranscript::new(
             &entries,
-            layout.transcript.width.saturating_sub(1).max(1) as usize,
+            layout.scrollback_content.width.saturating_sub(1).max(1) as usize,
             *Theme::current(),
         );
-        for paint in rich.visible_lines(0, layout.transcript.height) {
-            if paint.screen_y >= layout.transcript.height {
+        for paint in rich.visible_lines(0, layout.scrollback.height) {
+            if paint.screen_y >= layout.scrollback.height {
                 continue;
             }
             rows.push(SemanticRow {
                 role: "transcript".into(),
                 text: paint.line.to_string(),
                 rect: Rect::new(
-                    layout.transcript.x.saturating_add(1),
-                    layout.transcript.y.saturating_add(paint.screen_y),
-                    layout.transcript.width.saturating_sub(1),
+                    layout.scrollback.x.saturating_add(1),
+                    layout.scrollback.y.saturating_add(paint.screen_y),
+                    layout.scrollback.width.saturating_sub(1),
                     1,
                 )
                 .into(),
@@ -395,10 +422,35 @@ pub fn render_semantic(
         ),
         rect: layout.prompt.into(),
     });
+    for (role, rect, text) in [
+        (
+            "tasks",
+            layout.tasks,
+            format!("{} task(s)", snapshot.tasks.len()),
+        ),
+        (
+            "catalog",
+            layout.catalog,
+            format!("{} subagent(s)", snapshot.agent.subagents.len()),
+        ),
+        (
+            "queue",
+            layout.queue,
+            format!("{} queued", snapshot.queue.len()),
+        ),
+    ] {
+        if rect.height > 0 {
+            rows.push(SemanticRow {
+                role: role.into(),
+                text,
+                rect: rect.into(),
+            });
+        }
+    }
     rows.push(SemanticRow {
         role: "footer".into(),
         text: "Enter send".into(),
-        rect: layout.footer.into(),
+        rect: layout.status_line.into(),
     });
 
     let mut map = HitMap::new(area);
@@ -417,11 +469,11 @@ pub fn render_semantic(
         .collect::<Vec<_>>();
     let rich = RichTranscript::new(
         &entries,
-        layout.transcript.width.saturating_sub(1).max(1) as usize,
+        layout.scrollback_content.width.saturating_sub(1).max(1) as usize,
         *Theme::current(),
     );
-    for paint in rich.visible_lines(0, layout.transcript.height) {
-        if paint.screen_y >= layout.transcript.height {
+    for paint in rich.visible_lines(0, layout.scrollback.height) {
+        if paint.screen_y >= layout.scrollback.height {
             continue;
         }
         let text = paint.line.to_string();
@@ -429,9 +481,9 @@ pub fn render_semantic(
             &mut map,
             HitTarget::TranscriptEntry(paint.entry_id),
             paint.line_index,
-            layout.transcript.x.saturating_add(1),
-            layout.transcript.y.saturating_add(paint.screen_y),
-            layout.transcript.width.saturating_sub(1),
+            layout.scrollback.x.saturating_add(1),
+            layout.scrollback.y.saturating_add(paint.screen_y),
+            layout.scrollback.width.saturating_sub(1),
             &text,
             crate::geometry::first_link_target(&text),
         );
@@ -443,11 +495,36 @@ pub fn render_semantic(
         link: None,
         priority: 15,
     });
+    for (label, rect, priority) in [
+        ("scrollback", layout.scrollback_content, 1),
+        ("tasks", layout.tasks, 5),
+        ("catalog", layout.catalog, 5),
+        ("todo", layout.todo, 5),
+        ("queue", layout.queue, 5),
+        (
+            "timeline",
+            Rect::new(
+                layout.timeline_x,
+                layout.scrollback.y,
+                layout.timeline_width,
+                layout.scrollback.height,
+            ),
+            2,
+        ),
+    ] {
+        map.insert(crate::geometry::HitRegion {
+            target: HitTarget::Overlay(label.into()),
+            rect,
+            label: label.into(),
+            link: None,
+            priority,
+        });
+    }
     let mut prompt_buffer = Buffer::empty(area);
     let mut prompt = PromptEditor::default();
     let prompt_style = PromptStyleContract {
         focused: shell.owner() == KeyOwner::Prompt,
-        compact: layout.compact,
+        compact: effective_compact(false, area.height),
         title: Some(snapshot.session_title.clone()),
         ..PromptStyleContract::default()
     };
