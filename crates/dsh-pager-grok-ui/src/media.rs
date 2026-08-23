@@ -40,6 +40,54 @@ pub enum MediaFallback {
     MissingAttachment,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaPreviewDecision {
+    Pending { generation: u64 },
+    Unsupported(MediaFallback),
+}
+
+/// Identity/capability gate for host-owned attachment bytes.
+///
+/// The controller intentionally does not store decoded image data. It only
+/// fences the selected attachment so a late completion cannot paint bytes for
+/// a different row, and it makes unsupported capability an explicit outcome.
+#[derive(Debug, Default)]
+pub struct MediaPreviewController {
+    generation: u64,
+    requested_attachment: Option<String>,
+}
+
+impl MediaPreviewController {
+    pub fn clear(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        self.requested_attachment = None;
+    }
+
+    pub fn begin(
+        &mut self,
+        attachment_id: &str,
+        terminal: TerminalCapabilities,
+        host: CapabilityMatrix,
+    ) -> MediaPreviewDecision {
+        self.generation = self.generation.saturating_add(1);
+        self.requested_attachment = Some(attachment_id.to_string());
+        if !terminal.alternate_screen || !terminal.cell_diff || !host.image {
+            return MediaPreviewDecision::Unsupported(MediaFallback::CapabilityUnavailable);
+        }
+        MediaPreviewDecision::Pending {
+            generation: self.generation,
+        }
+    }
+
+    pub fn accepts(&self, attachment_id: &str) -> bool {
+        self.requested_attachment.as_deref() == Some(attachment_id)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 impl std::fmt::Display for MediaFallback {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -170,5 +218,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn preview_controller_fences_late_attachment_and_capability_fallback() {
+        let mut controller = MediaPreviewController::default();
+        let unsupported = controller.begin("img-1", terminal(), CapabilityMatrix::default());
+        assert_eq!(
+            unsupported,
+            MediaPreviewDecision::Unsupported(MediaFallback::CapabilityUnavailable)
+        );
+        let host = CapabilityMatrix {
+            image: true,
+            ..CapabilityMatrix::default()
+        };
+        let pending = controller.begin("img-2", terminal(), host);
+        assert!(matches!(pending, MediaPreviewDecision::Pending { .. }));
+        assert!(!controller.accepts("img-1"));
+        assert!(controller.accepts("img-2"));
+        let generation = controller.generation();
+        controller.clear();
+        assert!(!controller.accepts("img-2"));
+        assert!(controller.generation() > generation);
     }
 }

@@ -45,6 +45,7 @@ use crate::host_adapter::{
     MediaSnapshot,
 };
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
+use crate::media::{MediaPreviewController, MediaPreviewDecision};
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
@@ -261,6 +262,7 @@ struct UiState {
     suggestions: SuggestionController,
     image_selected: usize,
     media_preview: Option<MediaPreviewBuffer>,
+    media_preview_controller: MediaPreviewController,
     agent_task_selected: usize,
     agent_subagents: Vec<crate::host_adapter::SubagentRow>,
     dashboard: DashboardModel,
@@ -353,6 +355,7 @@ impl UiState {
         }
         if let UiEffect::PreviewMedia { attachment_id, .. } = &completion.effect
             && let Some(preview) = completion.attachment_preview.clone()
+            && self.media_preview_controller.accepts(attachment_id)
             && preview.attachment_id == *attachment_id
         {
             self.media_preview = Some(MediaPreviewBuffer {
@@ -1379,6 +1382,7 @@ impl UiState {
             ShellAction::OpenImagePreview => {
                 self.image_selected = 0;
                 self.media_preview = None;
+                self.media_preview_controller.clear();
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
@@ -1816,6 +1820,16 @@ impl UiState {
         session: &SessionState,
         attachment_id: &str,
     ) -> PagerResult<()> {
+        let snapshot = GrokHostSnapshot::from_session(session);
+        let decision = self.media_preview_controller.begin(
+            attachment_id,
+            self.capabilities,
+            snapshot.capabilities,
+        );
+        if let MediaPreviewDecision::Unsupported(reason) = decision {
+            self.status = Some(format!("Image preview unavailable: {reason}"));
+            return Ok(());
+        }
         let request_id = DshRequestId::new(format!("media-preview:{attachment_id}"));
         let context = UiContext::for_operation(session, request_id);
         let receipt = self.submit_effect(
