@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use dsh_pager::dashboard::DashboardModel;
 use dsh_pager::{
@@ -39,7 +39,7 @@ use crate::geometry::{
     GeometryLine, HitMap, HitTarget, LinkTarget, column_for_grapheme, first_link_target,
     insert_text_line,
 };
-use crate::host_adapter::GrokHostSnapshot;
+use crate::host_adapter::{FeatureStatus, FileSearchSnapshot, GrokHostSnapshot};
 use crate::input::{PromptEditor, line_editor::LineEditOutcome};
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
@@ -231,6 +231,8 @@ struct UiState {
     interaction_request_id: Option<DshRequestId>,
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
+    file_search_editor: PromptEditor,
+    file_search_selected_id: Option<String>,
     dashboard: DashboardModel,
     dashboard_revision: Option<u64>,
     dashboard_query: PromptEditor,
@@ -358,6 +360,8 @@ impl UiState {
             self.render_queue(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::Interaction {
             self.render_interaction(frame, area, &snapshot);
+        } else if self.shell.overlay() == Overlay::FileSearch {
+            self.render_file_search(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::Dashboard {
             self.render_dashboard(frame, area);
         }
@@ -752,6 +756,45 @@ impl UiState {
         }
     }
 
+    fn render_file_search(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        snapshot: &GrokHostSnapshot,
+    ) {
+        let theme = Theme::current();
+        let shortcuts = [
+            Shortcut {
+                label: "Enter preview",
+                clickable: true,
+                id: 1,
+            },
+            Shortcut {
+                label: "Esc close",
+                clickable: true,
+                id: 2,
+            },
+        ];
+        let config = ModalWindowConfig {
+            title: "File Search · DeepSeek host",
+            tabs: None,
+            shortcuts: &shortcuts,
+            sizing: ModalSizing::large(),
+            fold_info: None,
+        };
+        let buf = frame.buffer_mut();
+        if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
+            render_file_search_content(
+                buf,
+                content.content,
+                &snapshot.file_search,
+                self.file_search_editor.text(),
+                self.file_search_selected_id.as_deref(),
+                theme,
+            );
+        }
+    }
+
     fn dispatch_event(
         &mut self,
         event: ShellEvent,
@@ -807,6 +850,20 @@ impl UiState {
                 } else {
                     self.reconcile_snapshot(&snapshot);
                 }
+                Ok(false)
+            }
+            ShellAction::OpenFileSearch => {
+                self.file_search_editor.reset();
+                self.file_search_selected_id = None;
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                self.status = Some(match snapshot.file_search.status {
+                    FeatureStatus::Available => "File search opened".into(),
+                    FeatureStatus::Pending => "File search waiting for host result".into(),
+                    FeatureStatus::Unsupported => "File search unavailable".into(),
+                });
                 Ok(false)
             }
             ShellAction::OpenDashboard => {
@@ -934,6 +991,20 @@ impl UiState {
                 }
                 Ok(false)
             }
+            ShellAction::FileSearchKey(key) => {
+                self.handle_file_search_key(key, transport, session)?;
+                Ok(false)
+            }
+            ShellAction::FileSearchMouse(mouse) => {
+                self.handle_file_search_mouse(mouse, session);
+                Ok(false)
+            }
+            ShellAction::FileSearchPaste(text) => {
+                if !text.is_empty() {
+                    let _ = self.file_search_editor.insert_paste(&text);
+                }
+                Ok(false)
+            }
             ShellAction::DashboardKey(key) => {
                 self.handle_dashboard_key(key, transport, session)?;
                 Ok(false)
@@ -1032,6 +1103,100 @@ impl UiState {
                     self.status = Some("Selection copied".into());
                 }
             }
+            _ => {}
+        }
+    }
+
+    fn handle_file_search_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        _transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.shell.close_overlay();
+                self.file_search_editor.reset();
+                self.file_search_selected_id = None;
+                self.status = Some("File search closed".into());
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_file_search_selection(-1, session);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_file_search_selection(1, session);
+            }
+            KeyCode::Enter => {
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(_transport.control_plane()),
+                );
+                if let Some(row) =
+                    snapshot.file_search.rows.iter().find(|row| {
+                        Some(row.id.as_str()) == self.file_search_selected_id.as_deref()
+                    })
+                {
+                    self.status = Some(format!("File preview pending: {}:{}", row.path, row.line));
+                } else {
+                    self.status = Some(file_search_status_message(&snapshot.file_search));
+                }
+            }
+            _ if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('u') =>
+            {
+                self.file_search_editor.reset();
+            }
+            _ => {
+                if !matches!(
+                    self.file_search_editor.handle_key(&key),
+                    LineEditOutcome::Unhandled
+                ) {
+                    self.file_search_selected_id = None;
+                    let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                        session,
+                        Some(_transport.control_plane()),
+                    );
+                    self.status = Some(file_search_status_message(&snapshot.file_search));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn move_file_search_selection(&mut self, delta: isize, session: &SessionState) {
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(session, None);
+        if snapshot.file_search.rows.is_empty() {
+            return;
+        }
+        let current = self
+            .file_search_selected_id
+            .as_deref()
+            .and_then(|id| {
+                snapshot
+                    .file_search
+                    .rows
+                    .iter()
+                    .position(|row| row.id == id)
+            })
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            current
+                .saturating_add(delta as usize)
+                .min(snapshot.file_search.rows.len().saturating_sub(1))
+        };
+        self.file_search_selected_id = snapshot
+            .file_search
+            .rows
+            .get(next)
+            .map(|row| row.id.clone());
+    }
+
+    fn handle_file_search_mouse(&mut self, mouse: MouseEvent, session: &SessionState) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.move_file_search_selection(-1, session),
+            MouseEventKind::ScrollDown => self.move_file_search_selection(1, session),
             _ => {}
         }
     }
@@ -1833,6 +1998,103 @@ fn task_status_line(snapshot: &GrokHostSnapshot) -> String {
     }
 }
 
+fn render_file_search_content(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    snapshot: &FileSearchSnapshot,
+    query: &str,
+    selected_id: Option<&str>,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let heading = if query.is_empty() {
+        "Query: _".to_string()
+    } else {
+        format!("Query: {query}")
+    };
+    buffer.set_string(
+        area.x,
+        area.y,
+        truncate_str(&heading, area.width as usize),
+        Style::default().fg(theme.text_primary).bg(theme.bg_base),
+    );
+
+    match snapshot.status {
+        FeatureStatus::Unsupported => {
+            buffer.set_string(
+                area.x,
+                area.y.saturating_add(2),
+                truncate_str(
+                    snapshot
+                        .diagnostic
+                        .as_deref()
+                        .unwrap_or("Filesystem search is unavailable"),
+                    area.width as usize,
+                ),
+                Style::default().fg(theme.warning).bg(theme.bg_base),
+            );
+        }
+        FeatureStatus::Pending => {
+            buffer.set_string(
+                area.x,
+                area.y.saturating_add(2),
+                "Waiting for authoritative filesystem results...",
+                Style::default().fg(theme.gray).bg(theme.bg_base),
+            );
+        }
+        FeatureStatus::Available if snapshot.rows.is_empty() => {
+            buffer.set_string(
+                area.x,
+                area.y.saturating_add(2),
+                "No file matches",
+                Style::default().fg(theme.gray).bg(theme.bg_base),
+            );
+        }
+        FeatureStatus::Available => {
+            for (index, row) in snapshot.rows.iter().enumerate() {
+                let y = area.y.saturating_add(2 + index as u16);
+                if y >= area.bottom().saturating_sub(1) {
+                    break;
+                }
+                let selected = selected_id == Some(row.id.as_str());
+                let marker = if selected { "▸" } else { " " };
+                let line = format!("{marker} {}:{}  {}", row.path, row.line, row.snippet);
+                let style = if selected {
+                    Style::default().fg(theme.text_primary).bg(theme.bg_visual)
+                } else {
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base)
+                };
+                buffer.set_string(area.x, y, truncate_str(&line, area.width as usize), style);
+            }
+        }
+    }
+    buffer.set_string(
+        area.x,
+        area.bottom().saturating_sub(1),
+        "Type query · ↑/↓ select · Enter preview · Esc close",
+        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+    );
+}
+
+fn file_search_status_message(snapshot: &FileSearchSnapshot) -> String {
+    match snapshot.status {
+        FeatureStatus::Available => {
+            if snapshot.rows.is_empty() {
+                "No file matches".into()
+            } else {
+                format!("{} file match(es)", snapshot.rows.len())
+            }
+        }
+        FeatureStatus::Pending => "File search pending host result".into(),
+        FeatureStatus::Unsupported => snapshot
+            .diagnostic
+            .clone()
+            .unwrap_or_else(|| "File search unavailable".into()),
+    }
+}
+
 fn steer_capability_available(session: &SessionState, snapshot: &GrokHostSnapshot) -> bool {
     if !snapshot.capabilities.queue_steer {
         return false;
@@ -1870,9 +2132,10 @@ fn prompt_admission_message(status: &UiEffectStatus) -> String {
 mod tests {
     use super::prompt_admission_message;
     use super::prompt_receipt_admitted;
+    use super::render_file_search_content;
     use super::steer_capability_available;
     use crate::effects::UiEffectStatus;
-    use crate::host_adapter::GrokHostSnapshot;
+    use crate::host_adapter::{FeatureStatus, FileSearchSnapshot, GrokHostSnapshot};
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
     use crate::views::modal_window::{
@@ -1980,5 +2243,44 @@ mod tests {
         assert!(steer_capability_available(&session, &snapshot));
         assert!(session.set_projection("capabilities", 2, json!({"queueSteer": false})));
         assert!(!steer_capability_available(&session, &snapshot));
+    }
+
+    #[test]
+    fn file_search_surface_keeps_pending_and_unsupported_distinct() {
+        let theme = Theme::current();
+        for (status, expected) in [
+            (
+                FeatureStatus::Pending,
+                "Waiting for authoritative filesystem results",
+            ),
+            (
+                FeatureStatus::Unsupported,
+                "Filesystem search is unavailable",
+            ),
+        ] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 72, 12));
+            render_file_search_content(
+                &mut buffer,
+                Rect::new(2, 1, 68, 10),
+                &FileSearchSnapshot {
+                    status,
+                    diagnostic: (status == FeatureStatus::Unsupported)
+                        .then(|| "Filesystem search is unavailable".into()),
+                    ..Default::default()
+                },
+                "src",
+                None,
+                theme,
+            );
+            let rendered = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}: {rendered}"
+            );
+        }
     }
 }

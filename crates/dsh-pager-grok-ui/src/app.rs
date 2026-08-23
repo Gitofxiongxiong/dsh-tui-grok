@@ -14,6 +14,7 @@ pub enum KeyOwner {
     Picker,
     Queue,
     Interaction,
+    FileSearch,
     Modal,
     Dashboard,
 }
@@ -24,6 +25,7 @@ pub enum Overlay {
     Picker,
     Queue,
     Interaction,
+    FileSearch,
     Modal,
     Dashboard,
 }
@@ -32,12 +34,13 @@ impl KeyOwner {
     pub const fn priority(self) -> u8 {
         match self {
             Self::Interaction => 0,
+            Self::FileSearch => 2,
             Self::Modal => 1,
-            Self::Picker => 2,
-            Self::Queue => 3,
-            Self::Dashboard => 4,
-            Self::Prompt => 5,
-            Self::Transcript => 6,
+            Self::Picker => 3,
+            Self::Queue => 4,
+            Self::Dashboard => 5,
+            Self::Prompt => 6,
+            Self::Transcript => 7,
         }
     }
 }
@@ -49,6 +52,7 @@ impl Overlay {
             Self::Picker => KeyOwner::Picker,
             Self::Queue => KeyOwner::Queue,
             Self::Interaction => KeyOwner::Interaction,
+            Self::FileSearch => KeyOwner::FileSearch,
             Self::Modal => KeyOwner::Modal,
             Self::Dashboard => KeyOwner::Dashboard,
         }
@@ -79,6 +83,7 @@ pub enum ShellAction {
     TogglePromptMode,
     OpenQueue,
     OpenInteraction,
+    OpenFileSearch,
     OpenDashboard,
     PromptKey(KeyEvent),
     PickerKey(KeyEvent),
@@ -91,6 +96,9 @@ pub enum ShellAction {
     PickerPaste(String),
     QueuePaste(String),
     InteractionPaste(String),
+    FileSearchKey(KeyEvent),
+    FileSearchMouse(MouseEvent),
+    FileSearchPaste(String),
     DashboardKey(KeyEvent),
     DashboardMouse(MouseEvent),
     DashboardPaste(String),
@@ -268,6 +276,12 @@ impl AppShell {
         self.owner = KeyOwner::Interaction;
     }
 
+    pub fn open_file_search(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::FileSearch;
+        self.owner = KeyOwner::FileSearch;
+    }
+
     pub fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
         self.owner = self.previous_owner;
@@ -286,6 +300,7 @@ impl AppShell {
                 KeyOwner::Picker => ShellAction::PickerPaste(text),
                 KeyOwner::Queue => ShellAction::QueuePaste(text),
                 KeyOwner::Interaction => ShellAction::InteractionPaste(text),
+                KeyOwner::FileSearch => ShellAction::FileSearchPaste(text),
                 KeyOwner::Dashboard => ShellAction::DashboardPaste(text),
                 _ => ShellAction::PromptPaste(text),
             },
@@ -298,6 +313,9 @@ impl AppShell {
                 }
                 if self.overlay == Overlay::Interaction {
                     return ShellAction::InteractionMouse(mouse);
+                }
+                if self.overlay == Overlay::FileSearch {
+                    return ShellAction::FileSearchMouse(mouse);
                 }
                 if self.overlay == Overlay::Dashboard {
                     return ShellAction::DashboardMouse(mouse);
@@ -324,6 +342,9 @@ impl AppShell {
             }
             if self.overlay == Overlay::Interaction {
                 return ShellAction::InteractionKey(key);
+            }
+            if self.overlay == Overlay::FileSearch {
+                return ShellAction::FileSearchKey(key);
             }
             if self.overlay == Overlay::Dashboard {
                 return ShellAction::DashboardKey(key);
@@ -376,6 +397,10 @@ impl AppShell {
                 KeyCode::Char('i') => {
                     self.open_interaction();
                     return ShellAction::OpenInteraction;
+                }
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.open_file_search();
+                    return ShellAction::OpenFileSearch;
                 }
                 KeyCode::Char('d') => {
                     self.previous_owner = self.owner;
@@ -539,6 +564,33 @@ mod tests {
         assert_eq!(overlay.z_order, vec![Overlay::Picker]);
         assert_eq!(overlay.cursor_owner, KeyOwner::Picker);
         assert!(KeyOwner::Interaction.priority() < KeyOwner::Prompt.priority());
+    }
+
+    #[test]
+    fn file_search_has_a_distinct_owner_and_input_route() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch(
+                ShellEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+                true,
+            ),
+            ShellAction::OpenFileSearch
+        );
+        assert_eq!(shell.overlay(), Overlay::FileSearch);
+        assert_eq!(shell.owner(), KeyOwner::FileSearch);
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Paste("src/".into()), true),
+            ShellAction::FileSearchPaste(_)
+        ));
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
+            ShellAction::FileSearchKey(_)
+        ));
+        shell.close_overlay();
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Char('f'))), true),
+            ShellAction::PromptKey(_)
+        ));
     }
 
     #[test]

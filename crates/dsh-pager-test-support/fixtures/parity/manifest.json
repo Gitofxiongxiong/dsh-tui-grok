@@ -8,7 +8,8 @@
     "sizes": [[40, 12], [60, 20], [80, 24], [100, 30], [120, 40], [160, 50]],
     "states": [
       "empty", "loading", "running", "streaming", "completed", "error",
-      "reconnecting", "modal", "picker", "queue-edit", "selection", "dashboard-peek"
+      "reconnecting", "modal", "picker", "queue-edit", "selection", "dashboard-peek",
+      "file-search", "suggestions", "image-preview", "workspace", "agent-tasks", "subagents"
     ],
     "inputs": [
       "key-repeat", "modified-key", "mouse-wheel", "mouse-click", "mouse-drag",
