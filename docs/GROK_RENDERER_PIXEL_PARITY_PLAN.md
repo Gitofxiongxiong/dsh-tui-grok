@@ -64,11 +64,11 @@ production，其 controller 闭包仍按 P6.1 门禁继续迁移：
 | 模块 | 当前替代物 | 对齐目标 |
 |---|---|---|
 | `PromptWidget` | upstream-derived `views/prompt_widget.rs` draw core + Grok `TextArea` 已用于 production | 接入 file-search/suggestion/history/image controller 闭包并完成 reference cell diff |
-| `AgentViewLayout` | DSH 手写 row stack | 直接复用上游 `LayoutConfig`/`ScrollbarConfig`/layout solver |
+| `AgentViewLayout` | 完整上游-derived pane solver 已接入 runtime/parity；pane 专用 renderer 仍分阶段迁移 | 继续复用上游 `LayoutConfig`/`ScrollbarConfig`/layout solver，并让所有 pane 消费同一 snapshot |
 | 完整 Theme | `dsh-pager-render::Theme` 简化字段 | 引入 Grok 完整语义 token |
-| Appearance | DSH 常量和局部参数 | 引入 Grok prompt/scrollback/layout 配置的只读投影 |
+| Appearance | `LayoutConfig`/`ScrollbarConfig`/`GrokAppearanceSnapshot` 的 DSH-neutral 只读投影已接入 | 继续补齐 Grok prompt/scrollback/theme/glyph 配置闭包 |
 | ScrollbackPane/block renderer | `RichTranscript` | 直接复用 Grok scrollback block/layout/render 路径 |
-| AgentView render orchestration | `runtime.rs` 手工串联 | 复用 Grok `AgentView::draw` 的绘制顺序 |
+| AgentView render orchestration | runtime/parity 已用一个 `AgentViewLayout` snapshot 驱动主 pane、prompt、hit map、cursor 和 mouse；完整上游 pane 绘制顺序仍未闭合 | 复用 Grok `AgentView::draw` 的绘制顺序并删除剩余简化 production renderer |
 | Markdown / Diff renderer | `views/transcript.rs` 的简化文本投影 | 复用 Grok markdown/diff AST、样式、hunk 和复制语义 |
 | File Search | 目前只有 line viewer 和 session search 基础 | 迁移 Grok file-search overlay、结果列表、预览和命中几何，并接 DSH file-search contract |
 | Suggestion / history | `PromptEditor` + 简化 projection | 迁移 Grok suggestion controller、候选 viewport、slash/history 状态机 |
@@ -87,12 +87,13 @@ Prompt 的 chrome/TextArea/info/cursor 已不再由 `views/agent.rs` 平行实�
 | 能力 | Host/Effect 状态 | Renderer 状态 | 下一出口 |
 |---|---|---|---|
 | Prompt core | draft、mode、model/title projection 已接入 | 固定 Grok TextArea + upstream-derived draw core 已用于 production；height/draw/cursor/mouse 共用同一状态 | reference cell oracle；接 controller 闭包 |
+| AgentView layout/chrome | tasks、subagents、queue、turn status、suggestions 等 snapshot 字段已接入；无 authority 的 pane 显式为 0 | 完整 `AgentViewLayoutParams`/solver、prompt budget、scrollbar/timeline 和 `PaneAreas` 已用于 production/parity；专用 pane renderer 仍未闭合 | P6.1 第 5 门禁；再迁移完整 AgentView render order |
 | Markdown / Diff | 结构化 block、stable ID、copy/link 已保留 | 仍是 `RichTranscript` 简化实现 | vendor Grok markdown/diff + scrollback block 闭包 |
 | File Search | `fileReferences.list` 正式 ApiProxy/TUI 方法；query revision、stable row、unsupported/error 已接入 | overlay 仍是过渡 renderer | vendor Grok file-search controller/list，并接同一 result DTO |
 | Suggestion / history | host projection、候选 viewport、accept/dismiss、prompt history 已接入 | 仍是 runtime 简化 banner/controller | vendor Grok suggestion/history 状态机 |
 | Image / media | `session.attachment`、1 MiB 有界读取、独立 preview buffer 已接入 | 当前只显示列表和已加载元数据 | vendor Grok image block/preview，按终端能力绘制或 fallback |
 | Workspace | list/group/peek/attach、archive、session reorder 已接真实 RPC | 当前是简化 Dashboard modal | vendor Grok workspace/dashboard tree；补 create/rename/delete/workspace reorder |
-| Agent / task / subagent | job/subagent catalog、stream status、interrupt effect 已接 | 当前是简化 task surface | vendor Grok AgentView/task/subagent pane 与主绘制顺序 |
+| Agent / task / subagent | job/subagent catalog、stream status、interrupt effect 已接 | overlay 和基础 inline DTO projection 可用；完整 Grok task/catalog/status pane 与主绘制顺序仍未迁移 | vendor Grok AgentView/task/subagent pane 与 streaming/interrupt reference fixture |
 
 已经建立并必须继续沿用的动作边界：
 
@@ -355,17 +356,24 @@ width/grapheme/hit-map 规则，不能另造 line viewer 几何。
 
 ### P6：执行顺序（当前）
 
-能力 seam 已经具备后，不再继续扩展 `runtime.rs` 的平行视觉实现。后续按以下顺序
-推进，每一项都必须同时迁移上游 renderer、上游交互测试和 DSH adapter fixture：
+能力 seam 已经具备后，不再扩展 `runtime.rs` 的平行视觉实现。Prompt core 和完整
+AgentView geometry 已经完成，当前按以下顺序推进；每一项都必须同时迁移上游
+renderer、上游交互测试和 DSH adapter fixture：
 
-1. `PromptWidget` + `AgentViewLayout`，替换手写 prompt/header/footer 几何；
-2. `ScrollbackPane` + Markdown/Diff/Image block，替换 `RichTranscript` 生产路径；
-3. File Search + Suggestion/history controller，复用同一 prompt/focus/Esc ladder；
-4. Workspace/Dashboard + Agent/Task/Subagent pane，替换当前简化 modal；
-5. reference runner、semantic cell diff、PTY/backend matrix 全通过后删除 frozen
-   `runtime.rs` fallback shell。
+1. **已完成：PromptWidget production draw core。** Grok `TextArea`、prompt chrome、
+   height/draw/cursor/mouse 和 semantic cell 基础已收敛。
+2. **已完成：AgentView 完整 pane solver。** `LayoutConfig`、`ScrollbarConfig`、
+   pane order、prompt budget、timeline/scrollbar 和单 layout snapshot 已收敛。
+3. **当前下一步：File Search + Suggestion/history + Image controller。** 复用同一
+   prompt/focus/Esc ladder，完成 P6.1 第 5 门禁。
+4. **随后：ScrollbackPane + Markdown/Diff/Image block。** 将 `RichTranscript` 从
+   production renderer 降为 oracle，并迁移结构化 block 闭包。
+5. **再后：Workspace/Dashboard + Agent/Task/Subagent pane。** 迁移 tree/list、
+   status/streaming/interrupt 和主绘制顺序。
+6. **最终：生产路径收敛。** reference runner、semantic cell diff、PTY/backend
+   matrix 全通过后，删除 frozen `runtime.rs` fallback 和其它同职责 renderer。
 
-门禁：前四项任一能力仍依赖简化 renderer 时，不得执行第 5 项；也不得以“真实
+门禁：前 3-5 项任一能力仍依赖简化 renderer 时，不得执行第 6 项；也不得以“真实
 RPC 已接通”为理由把对应 Grok renderer 闭包标记为完成。
 
 P6.1 进一步拆成以下可审计门禁，避免把“字段 contract 已存在”误报成 renderer
@@ -408,6 +416,80 @@ runtime/parity 的主 pane、prompt、hit map、cursor 使用同一布局快照�
 第 5 门禁仍需迁移 File Search、Suggestion/history、Image controller；随后还要迁移
 Scrollback Markdown/Diff/Image block renderer、Workspace dashboard 和专用 Agent/Task/
 Subagent pane renderer，才能继续关闭完整 TUI 门禁。
+
+### 3.4 当前进度总览（2026-08-23，提交 `94fe1ef`）
+
+当前不是“完整 TUI 已完成”，而是已经形成可持续推进的生产骨架：
+
+| 层级 | 当前状态 | 仍缺的闭环 |
+|---|---|---|
+| 输入与副作用边界 | `Grok input -> UiIntent -> UiEffect -> receipt/notification -> authoritative snapshot -> DTO` 已建立 | 各 capability controller 仍需逐项接入上游交互状态机和 fixture |
+| Prompt | Grok `TextArea`、wrap、selection、cursor、mouse、placeholder、title/info/chrome 已进入 production/parity | File Search、Suggestion/history、Image attachment/controller 闭包 |
+| AgentView geometry | 完整 pane solver、compact/short-terminal、prompt budget、scrollbar/timeline、`PaneAreas` 已进入 production/parity | 完整上游 pane 专用 renderer 和完整 `AgentView::draw` 绘制顺序 |
+| Scrollback | DSH 结构化 block、stable ID、selection/copy/link 基础能力保留 | Grok ScrollbackPane、Markdown、Diff、Image、Reasoning/Tool block renderer |
+| Capability surfaces | File Search、Suggestion、Image、Workspace、Agent 的 host snapshot/effect 基础存在，overlay 仍可用 | Grok-derived controller、列表/树/预览/焦点/命中几何和 reference parity |
+| 验证基础设施 | semantic parity matrix 972 cases/8 fixtures、PTY smoke、workspace tests/clippy 已通过 | capability-specific golden/cell diff、真实 backend matrix 和旧 fallback 删除门禁 |
+
+这意味着后续每一批必须同时验证三件事：
+
+1. Grok-derived renderer/interaction state machine 是否进入默认生产路径；
+2. DSH authoritative DTO、stable ID/generation 和 `UiIntent -> UiEffect` 是否保持；
+3. semantic cells、geometry、focus/mouse、PTY/backend fixture 是否留下证据。
+
+## 3.5 下一步计划和验收顺序
+
+### N1：P6.1 第 5 门禁：File Search、Suggestion/history、Image controller
+
+这是当前下一批代码工作的起点，三项必须保留完整能力，不允许只保留 host 字段：
+
+- File Search：迁移 query editor、候选/结果列表、line preview、命中高亮、焦点和
+  Esc ladder；使用带 query revision 的 typed snapshot/effect，区分 loading/empty/
+  error/result/preview/stale。
+- Suggestion/history：迁移 slash/history controller、候选排序和 viewport、光标、
+  accept/dismiss、Enter/Esc 状态机；候选只来自 host DTO，副作用仍经 `UiIntent`。
+- Image：迁移 attachment chip、inline/preview block、尺寸裁剪和 placeholder；按
+  terminal capability 明确 supported/unsupported/missing，不把元数据列表冒充图片
+  renderer 完成。
+
+N1 的出口：每项都有上游 source/test map、production controller、stable ID/revision、
+  semantic cell/geometry/mouse fixture，且 overlay 与主 prompt 共用 focus owner 和
+  Esc ladder。
+
+### N2：P4 ScrollbackPane 与结构化 block renderer
+
+将 `RichTranscript` 从 production renderer 降为行为 oracle，迁移 Grok scrollback
+layout/render/selection/scrollbar/timeline 闭包。至少覆盖 Markdown、Diff、Image、
+Reasoning、ToolCall、ToolResult、Agent/Subagent status、partial/replacement 和
+Unknown block；File Search preview 复用同一 width/grapheme/hit-map 规则。
+
+N2 的出口：结构化 fixture 在 Grok reference 与 DSH adapter 下的 glyph、颜色 role、
+wrapping、selection/copy/link、stable block target 和 partial replacement 一致。
+
+### N3：Workspace/Dashboard 与 Agent/Task/Subagent 专用 pane
+
+- Workspace：迁移 Grok tree/list/group/peek/back/focus/reorder/archive 视觉，DSH 提供
+  session/workspace/job DTO 和 mutation effect；验证 refresh、attach/back race。
+- Agent/Task/Subagent：迁移 status/turn/streaming、task list、subagent catalog、
+  interrupt、running/complete/error/reconnect 状态和主绘制顺序；保留 generation 和
+  parent-child stable identity。
+
+N3 的出口：所有 pane 从同一 layout snapshot 绘制，命中和焦点不依赖数组索引；真实
+  backend fixture 覆盖 stream、interrupt、late/stale notification 和 reconnect。
+
+### N4：生产路径收敛与完整 parity 门禁
+
+N1-N3 完成后，才允许删除或降级 `RichTranscript`、runtime 手工文案/布局和其它
+  同职责 fallback。最后运行完整 reference cell diff、semantic matrix、PTY resize/
+  mouse/selection/paste/terminal restore、真实 backend matrix，并检查：
+
+- Markdown、Diff、File Search、Suggestion/history、Image、Workspace、Agent/Task/
+  Subagent 全部可用或显式 `pending/unsupported`；
+- 无第二套 production layout/renderer；
+- resize 后 layout、hit map、cursor、scrollbar/timeline 同步失效并重建；
+- 所有 action 都经过 `UiIntent -> UiEffect -> receipt/notification`，没有 view 直调
+  RPC，也没有静态假数据伪造完成。
+
+在 N4 通过前，不能宣称“完整 TUI 完成”或“pixel parity 完成”。
 
 ## 4A. 能力状态和 host contract
 
