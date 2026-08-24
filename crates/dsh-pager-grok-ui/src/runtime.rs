@@ -235,7 +235,7 @@ fn run_loop(
         terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
         })?;
-        let poll_interval = if session.running() {
+        let poll_interval = if session.running() || ui.scrollback_pane.is_animating() {
             ANIMATION_POLL_INTERVAL
         } else {
             POLL_INTERVAL
@@ -359,6 +359,8 @@ struct UiState {
     effect_ledger: EffectLedger,
     effect_executor: AsyncEffectExecutor,
     next_operation: u64,
+    /// Local transcript-clock preference; `None` keeps the appearance default.
+    timestamps_enabled: Option<bool>,
     status: Option<String>,
     frame: usize,
     hit_map: HitMap,
@@ -628,6 +630,9 @@ impl UiState {
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
         let appearance = GrokAppearanceSnapshot::for_area(area, compact);
+        let show_timestamps = self
+            .timestamps_enabled
+            .unwrap_or(appearance.show_timestamps);
         let layout_cfg = LayoutConfig::default();
         let scrollbar_cfg = ScrollbarConfig::default();
         let inner_width = AgentViewLayout::inner_width(area, &layout_cfg, compact);
@@ -781,7 +786,7 @@ impl UiState {
             frame,
             &agent_layout,
             &scrollbar_cfg,
-            appearance.show_timestamps,
+            show_timestamps,
             &snapshot,
             &mut session.scrollback,
         );
@@ -1210,6 +1215,9 @@ impl UiState {
         let mut total_height = 0;
         let mut scroll_top = 0;
         let render_width = content.width.saturating_sub(1).max(1) as usize;
+        self.scrollback_pane.set_tick(self.frame as u64);
+        self.scrollback_pane
+            .set_selected_target(self.selected_transcript.clone());
         self.scrollback_pane
             .sync_with_options(scrollback, render_width, *theme, show_timestamps);
         if self.scrollback_pane.is_empty() {
@@ -1820,11 +1828,11 @@ impl UiState {
                 && let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row)
                 && let HitTarget::Overlay(name) = &region.target
             {
-                if let Some(key) = name.strip_prefix("agent-item:") {
-                    if let Some(id) = agent_item_from_key(key) {
-                        self.handle_agent_item_mouse(id, transport, session);
-                        return Ok(false);
-                    }
+                if let Some(key) = name.strip_prefix("agent-item:")
+                    && let Some(id) = agent_item_from_key(key)
+                {
+                    self.handle_agent_item_mouse(id, transport, session);
+                    return Ok(false);
                 }
                 if name == "watcher-cue" {
                     self.agent_detail = None;
@@ -2580,7 +2588,26 @@ impl UiState {
                 self.prompt_history_index = None;
                 true
             }
+            crate::slash::DispatchResult::Action(crate::slash::Action::ToggleTimestamps) => {
+                let enabled = !self
+                    .timestamps_enabled
+                    .unwrap_or(GrokAppearanceSnapshot::default().show_timestamps);
+                self.set_timestamps_enabled(enabled);
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::SetTimestamps(enabled)) => {
+                self.set_timestamps_enabled(enabled);
+                true
+            }
         }
+    }
+
+    fn set_timestamps_enabled(&mut self, enabled: bool) {
+        self.timestamps_enabled = Some(enabled);
+        self.prompt.reset();
+        self.suggestions.reset();
+        self.prompt_history_index = None;
+        self.status = Some(format!("Timestamps {}", if enabled { "on" } else { "off" }));
     }
 
     fn open_resume_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
@@ -4208,13 +4235,19 @@ mod tests {
             .expect("collapsed completed execute summary");
         assert_eq!(summary.copy_text, "› Run Query the current workspace");
         assert!(summary.line.to_string().starts_with("❙  › Run "));
-        assert!(summary.line.spans.iter().any(|span| {
-            span.content == "❙  " && span.style.fg == Some(theme.accent_success)
-        }));
         assert!(
-            summary.line.spans.iter().any(|span| {
-                span.content == "› " && span.style.fg == Some(theme.accent_success)
-            })
+            summary
+                .line
+                .spans
+                .iter()
+                .any(|span| { span.content == "❙  " && span.style.fg == Some(theme.gray) })
+        );
+        assert!(
+            summary
+                .line
+                .spans
+                .iter()
+                .any(|span| { span.content == "› " && span.style.fg == Some(theme.gray) })
         );
         let target = HitTarget::TranscriptEntry(id);
         let rect = Rect::new(3, 2, 60, 1);

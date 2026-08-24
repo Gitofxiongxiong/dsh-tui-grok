@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-外置原生 TUI 后端组合包。[`cordis.patch.yml`](cordis.patch.yml) 叠加在已安装的 DSH `dsh-base` 之上：提供编码 persona 和工具模式、禁用 HMR 以使 stdout 保持为 JSON-RPC 管道、将 Code Mode 的 worker 作为核心执行能力挂载，并插入进程外 pager 所需的 host 行——workspace 存储、browse 目录选择器、local file-reference、传输无关的 `api-gateway`，以及 stdin/stdout 上的外置 `tui-server`。它不挂载 HTTP 服务器、Web 运行时或浏览器插件，也不修改 Harness 源码。Agent 工具留在 host 平面；会话 preset 是后续叠加层。
+外置原生 TUI 后端组合包。[`cordis.patch.yml`](cordis.patch.yml) 叠加在已安装的 DSH `dsh-base` 之上：提供编码 persona 和工具模式、禁用 HMR 以使 stdout 保持为 JSON-RPC 管道、将 Code Mode 的 worker 作为核心执行能力挂载、持久化会话投影检查点、安装冷会话投影恢复适配器，并插入进程外 pager 所需的 host 行——workspace 存储、browse 目录选择器、local file-reference、传输无关的 `api-gateway`，以及 stdin/stdout 上的外置 `tui-server`。它不挂载 HTTP 服务器、Web 运行时或浏览器插件，也不修改 Harness 源码。Agent 工具留在 host 平面；会话 preset 是后续叠加层。
 
 将此 bundle 安装到 `grok-tui` 等自定义 profile 后运行 `dsh --profile grok-tui`。原生 pager（`dsh-pager`）在管道上发送 `tui.hello`。stdout 专用于协议帧；诊断信息应写到 stderr。
 

@@ -117,6 +117,7 @@ const expectedDependencies = [
   '@dsh-pager-grok/tui-protocol',
   '@dsh-pager-grok/tui-server',
   '@dsh-pager-grok/tui-embedded',
+  '@dsh-pager-grok/tui-session-projection-recovery',
 ]
 const ready = bundles.includes('@dsh-pager-grok/tui-embedded')
   && expectedDependencies.every((name) => Object.hasOwn(dependencies, name))
@@ -141,6 +142,7 @@ const expected = {
   '@dsh-pager-grok/tui-protocol': `link:${repoRoot}/packages/dsh-tui-protocol`,
   '@dsh-pager-grok/tui-server': `link:${repoRoot}/packages/dsh-tui-server`,
   '@dsh-pager-grok/tui-embedded': `link:${repoRoot}/packages/dsh-tui-embedded`,
+  '@dsh-pager-grok/tui-session-projection-recovery': `link:${repoRoot}/packages/dsh-tui-session-projection-recovery`,
 }
 const current = Object.entries(expected).every(([name, spec]) => dependencies[name] === spec)
 process.exit(current ? 0 : 1)
@@ -210,7 +212,8 @@ dsh_tui_install_local_profile() {
   "$harness_entry" plugin --profile "$profile" add \
     "$repo_root/packages/dsh-tui-protocol" \
     "$repo_root/packages/dsh-tui-server" \
-    "$repo_root/packages/dsh-tui-embedded"
+    "$repo_root/packages/dsh-tui-embedded" \
+    "$repo_root/packages/dsh-tui-session-projection-recovery"
 
   dsh_tui_require_profile "$profile" "$repo_root"
   printf 'DSH profile %s is ready.\n' "$profile" >&2

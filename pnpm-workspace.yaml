@@ -2,5 +2,6 @@ packages:
   - packages/dsh-tui-protocol
   - packages/dsh-tui-server
   - packages/dsh-tui-embedded
+  - packages/dsh-tui-session-projection-recovery
 allowBuilds:
   esbuild: true

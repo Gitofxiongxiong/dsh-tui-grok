@@ -5,6 +5,7 @@
 //! needs to inspect protocol JSON or flatten a tool result itself.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
 use dsh_pager::scrollback::{Scrollback, compute_paint_window};
@@ -23,7 +24,10 @@ use crate::views::execute_tool::{
     DisplayMode as ExecuteDisplayMode, ExecuteBlockContext, ExecuteBlockLine,
 };
 use crate::views::execute_tool_adapter::project_execute_tool;
-use crate::{host_adapter::TranscriptRow, render::wrapping::word_wrap_line, theme::Theme};
+use crate::{
+    geometry::HitTarget, host_adapter::TranscriptRow, render::wrapping::word_wrap_line,
+    theme::Theme,
+};
 
 /// A rich line after semantic block rendering and terminal-width wrapping.
 /// `line_index` is stable within an entry at a given width and is shared with
@@ -39,6 +43,14 @@ pub struct RichPaintLine {
     pub header: bool,
     pub group_header: bool,
     pub rail: bool,
+    /// Whether the left rail is in Grok's running wave state.
+    pub rail_animated: bool,
+    /// Whether the left rail is in Grok's short post-finish accent flash.
+    pub rail_flash: bool,
+    /// Base accent used by the running wave and finish flash.
+    pub rail_accent: Option<Color>,
+    /// Logical row phase inside the entry's rail.
+    pub rail_wave_row: u16,
     pub selectable: bool,
     pub background: Option<Color>,
     pub copy_text: String,
@@ -181,26 +193,44 @@ impl ProjectionInfo {
 pub struct ScrollbackPane {
     width: usize,
     show_timestamps: bool,
+    tick: u64,
     entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
     expanded_entries: HashSet<DshRenderEntryId>,
     expanded_blocks: HashSet<(DshRenderEntryId, usize)>,
     expanded_groups: HashSet<DshRenderEntryId>,
     projections: HashMap<DshRenderEntryId, ProjectionInfo>,
+    selected_target: Option<HitTarget>,
 }
 
 impl ScrollbackPane {
     pub fn clear(&mut self) {
         self.width = 0;
         self.show_timestamps = true;
+        self.tick = 0;
         self.entries.clear();
         self.expanded_entries.clear();
         self.expanded_blocks.clear();
         self.expanded_groups.clear();
         self.projections.clear();
+        self.selected_target = None;
     }
 
     pub fn sync(&mut self, scrollback: &mut Scrollback, width: usize, theme: Theme) {
         self.sync_with_options(scrollback, width, theme, true);
+    }
+
+    /// Set the animation frame without invalidating the semantic-line cache.
+    /// Running accents are recolored when visible lines are materialized.
+    pub fn set_tick(&mut self, tick: u64) {
+        self.tick = tick;
+    }
+
+    /// Pass the runtime's current transcript hit target into the projection.
+    /// Grok uses the same selection state to lift a muted block back to its
+    /// primary (white) foreground; keeping it here also makes the paint path
+    /// independent of the runtime's hit-map implementation.
+    pub fn set_selected_target(&mut self, target: Option<HitTarget>) {
+        self.selected_target = target;
     }
 
     pub fn sync_with_options(
@@ -350,6 +380,16 @@ impl ScrollbackPane {
             .all(|entry| entry.entry.visibility == DshRenderVisibility::Hidden)
     }
 
+    pub fn is_animating(&self) -> bool {
+        let now = now_epoch_ms();
+        self.entries.values().any(|entry| {
+            entry.lines.iter().any(|line| {
+                line.rail_animated
+                    || (line.rail_flash && finish_flash_active(entry.entry.finished_at_ms, now))
+            })
+        })
+    }
+
     pub fn total_height(&mut self, scrollback: &mut Scrollback) -> usize {
         scrollback.total_height(self.width.max(1))
     }
@@ -433,6 +473,18 @@ impl ScrollbackPane {
                 }
                 let mut line = line.clone();
                 line.screen_y = screen_y as u16;
+                let selected = self
+                    .selected_target
+                    .as_ref()
+                    .is_some_and(|target| line_matches_target(&line, target));
+                apply_dynamic_accent(
+                    &mut line,
+                    self.tick,
+                    *Theme::current(),
+                    cached.entry.finished_at_ms,
+                    now_epoch_ms(),
+                    selected,
+                );
                 painted.push(line);
             }
         }
@@ -454,7 +506,23 @@ fn semantic_lines(
     let Some(row) = projected_row(entry, projection.mode, width) else {
         return Vec::new();
     };
-    let semantic = if projection.mode == DisplayMode::Collapsed
+    let semantic = if entry.kind == DshRenderKind::Thinking
+        && projection.mode == DisplayMode::Collapsed
+        && let Some(block) = entry
+            .content
+            .blocks
+            .iter()
+            .find(|block| matches!(block, DshRenderBlock::Reasoning { .. }))
+    {
+        vec![SemanticLine {
+            line: collapsed_block_line(block, entry, theme),
+            block_index: None,
+            rail: true,
+            header: true,
+            selectable: true,
+            markdown: false,
+        }]
+    } else if projection.mode == DisplayMode::Collapsed
         && entry.kind == DshRenderKind::ToolCall
         && let Some(tool) = tool_block(entry)
         && let Some(line) = execute_summary_line(
@@ -462,7 +530,8 @@ fn semantic_lines(
             entry.finish,
             theme,
             width.saturating_sub(ENTRY_CHROME_WIDTH),
-        ) {
+        )
+    {
         vec![SemanticLine {
             line,
             block_index: None,
@@ -493,10 +562,8 @@ fn semantic_lines(
             Style::default()
                 .fg(if projection.group_failed {
                     theme.accent_error
-                } else if projection.group_running {
-                    theme.accent_running
                 } else {
-                    theme.accent_tool
+                    theme.gray
                 })
                 .add_modifier(Modifier::BOLD),
         ));
@@ -535,17 +602,24 @@ fn semantic_lines(
     let mut timestamp_pending = timestamp;
     let rail_accent = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
         theme.accent_error
-    } else if projection.group_running || entry.finish == DshRenderFinish::Running {
-        theme.accent_running
     } else if !projection.group_header
         && let Some(tool) = tool_block(entry)
     {
         tool_accent(tool, entry.finish, theme)
     } else {
-        theme.accent_tool
+        theme.gray
     };
-    let collapsed_rail = (projection.group_header && !projection.group_expanded)
-        || (entry.kind == DshRenderKind::ToolCall && projection.mode == DisplayMode::Collapsed);
+    let rail_animated = projection.group_running || entry.finish == DshRenderFinish::Running;
+    let rail_flash = entry.finished_at_ms.is_some()
+        && !rail_animated
+        && matches!(
+            entry.kind,
+            DshRenderKind::Thinking | DshRenderKind::ToolCall
+        );
+    let collapsed_rail = !rail_animated
+        && ((projection.group_header && !projection.group_expanded)
+            || (entry.kind == DshRenderKind::ToolCall
+                && projection.mode == DisplayMode::Collapsed));
     let markdown_total = semantic
         .iter()
         .filter(|line| line.markdown)
@@ -583,6 +657,10 @@ fn semantic_lines(
                 header: semantic_line.header,
                 group_header: projection.group_header && semantic_line.header,
                 rail: line_rail,
+                rail_animated: line_rail && rail_animated,
+                rail_flash: line_rail && rail_flash,
+                rail_accent: line_rail.then_some(rail_accent),
+                rail_wave_row: lines.len().min(u16::MAX as usize) as u16,
                 selectable: semantic_line.selectable,
                 background: projection.background,
                 copy_text,
@@ -607,6 +685,10 @@ fn semantic_lines(
                         header: false,
                         group_header: false,
                         rail: line_rail,
+                        rail_animated: line_rail && rail_animated,
+                        rail_flash: line_rail && rail_flash,
+                        rail_accent: line_rail.then_some(rail_accent),
+                        rail_wave_row: lines.len().min(u16::MAX as usize) as u16,
                         selectable: false,
                         background: projection.background,
                         copy_text: String::new(),
@@ -645,6 +727,10 @@ fn semantic_lines(
                 header: false,
                 group_header: false,
                 rail: false,
+                rail_animated: false,
+                rail_flash: false,
+                rail_accent: None,
+                rail_wave_row: 0,
                 selectable: false,
                 background: projection.background,
                 copy_text: String::new(),
@@ -661,6 +747,10 @@ fn semantic_lines(
             header: false,
             group_header: false,
             rail: false,
+            rail_animated: false,
+            rail_flash: false,
+            rail_accent: None,
+            rail_wave_row: 0,
             selectable: false,
             background: projection.background,
             copy_text: String::new(),
@@ -712,20 +802,19 @@ fn collapsed_block_line(
     theme: Theme,
 ) -> Line<'static> {
     match block {
-        DshRenderBlock::Reasoning { .. } => Line::from(Span::styled(
-            format!(
-                "{} {}",
-                crate::glyphs::diamond_filled(),
-                if entry.finish == DshRenderFinish::Running {
-                    "Thinking…"
-                } else {
-                    "Thought"
-                }
-            ),
-            Style::default()
-                .fg(theme.fuzzy_accent)
-                .add_modifier(Modifier::BOLD),
-        )),
+        DshRenderBlock::Reasoning { .. } => {
+            let label = if entry.finish == DshRenderFinish::Running {
+                "Thinking…".to_string()
+            } else if let Some(elapsed) = thinking_elapsed_ms(entry) {
+                format!("Thought for {}", format_elapsed_ms(elapsed))
+            } else {
+                "Thought".to_string()
+            };
+            Line::from(Span::styled(
+                format!("{} {label}", crate::glyphs::diamond_filled()),
+                Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
+            ))
+        }
         DshRenderBlock::ToolCall { .. } => execute_summary_line(block, entry.finish, theme, 120)
             .unwrap_or_else(|| {
                 tool_summary_line(
@@ -745,10 +834,50 @@ fn collapsed_block_line(
             Style::default().fg(if *is_error {
                 theme.accent_error
             } else {
-                theme.gray_bright
+                theme.gray
             }),
         )),
         _ => Line::from(""),
+    }
+}
+
+fn now_epoch_ms() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn finish_flash_active(finished_at_ms: Option<u64>, now_ms: Option<u64>) -> bool {
+    let Some(finished_at_ms) = finished_at_ms else {
+        return false;
+    };
+    let Some(now_ms) = now_ms else {
+        return false;
+    };
+    now_ms
+        .checked_sub(finished_at_ms)
+        .is_some_and(|elapsed| elapsed < FINISH_FLASH_DURATION_MS)
+}
+
+fn thinking_elapsed_ms(entry: &DshRenderEntry) -> Option<u64> {
+    let started = entry.started_at_ms?;
+    let ended = if entry.finish == DshRenderFinish::Running {
+        now_epoch_ms()?
+    } else {
+        entry.finished_at_ms?
+    };
+    ended.checked_sub(started)
+}
+
+fn format_elapsed_ms(elapsed_ms: u64) -> String {
+    let seconds = elapsed_ms as f64 / 1_000.0;
+    if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else {
+        let minutes = (seconds / 60.0).floor() as u64;
+        let remaining = (seconds - minutes as f64 * 60.0).round() as u64;
+        format!("{minutes}m{remaining}s")
     }
 }
 
@@ -767,6 +896,16 @@ fn render_semantic_lines(
         && (entry.group_key.is_some() || row.content.blocks.len() > 1)
         && row.content.blocks.iter().any(is_local_foldable_block);
     if !has_foldable_blocks {
+        if row.kind == DshRenderKind::Thinking
+            && entry.finish == DshRenderFinish::Running
+            && let Some(block) = row
+                .content
+                .blocks
+                .iter()
+                .find(|block| matches!(block, DshRenderBlock::Reasoning { .. }))
+        {
+            return thinking_running_lines(entry, block, theme, width);
+        }
         return render_row_at_width(row, theme, width.saturating_sub(ENTRY_CHROME_WIDTH))
             .into_iter()
             .enumerate()
@@ -807,7 +946,15 @@ fn render_semantic_lines(
                 });
             }
         }
-        let lines = if is_local_foldable_block(block) && !expanded {
+        let lines = if matches!(block, DshRenderBlock::Reasoning { .. })
+            && entry.finish == DshRenderFinish::Running
+            && !expanded
+        {
+            thinking_running_lines(entry, block, theme, width)
+                .into_iter()
+                .map(|line| line.line)
+                .collect::<Vec<_>>()
+        } else if is_local_foldable_block(block) && !expanded {
             vec![collapsed_block_line(block, entry, theme)]
         } else {
             let mut rendered = Vec::new();
@@ -833,6 +980,51 @@ fn render_semantic_lines(
         }
     }
     semantic
+}
+
+fn thinking_running_lines(
+    entry: &DshRenderEntry,
+    block: &DshRenderBlock,
+    theme: Theme,
+    width: usize,
+) -> Vec<SemanticLine> {
+    let mut body = Vec::new();
+    render_block(
+        &mut body,
+        block,
+        theme,
+        0,
+        width.saturating_sub(ENTRY_CHROME_WIDTH),
+    );
+    let mut lines = vec![SemanticLine {
+        line: collapsed_block_line(block, entry, theme),
+        block_index: None,
+        rail: true,
+        header: true,
+        selectable: true,
+        markdown: false,
+    }];
+    let max_body = 3usize;
+    if body.len() > max_body {
+        lines.push(SemanticLine {
+            line: Line::from(Span::styled("…", theme.gray)),
+            block_index: None,
+            rail: true,
+            header: false,
+            selectable: true,
+            markdown: false,
+        });
+        body = body.split_off(body.len().saturating_sub(max_body));
+    }
+    lines.extend(body.into_iter().map(|line| SemanticLine {
+        line,
+        block_index: None,
+        rail: true,
+        header: false,
+        selectable: true,
+        markdown: false,
+    }));
+    lines
 }
 
 impl RichTranscript {
@@ -966,9 +1158,8 @@ pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
 fn render_row_at_width(row: &TranscriptRow, theme: Theme, width: usize) -> Vec<Line<'static>> {
     let color = if row.kind == DshRenderKind::ToolCall {
         match row.finish {
-            DshRenderFinish::Running => theme.accent_running,
             DshRenderFinish::Failed => theme.accent_error,
-            _ => theme.accent_success,
+            _ => theme.gray,
         }
     } else {
         color_for_kind(row.kind, theme)
@@ -1030,7 +1221,9 @@ fn projected_row(entry: &DshRenderEntry, mode: DisplayMode, width: usize) -> Opt
     if mode == DisplayMode::Expanded {
         return Some(row);
     }
-    if mode == DisplayMode::Truncated || entry.kind == DshRenderKind::User {
+    if (mode == DisplayMode::Truncated && entry.kind != DshRenderKind::Thinking)
+        || entry.kind == DshRenderKind::User
+    {
         let text = truncate_visual_lines(&row.text, width, 3);
         row.text = text;
         row.content = DshRenderContent::default();
@@ -1238,6 +1431,108 @@ fn decorate_line(
         }
     }
     line
+}
+
+const WAVE_SPEED: f32 = 0.15;
+const WAVE_ROWS: u16 = 32;
+const FINISH_FLASH_DURATION_MS: u64 = 400;
+
+fn wave_brightness(tick: u64, row: u16) -> f32 {
+    use std::f32::consts::PI;
+
+    let phase = (row as f32 / WAVE_ROWS.max(1) as f32) * 2.0 * PI;
+    let value = (tick as f32 * WAVE_SPEED + phase).sin();
+    value * value
+}
+
+fn blend_color(base: Color, foreground: Color, opacity: f32) -> Option<Color> {
+    let (Color::Rgb(br, bg, bb), Color::Rgb(fr, fg, fb)) = (base, foreground) else {
+        return None;
+    };
+    let opacity = opacity.clamp(0.0, 1.0);
+    let channel = |base: u8, foreground: u8| {
+        (base as f32 + (foreground as f32 - base as f32) * opacity).round() as u8
+    };
+    Some(Color::Rgb(
+        channel(br, fr),
+        channel(bg, fg),
+        channel(bb, fb),
+    ))
+}
+
+fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
+    match target {
+        HitTarget::TranscriptEntry(entry_id) => line.entry_id == *entry_id,
+        HitTarget::TranscriptBlock {
+            entry_id,
+            block_index,
+        } => {
+            line.entry_id == *entry_id
+                && (line.block_index == Some(*block_index)
+                    // A standalone running Thinking surface has no local
+                    // block index; its entry target is still the block's
+                    // visible selection target.
+                    || (line.block_index.is_none() && line.header))
+        }
+        _ => false,
+    }
+}
+
+fn apply_dynamic_accent(
+    line: &mut RichPaintLine,
+    tick: u64,
+    theme: Theme,
+    finished_at_ms: Option<u64>,
+    now_ms: Option<u64>,
+    selected: bool,
+) {
+    if !line.rail || (!line.rail_animated && !line.rail_flash && !selected) {
+        return;
+    }
+    let accent = line.rail_accent.unwrap_or(theme.gray);
+    let error_accent = accent == theme.accent_error;
+    let background = line.background.unwrap_or(theme.bg_base);
+    let flashing = line.rail_flash && finish_flash_active(finished_at_ms, now_ms);
+    if !line.rail_animated && !flashing && !selected {
+        return;
+    }
+    let rail_color = if flashing {
+        accent
+    } else if selected {
+        if error_accent {
+            accent
+        } else {
+            theme.text_primary
+        }
+    } else {
+        blend_color(
+            background,
+            theme.text_primary,
+            wave_brightness(tick, line.rail_wave_row),
+        )
+        .unwrap_or(theme.text_primary)
+    };
+    let text_color = if error_accent {
+        accent
+    } else if selected || line.rail_animated {
+        theme.text_primary
+    } else {
+        theme.gray
+    };
+
+    if let Some(prefix) = line.line.spans.first_mut() {
+        // Only the left rail receives the animated color.
+        prefix.style = prefix.style.fg(rail_color);
+    }
+
+    // Right-side content is a static role: muted gray when settled, primary
+    // white when selected or running. It must not inherit the rail's wave
+    // phase.
+    if selected || line.rail_animated {
+        for span in line.line.spans.iter_mut().skip(1) {
+            span.style = span.style.fg(text_color);
+        }
+    }
 }
 
 fn build_projection(
@@ -1516,15 +1811,6 @@ fn nonempty_first_line(value: &str) -> Option<&str> {
 }
 
 fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) -> Color {
-    if let Some(execute) = project_execute_tool(block) {
-        let context = ExecuteBlockContext::new(
-            ExecuteDisplayMode::Collapsed,
-            finish == DshRenderFinish::Running,
-            80,
-            &theme,
-        );
-        return execute.accent(&context);
-    }
     let failed = match block {
         DshRenderBlock::ToolCall { result, .. } => {
             result.as_deref().is_some_and(|result| result.is_error)
@@ -1533,18 +1819,8 @@ fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) ->
     } || finish == DshRenderFinish::Failed;
     if failed {
         theme.accent_error
-    } else if finish == DshRenderFinish::Running {
-        theme.accent_running
-    } else if matches!(
-        block,
-        DshRenderBlock::ToolCall {
-            view: Some(view),
-            ..
-        } if view.kind() == DshToolKind::Execute
-    ) {
-        theme.accent_success
     } else {
-        theme.gray_bright
+        theme.gray
     }
 }
 
@@ -1561,7 +1837,15 @@ fn execute_summary_line(
         width.saturating_sub(2).max(1),
         &theme,
     );
-    let accent = execute.accent(&context);
+    let mut context = context;
+    // Grok's collapsed Execute header uses the muted role; the selected or
+    // running paint pass lifts it to primary/white.
+    context.muted_command_collapsed = true;
+    let accent = if finish == DshRenderFinish::Failed {
+        theme.accent_error
+    } else {
+        theme.gray
+    };
     let mut line = execute.output(&context).lines.into_iter().next()?.content;
     line.spans.insert(
         0,
@@ -1591,26 +1875,22 @@ fn tool_summary_line(
     if let Some(description) = header.strip_prefix("Run ") {
         spans.push(Span::styled(
             "Run ",
-            Style::default()
-                .fg(theme.gray_bright)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             description.to_string(),
-            Style::default().fg(theme.text_primary),
+            Style::default().fg(theme.gray),
         ));
     } else if let Some(command) = header.strip_prefix("$ ") {
-        spans.push(Span::styled("$ ", Style::default().fg(theme.gray_dim)));
+        spans.push(Span::styled("$ ", Style::default().fg(theme.gray)));
         spans.push(Span::styled(
             command.to_string(),
-            Style::default().fg(theme.command),
+            Style::default().fg(theme.gray),
         ));
     } else {
         spans.push(Span::styled(
             header.to_string(),
-            Style::default()
-                .fg(theme.gray_bright)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
         ));
     }
     Line::from(spans)
@@ -1715,7 +1995,11 @@ fn render_execute_tool_call(
         component_width,
         &theme,
     );
-    let accent = execute.accent(&context);
+    let accent = if finish == DshRenderFinish::Failed {
+        theme.accent_error
+    } else {
+        theme.gray
+    };
     for (index, component_line) in execute.output(&context).lines.into_iter().enumerate() {
         lines.push(paint_execute_component_line(
             component_line,
@@ -2003,12 +2287,7 @@ fn render_block(
             );
         }
         DshRenderBlock::Reasoning { text } => {
-            push_plain_lines(
-                lines,
-                text,
-                Style::default().fg(theme.fuzzy_accent),
-                &prefix,
-            );
+            push_plain_lines(lines, text, Style::default().fg(theme.gray), &prefix);
         }
         DshRenderBlock::Image {
             attachment_id,
@@ -2326,8 +2605,7 @@ fn color_for_kind(kind: DshRenderKind, theme: Theme) -> ratatui::style::Color {
     match kind {
         DshRenderKind::User => theme.accent_user,
         DshRenderKind::Assistant => theme.accent_assistant,
-        DshRenderKind::Thinking => theme.accent_thinking,
-        DshRenderKind::ToolCall | DshRenderKind::ToolResult => theme.accent_tool,
+        DshRenderKind::Thinking | DshRenderKind::ToolCall | DshRenderKind::ToolResult => theme.gray,
         DshRenderKind::Error => theme.accent_error,
         _ => theme.gray,
     }
@@ -2346,6 +2624,8 @@ mod tests {
         TranscriptRow {
             id: DshRenderEntryId::Event { seq: 7 },
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             label: "Assistant".into(),
             text: "fallback".into(),
             kind: DshRenderKind::Assistant,
@@ -2438,6 +2718,8 @@ mod tests {
         let assistant = TranscriptRow {
             id: DshRenderEntryId::Event { seq: 12 },
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             label: "Assistant".into(),
             text: "# Title\n\n**bold** and `code`\n\n```rust\nlet x = 1;\n```".into(),
             kind: DshRenderKind::Assistant,
@@ -2495,6 +2777,8 @@ mod tests {
             },
             source_seq: 6,
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             kind: DshRenderKind::Assistant,
             text: "hidden thought\n▸ shell\nfinal answer".into(),
             partial: true,
@@ -2533,7 +2817,7 @@ mod tests {
         assert!(initial.iter().any(|line| line.copy_text == "› shell"));
         assert!(initial.iter().any(|line| line.copy_text == "final answer"));
         assert!(
-            !initial
+            initial
                 .iter()
                 .any(|line| line.copy_text.contains("hidden thought"))
         );
@@ -2645,12 +2929,202 @@ mod tests {
     }
 
     #[test]
+    fn completed_thinking_renders_grok_elapsed_header() {
+        let start = 1_787_500_000_000.0;
+        let finish = start + 10_000.0;
+        let mut scrollback = Scrollback::default();
+        for (seq, time, chunk) in [
+            (
+                1,
+                start,
+                json!({
+                    "turn": 8,
+                    "step": 0,
+                    "chunk": {"type": "block-start", "index": 0, "blockType": "reasoning"}
+                }),
+            ),
+            (
+                2,
+                start + 100.0,
+                json!({
+                    "turn": 8,
+                    "step": 0,
+                    "chunk": {"type": "reasoning-delta", "index": 0, "text": "deep thought"}
+                }),
+            ),
+            (
+                3,
+                finish,
+                json!({
+                    "turn": 8,
+                    "step": 0,
+                    "chunk": {"type": "finish", "reason": "stop"}
+                }),
+            ),
+        ] {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "assistant/chunk".into(),
+                    seq,
+                    time,
+                    data: chunk,
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, *Theme::current());
+        let lines = pane.visible_lines(&mut scrollback, 0, 20);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.copy_text == "◆ Thought for 10.0s")
+        );
+        let header = lines
+            .iter()
+            .find(|line| line.copy_text == "◆ Thought for 10.0s")
+            .expect("completed thinking header");
+        assert_eq!(
+            header.line.spans.first().and_then(|span| span.style.fg),
+            Some(Theme::current().gray)
+        );
+        assert!(
+            header
+                .line
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| { span.style.fg == Some(Theme::current().gray) })
+        );
+    }
+
+    #[test]
+    fn running_tool_rail_uses_traveling_wave_colors() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "tool/call".into(),
+                seq: 40,
+                time: 1_787_500_000_000.0,
+                data: json!({
+                    "name": "bash",
+                    "callId": "wave-call",
+                    "arguments": "{}"
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: Some(json!({
+                "for": "call",
+                "view": {"card": "terminal", "title": "cargo test", "description": "run tests"}
+            })),
+        });
+        let theme = *Theme::current();
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, theme);
+        pane.set_tick(0);
+        let first = pane
+            .visible_lines(&mut scrollback, 0, 20)
+            .into_iter()
+            .find(|line| line.rail_animated)
+            .expect("running rail");
+        pane.set_tick(10);
+        let second = pane
+            .visible_lines(&mut scrollback, 0, 20)
+            .into_iter()
+            .find(|line| line.rail_animated)
+            .expect("running rail at next tick");
+        assert_ne!(
+            first.line.spans.first().and_then(|span| span.style.fg),
+            second.line.spans.first().and_then(|span| span.style.fg),
+            "running rail should be recolored by the frame tick"
+        );
+        assert_ne!(
+            first.line.spans.first().and_then(|span| span.style.fg),
+            Some(theme.accent_running),
+            "running tools use a neutral gray-to-white wave, not the legacy purple accent"
+        );
+        assert_eq!(
+            first
+                .line
+                .spans
+                .iter()
+                .skip(1)
+                .map(|span| span.style.fg)
+                .collect::<Vec<_>>(),
+            second
+                .line
+                .spans
+                .iter()
+                .skip(1)
+                .map(|span| span.style.fg)
+                .collect::<Vec<_>>(),
+            "running right-side text must not inherit the rail wave phase"
+        );
+        assert!(
+            first
+                .line
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| { span.style.fg == Some(theme.text_primary) })
+        );
+
+        pane.set_selected_target(Some(HitTarget::TranscriptEntry(DshRenderEntryId::Event {
+            seq: 40,
+        })));
+        let selected = pane
+            .visible_lines(&mut scrollback, 0, 20)
+            .into_iter()
+            .find(|line| line.rail_animated && line.header)
+            .expect("selected running header");
+        assert_eq!(
+            selected.line.spans.first().and_then(|span| span.style.fg),
+            Some(theme.text_primary)
+        );
+        assert!(
+            selected
+                .line
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| { span.style.fg == Some(theme.text_primary) })
+        );
+
+        let mut failed = selected.clone();
+        failed.rail_animated = false;
+        failed.rail_flash = false;
+        failed.rail_accent = Some(theme.accent_error);
+        apply_dynamic_accent(&mut failed, 0, theme, None, None, true);
+        assert!(
+            failed
+                .line
+                .spans
+                .iter()
+                .all(|span| { span.style.fg == Some(theme.accent_error) })
+        );
+    }
+
+    #[test]
+    fn finish_flash_is_bounded_to_grok_window() {
+        assert!(finish_flash_active(Some(1_000), Some(1_399)));
+        assert!(!finish_flash_active(Some(1_000), Some(1_400)));
+        assert!(!finish_flash_active(Some(1_000), Some(900)));
+    }
+
+    #[test]
     fn rich_transcript_uses_structured_blocks_and_stable_identity() {
         let row = row();
         let entry = DshRenderEntry {
             id: row.id,
             source_seq: row.source_seq,
             created_at_ms: row.created_at_ms,
+            started_at_ms: None,
+            finished_at_ms: None,
             kind: row.kind,
             text: row.text,
             partial: false,
@@ -2687,6 +3161,8 @@ mod tests {
             id,
             source_seq: 31,
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             kind: DshRenderKind::Assistant,
             text: text.into(),
             partial: false,
@@ -2736,6 +3212,8 @@ mod tests {
                 id: row.id,
                 source_seq: row.source_seq,
                 created_at_ms: row.created_at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
                 kind: row.kind,
                 text: row.text,
                 partial: false,
@@ -2766,6 +3244,8 @@ mod tests {
                 id: DshRenderEntryId::Event { seq: 1 },
                 source_seq: 1,
                 created_at_ms: None,
+                started_at_ms: None,
+                finished_at_ms: None,
                 kind: DshRenderKind::SystemInstruction,
                 text: "secret system prompt".into(),
                 partial: false,
@@ -2785,6 +3265,8 @@ mod tests {
                 id: DshRenderEntryId::Event { seq: 2 },
                 source_seq: 2,
                 created_at_ms: None,
+                started_at_ms: None,
+                finished_at_ms: None,
                 kind: DshRenderKind::AgentContext,
                 text: "repository files and hidden instructions".into(),
                 partial: false,
@@ -2813,6 +3295,8 @@ mod tests {
         let row = TranscriptRow {
             id: DshRenderEntryId::Event { seq: 9 },
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             label: "Assistant".into(),
             text: "fallback".into(),
             kind: DshRenderKind::Assistant,
@@ -2888,6 +3372,8 @@ mod tests {
             let row = TranscriptRow {
                 id: DshRenderEntryId::Event { seq: 90 },
                 created_at_ms: None,
+                started_at_ms: None,
+                finished_at_ms: None,
                 label: "Tool".into(),
                 text: block.display_text(),
                 kind: DshRenderKind::ToolCall,
@@ -3143,6 +3629,8 @@ mod tests {
                 id: DshRenderEntryId::Event { seq: 10 },
                 source_seq: 10,
                 created_at_ms: None,
+                started_at_ms: None,
+                finished_at_ms: None,
                 kind: DshRenderKind::User,
                 text: "one\ntwo\nthree\nfour".into(),
                 partial: false,
@@ -3157,6 +3645,8 @@ mod tests {
                 id: DshRenderEntryId::Event { seq: 11 },
                 source_seq: 11,
                 created_at_ms: None,
+                started_at_ms: None,
+                finished_at_ms: None,
                 kind: DshRenderKind::Assistant,
                 text: "agent body".into(),
                 partial: false,
@@ -3370,11 +3860,14 @@ mod tests {
             "› Run retry jobs and inspect recent worker logs"
         );
         assert!(!summary.copy_text.contains("node worker.js"));
-        assert!(summary.line.to_string().starts_with("❙  › Run "));
+        assert!(summary.line.to_string().starts_with("┃  › Run "));
+        assert!(summary.rail_animated);
         assert!(
-            summary.line.spans.iter().any(|span| {
-                span.content == "› " && span.style.fg == Some(theme.accent_running)
-            })
+            summary
+                .line
+                .spans
+                .iter()
+                .any(|span| { span.content.contains('›') && span.style.fg.is_some() })
         );
         assert!(summary.line.spans.iter().any(|span| {
             span.content == "Run " && span.style.add_modifier.contains(Modifier::BOLD)

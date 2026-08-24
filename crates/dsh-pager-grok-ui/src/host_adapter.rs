@@ -22,6 +22,10 @@ use serde_json::Value;
 pub struct TranscriptRow {
     pub id: DshRenderEntryId,
     pub created_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
     pub label: String,
     pub text: String,
     pub kind: DshRenderKind,
@@ -849,6 +853,8 @@ impl From<DshRenderEntry> for TranscriptRow {
         Self {
             id: entry.id,
             created_at_ms: entry.created_at_ms,
+            started_at_ms: entry.started_at_ms,
+            finished_at_ms: entry.finished_at_ms,
             label: entry.kind.label().to_string(),
             text: entry.text,
             kind: entry.kind,

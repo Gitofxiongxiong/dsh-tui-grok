@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn task_order_matches_dsh_live_then_newest_settled() {
-        let tasks = vec![
+        let tasks = [
             TaskRow {
                 id: "done-old".into(),
                 kind: "bash".into(),

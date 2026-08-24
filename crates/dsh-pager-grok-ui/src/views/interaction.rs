@@ -304,6 +304,8 @@ mod tests {
         let transcript = vec![TranscriptRow {
             id: DshRenderEntryId::Event { seq: 1 },
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             label: "tool".into(),
             text: String::new(),
             kind: DshRenderKind::ToolCall,

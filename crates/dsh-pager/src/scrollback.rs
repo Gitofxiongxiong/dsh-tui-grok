@@ -33,6 +33,8 @@ pub struct ScrollbackEntry {
     pub id: EntryId,
     pub source_seq: i64,
     pub created_at_ms: Option<u64>,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
     pub kind: EntryKind,
     pub text: String,
     pub partial: bool,
@@ -52,6 +54,8 @@ impl ScrollbackEntry {
             id: entry.id,
             source_seq: entry.source_seq,
             created_at_ms: entry.created_at_ms,
+            started_at_ms: entry.started_at_ms,
+            finished_at_ms: entry.finished_at_ms,
             kind: entry.kind,
             text: entry.text,
             partial: entry.partial,
@@ -69,6 +73,8 @@ impl ScrollbackEntry {
     fn set(&mut self, entry: ScrollbackEntry) -> bool {
         if self.source_seq == entry.source_seq
             && self.created_at_ms == entry.created_at_ms
+            && self.started_at_ms == entry.started_at_ms
+            && self.finished_at_ms == entry.finished_at_ms
             && self.kind == entry.kind
             && self.text == entry.text
             && self.partial == entry.partial
@@ -83,6 +89,8 @@ impl ScrollbackEntry {
         }
         self.source_seq = entry.source_seq;
         self.created_at_ms = entry.created_at_ms;
+        self.started_at_ms = entry.started_at_ms;
+        self.finished_at_ms = entry.finished_at_ms;
         self.kind = entry.kind;
         self.text = entry.text;
         self.partial = entry.partial;
@@ -420,6 +428,8 @@ impl Scrollback {
                 id: entry.id,
                 source_seq: entry.source_seq,
                 created_at_ms: entry.created_at_ms,
+                started_at_ms: entry.started_at_ms,
+                finished_at_ms: entry.finished_at_ms,
                 kind: entry.kind,
                 text: entry.text.clone(),
                 partial: entry.partial,

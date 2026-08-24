@@ -12,6 +12,8 @@ use resume::ResumeCommand;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     ShowSessionPicker,
+    ToggleTimestamps,
+    SetTimestamps(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,9 @@ pub enum DispatchResult {
 }
 
 const RESUME: ResumeCommand = ResumeCommand;
+const TIMESTAMPS_USAGE: &str = "/timestamps";
+const TIMESTAMPS_DESCRIPTION: &str = "Show or hide transcript timestamps";
+const TIMESTAMPS_USAGE_TEXT: &str = "/timestamps [on|off]";
 
 pub fn dispatch(input: &str) -> DispatchResult {
     let trimmed = input.trim();
@@ -42,6 +47,14 @@ pub fn dispatch(input: &str) -> DispatchResult {
     };
     let split_at = command.find(char::is_whitespace).unwrap_or(command.len());
     let (name, args) = command.split_at(split_at);
+    if name == "timestamps" {
+        return match args.trim() {
+            "" => DispatchResult::Action(Action::ToggleTimestamps),
+            "on" => DispatchResult::Action(Action::SetTimestamps(true)),
+            "off" => DispatchResult::Action(Action::SetTimestamps(false)),
+            _ => DispatchResult::InvalidUsage(TIMESTAMPS_USAGE_TEXT),
+        };
+    }
     if name != RESUME.name() {
         return DispatchResult::NotLocal;
     }
@@ -58,10 +71,19 @@ pub fn merge_builtin_suggestions(items: &mut Vec<String>) {
     if !items.iter().any(|item| item == usage) {
         items.insert(0, usage.to_string());
     }
+    if !items.iter().any(|item| item == TIMESTAMPS_USAGE) {
+        items.push(TIMESTAMPS_USAGE.to_string());
+    }
 }
 
 pub fn command_description(command: &str) -> Option<&'static str> {
-    (command == RESUME.usage()).then(|| RESUME.description())
+    if command == RESUME.usage() {
+        Some(RESUME.description())
+    } else if command == TIMESTAMPS_USAGE || command == TIMESTAMPS_USAGE_TEXT {
+        Some(TIMESTAMPS_DESCRIPTION)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -83,14 +105,38 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_command_is_local_and_supports_explicit_state() {
+        assert_eq!(
+            dispatch("/timestamps"),
+            DispatchResult::Action(Action::ToggleTimestamps)
+        );
+        assert_eq!(
+            dispatch("/timestamps on"),
+            DispatchResult::Action(Action::SetTimestamps(true))
+        );
+        assert_eq!(
+            dispatch("/timestamps off"),
+            DispatchResult::Action(Action::SetTimestamps(false))
+        );
+        assert_eq!(
+            dispatch("/timestamps maybe"),
+            DispatchResult::InvalidUsage(TIMESTAMPS_USAGE_TEXT)
+        );
+        assert_eq!(
+            command_description("/timestamps"),
+            Some(TIMESTAMPS_DESCRIPTION)
+        );
+    }
+
+    #[test]
     fn resume_suggestion_is_pinned_once() {
         let mut items = vec!["/help".to_string(), "/resume".to_string()];
         merge_builtin_suggestions(&mut items);
-        assert_eq!(items, vec!["/help", "/resume"]);
+        assert_eq!(items, vec!["/help", "/resume", "/timestamps"]);
 
         let mut missing = vec!["/help".to_string()];
         merge_builtin_suggestions(&mut missing);
-        assert_eq!(missing, vec!["/resume", "/help"]);
+        assert_eq!(missing, vec!["/resume", "/help", "/timestamps"]);
         assert_eq!(
             command_description("/resume"),
             Some("Resume a previous session")

@@ -5,6 +5,7 @@
 ```text
 @dsh-pager-grok/tui-protocol   纯协议/codec library
 @dsh-pager-grok/tui-server     Cordis plugin，stdio gateway + control-plane
+@dsh-pager-grok/tui-session-projection-recovery  Cordis plugin，恢复冷会话列表投影
 @dsh-pager-grok/tui-embedded   dsh.bundle profile patch
 ```
 
@@ -18,14 +19,15 @@ pnpm install
 pnpm run verify:ts
 ```
 
-`pnpm run verify:ts` 会构建三个包并运行 protocol、gateway、control-plane、transport 和 bundle patch 测试。
+`pnpm run verify:ts` 会构建四个包并运行 protocol、gateway、control-plane、transport、冷会话投影恢复和 bundle patch 测试。
 
 ## 安装到 DSH profile
 
 ### 开发期推荐入口
 
-开发期推荐使用仓库脚本创建项目专属 profile。它会构建三个 TypeScript 包，并在一次
-`dsh plugin add` 中 link protocol、server 和 embedded，避免依赖本机遗留 profile：
+开发期推荐使用仓库脚本创建项目专属 profile。它会构建四个 TypeScript 包，并在一次
+`dsh plugin add` 中 link protocol、server、embedded 和 session-projection-recovery，避免依赖
+本机遗留 profile：
 
 ```bash
 DSH_TUI_PROFILE=dsh-pager-grok-dev \
@@ -44,17 +46,18 @@ dsh plugin --profile dsh-pager-grok add @dsh-pager-grok/tui-embedded@0.1.0
 dsh --profile dsh-pager-grok
 ```
 
-开发期不发布 npm 时，不要把三个 tarball 分三次装进 profile。`pnpm pack` 会把
+开发期不发布 npm 时，不要把四个 tarball 分次装进 profile。`pnpm pack` 会把
 `workspace:*` 转成普通的 `0.1.0` semver；profile 安装最后一个 bundle 时，pnpm
 会尝试从 npm registry 重新下载 `@dsh-pager-grok/tui-server`，而不是复用前面装的
-本地 tarball。直接一次性 link 三个源码包即可：
+本地 tarball。直接一次性 link 四个源码包即可：
 
 ```bash
 pnpm run build:ts
 dsh plugin --profile dsh-pager-grok add \
   /home/leo/code/dsh-pager-grok/packages/dsh-tui-protocol \
   /home/leo/code/dsh-pager-grok/packages/dsh-tui-server \
-  /home/leo/code/dsh-pager-grok/packages/dsh-tui-embedded
+  /home/leo/code/dsh-pager-grok/packages/dsh-tui-embedded \
+  /home/leo/code/dsh-pager-grok/packages/dsh-tui-session-projection-recovery
 dsh --profile dsh-pager-grok
 ```
 
@@ -70,7 +73,7 @@ scripts/real-e2e.sh
 
 只有正式发布到 npm 后，才使用上面的 `tui-embedded@0.1.0` 单包安装方式。
 
-三个 tarball 应保持同一版本；实际发布时应由 GitHub Actions 统一发布，避免 profile 装到不匹配的 protocol/server。
+四个 tarball 应保持同一版本；实际发布时应由 GitHub Actions 统一发布，避免 profile 装到不匹配的 protocol/server。
 
 `real-e2e.sh` 的默认真实联调只做只读加载和隔离空 session 的 PTY 生命周期，
 不会提交模型 prompt。`--smoke-interactions` 等非交互 smoke 依赖仓库内的

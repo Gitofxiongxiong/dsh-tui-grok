@@ -49,6 +49,8 @@
     "@deepseek-ai/dsh-file-reference-local": "0.1.0-rc.8",
     "@deepseek-ai/dsh-host-apiproxy": "0.1.0-rc.8",
     "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-session-projection-cache": "0.1.0-rc.8",
+    "@dsh-pager-grok/tui-session-projection-recovery": "workspace:*",
     "@deepseek-ai/dsh-storage": "0.1.0-rc.8",
     "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.8",
     "@deepseek-ai/dsh-storage-json": "0.1.0-rc.8",

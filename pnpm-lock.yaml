@@ -53,6 +53,9 @@ importers:
       '@deepseek-ai/dsh-host-directory-picker-browse':
         specifier: 0.1.0-rc.8
         version: 0.1.0-rc.8(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.8(@deepseek-ai/cordis@4.0.1))
+      '@deepseek-ai/dsh-session-projection-cache':
+        specifier: 0.1.0-rc.8
+        version: 0.1.0-rc.8(80a7956f091cdf0c220b226dd100fe03)
       '@deepseek-ai/dsh-storage':
         specifier: 0.1.0-rc.8
         version: 0.1.0-rc.8(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.8(@deepseek-ai/cordis@4.0.1))
@@ -68,6 +71,9 @@ importers:
       '@dsh-pager-grok/tui-server':
         specifier: workspace:*
         version: link:../dsh-tui-server
+      '@dsh-pager-grok/tui-session-projection-recovery':
+        specifier: workspace:*
+        version: link:../dsh-tui-session-projection-recovery
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -124,6 +130,28 @@ importers:
       '@dsh-pager-grok/tui-protocol':
         specifier: workspace:*
         version: link:../dsh-tui-protocol
+
+  packages/dsh-tui-session-projection-recovery:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.1
+        version: 3.18.1
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: 0.1.0-rc.8
+        version: 0.1.0-rc.8(9db0ce01d61fac03da5d751375c48981)
+      '@deepseek-ai/dsh-invariants':
+        specifier: 0.1.0-rc.8
+        version: 0.1.0-rc.8(@deepseek-ai/cordis@4.0.1)
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.8
+        version: 0.1.0-rc.8(fbdb1d988541b64ff002d18c4ded7293)
+      '@deepseek-ai/dsh-session-projection-cache':
+        specifier: 0.1.0-rc.8
+        version: 0.1.0-rc.8(80a7956f091cdf0c220b226dd100fe03)
 
 packages:
 

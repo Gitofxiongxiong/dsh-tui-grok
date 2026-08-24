@@ -67,8 +67,9 @@ DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
 `real-e2e.sh` 在未设置 `DSH_TUI_INSTALL_LOCAL=1` 时只检查 profile，并在 profile
 缺失或不包含本项目 bundle 时提前失败；不会把 Node 的 profile 堆栈错误留给用户。
 开发期没有发布 npm 包时，使用 `DSH_TUI_INSTALL_LOCAL=1`，脚本会自动构建并一次性
-link 本仓库的 protocol、server 和 embedded 源码包。不要把 packed tarball 分三次安装，
-因为 packed manifest 中的 `workspace:*` 会变成 registry semver，最后一个包会触发
+link 本仓库的 protocol、server、embedded 和 session-projection-recovery 源码包。不要把
+packed tarball 分次安装，因为 packed manifest 中的 `workspace:*` 会变成 registry semver，
+最后一个包会触发
 npm 404：
 
 ```bash

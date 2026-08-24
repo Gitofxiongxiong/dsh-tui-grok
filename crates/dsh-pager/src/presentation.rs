@@ -451,6 +451,16 @@ pub struct DshRenderEntry {
     /// timestamps remain readable without inventing replay time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<u64>,
+    /// Epoch milliseconds at which a streaming surface started. This is
+    /// separate from `created_at_ms`: assistant timestamps describe the
+    /// visible message, while thinking duration starts at the first stream
+    /// frame (which may precede the final text timestamp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    /// Epoch milliseconds captured when a streaming surface finished. The
+    /// viewer uses this with `started_at_ms` for stable replayable durations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
     pub kind: DshRenderKind,
     pub text: String,
     /// True while the host is still streaming this surface. A final message
@@ -515,6 +525,8 @@ impl DshRenderEntry {
             id,
             source_seq,
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             kind,
             text: text.clone(),
             partial: false,
@@ -1321,6 +1333,8 @@ impl PendingToolCall {
             id: DshRenderEntryId::Event { seq: self.seq },
             source_seq: self.seq,
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             kind: DshRenderKind::ToolCall,
             text: content.fallback.clone(),
             partial: finish == DshRenderFinish::Running,
@@ -1367,11 +1381,23 @@ impl DshPresentationAdapter {
         key
     }
 
-    fn close_active_surfaces_for_tool(&mut self, seq: i64, updates: &mut Vec<DshRenderUpdate>) {
+    fn close_active_surfaces_for_tool(
+        &mut self,
+        seq: i64,
+        finished_at_ms: Option<u64>,
+        updates: &mut Vec<DshRenderUpdate>,
+    ) {
         let keys = self.active_surfaces.values().copied().collect::<Vec<_>>();
         self.active_surfaces.clear();
         for key in keys {
-            self.finalize_partial(key, seq, DshRenderFinish::Completed, Some("tool"), updates);
+            self.finalize_partial(
+                key,
+                seq,
+                DshRenderFinish::Completed,
+                Some("tool"),
+                finished_at_ms,
+                updates,
+            );
         }
     }
 
@@ -1395,7 +1421,7 @@ impl DshPresentationAdapter {
         let keys = self.partials.keys().copied().collect::<Vec<_>>();
         let mut updates = Vec::new();
         for key in keys {
-            self.finalize_partial(key, seq, finish, reason, &mut updates);
+            self.finalize_partial(key, seq, finish, reason, None, &mut updates);
         }
         self.active_surfaces.clear();
         updates
@@ -1464,7 +1490,12 @@ impl DshPresentationAdapter {
             "todo/write" => self.adapt_todos(event.seq, &event.data, &mut updates),
             "command/done" => self.adapt_command(event.seq, &event.data, &mut updates),
             "llm/retry" => self.adapt_retry(event.seq, &event.data, &mut updates),
-            "turn/end" => self.adapt_turn_end(event.seq, &event.data, &mut updates),
+            "turn/end" => self.adapt_turn_end(
+                event.seq,
+                event_time_epoch_ms(event.time),
+                &event.data,
+                &mut updates,
+            ),
             "agent/error" | "stream/error" | "stream/eof" => {
                 self.adapt_stream_terminal(event.seq, &event.data, &mut updates)
             }
@@ -1524,7 +1555,14 @@ impl DshPresentationAdapter {
         let key = pair.map(|pair| self.active_surface_key(pair));
         let Some(message) = data.get("message") else {
             if let Some(key) = key {
-                self.finalize_partial(key, seq, DshRenderFinish::Completed, None, updates);
+                self.finalize_partial(
+                    key,
+                    seq,
+                    DshRenderFinish::Completed,
+                    None,
+                    created_at_ms,
+                    updates,
+                );
             }
             return;
         };
@@ -1550,6 +1588,7 @@ impl DshPresentationAdapter {
                     partial.created_at_ms = created_at_ms;
                 }
                 partial.finish = DshRenderFinish::Completed;
+                partial.finished_at_ms = created_at_ms;
                 partial.final_content_applied = true;
                 if let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display)
                 {
@@ -1606,7 +1645,7 @@ impl DshPresentationAdapter {
                     .or_else(|| chunk.get("status")),
             );
             if let Some(key) = self.active_surfaces.get(&pair).copied() {
-                self.finalize_partial(key, seq, finish, None, updates);
+                self.finalize_partial(key, seq, finish, None, created_at_ms, updates);
             }
             return;
         }
@@ -1637,6 +1676,9 @@ impl DshPresentationAdapter {
         let partial = self.partials.entry(key).or_default();
         if partial.finish != DshRenderFinish::Running {
             return;
+        }
+        if partial.started_at_ms.is_none() {
+            partial.started_at_ms = created_at_ms;
         }
         append_lineage(&mut partial.lineage, &[seq]);
         match chunk_type {
@@ -1722,7 +1764,7 @@ impl DshPresentationAdapter {
     fn adapt_tool_call(
         &mut self,
         seq: i64,
-        _created_at_ms: Option<u64>,
+        created_at_ms: Option<u64>,
         data: &Value,
         view: Option<&Value>,
         lineage: &[i64],
@@ -1731,7 +1773,7 @@ impl DshPresentationAdapter {
         // A tool surface is a hard boundary for Agent text. Keep the prior
         // surface in scrollback with its stable identity, then allocate a new
         // ordinal if the provider continues the same `(turn, step)` later.
-        self.close_active_surfaces_for_tool(seq, updates);
+        self.close_active_surfaces_for_tool(seq, created_at_ms, updates);
         let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
         let arguments = data.get("arguments").and_then(Value::as_str).unwrap_or("");
         let call_id = string_field(data, "callId")
@@ -1887,7 +1929,13 @@ impl DshPresentationAdapter {
         updates.push(upsert_event(seq, DshRenderKind::Status, message.into()));
     }
 
-    fn adapt_turn_end(&mut self, seq: i64, data: &Value, updates: &mut Vec<DshRenderUpdate>) {
+    fn adapt_turn_end(
+        &mut self,
+        seq: i64,
+        finished_at_ms: Option<u64>,
+        data: &Value,
+        updates: &mut Vec<DshRenderUpdate>,
+    ) {
         let kind = data
             .pointer("/reason/kind")
             .or_else(|| data.pointer("/reason/type"))
@@ -1903,7 +1951,7 @@ impl DshPresentationAdapter {
             .filter(|(partial_turn, _, _)| turn.is_none_or(|turn| turn == *partial_turn))
             .collect::<Vec<_>>();
         for key in keys {
-            self.finalize_partial(key, seq, finish, Some(kind), updates);
+            self.finalize_partial(key, seq, finish, Some(kind), finished_at_ms, updates);
         }
         if kind != "completed" {
             updates.push(upsert_event(
@@ -1950,6 +1998,7 @@ impl DshPresentationAdapter {
         seq: i64,
         finish: DshRenderFinish,
         reason: Option<&str>,
+        finished_at_ms: Option<u64>,
         updates: &mut Vec<DshRenderUpdate>,
     ) {
         let Some(partial) = self.partials.get_mut(&key) else {
@@ -1960,6 +2009,7 @@ impl DshPresentationAdapter {
         }
         partial.finish = finish;
         partial.terminal_seq = Some(seq);
+        partial.finished_at_ms = finished_at_ms;
         append_lineage(&mut partial.lineage, &[seq]);
         let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display) else {
             return;
@@ -2154,6 +2204,8 @@ impl PartialBlock {
 struct PartialMessage {
     blocks: BTreeMap<i64, PartialBlock>,
     created_at_ms: Option<u64>,
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
     finish: DshRenderFinish,
     terminal_seq: Option<i64>,
     final_content_applied: bool,
@@ -2165,6 +2217,8 @@ impl Default for PartialMessage {
         Self {
             blocks: BTreeMap::new(),
             created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
             finish: DshRenderFinish::Running,
             terminal_seq: None,
             final_content_applied: false,
@@ -2245,6 +2299,8 @@ fn upsert_event_content_with_projection(
         id: DshRenderEntryId::Event { seq },
         source_seq: seq,
         created_at_ms,
+        started_at_ms: None,
+        finished_at_ms: None,
         kind,
         text: content.fallback.clone(),
         partial: false,
@@ -2290,6 +2346,8 @@ fn partial_entry(
         },
         source_seq: seq,
         created_at_ms: partial.created_at_ms,
+        started_at_ms: partial.started_at_ms,
+        finished_at_ms: partial.finished_at_ms,
         kind,
         text: content.fallback.clone(),
         partial: partial.finish == DshRenderFinish::Running,
