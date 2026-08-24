@@ -8,38 +8,65 @@ use dsh_pager::{DshRenderBlock, DshToolCallView, DshToolKind, DshToolResult, Dsh
 use super::execute_tool::ExecuteToolCallBlock;
 
 pub fn project_execute_tool(block: &DshRenderBlock) -> Option<ExecuteToolCallBlock> {
-    let DshRenderBlock::ToolCall { view, result, .. } = block else {
+    let DshRenderBlock::ToolCall {
+        name,
+        arguments,
+        view,
+        result,
+        ..
+    } = block
+    else {
         return None;
     };
-    match view.as_ref()? {
-        DshToolCallView::Terminal {
+    let arguments = serde_json::from_str::<serde_json::Value>(arguments).ok();
+    let argument_command = argument_string(arguments.as_ref(), "command");
+    let argument_description = argument_string(arguments.as_ref(), "description");
+    match view.as_ref() {
+        Some(DshToolCallView::Terminal {
             title, description, ..
-        } => {
+        }) => {
             let mut execute = ExecuteToolCallBlock::new(title.clone());
-            if let Some(description) = description.as_deref() {
+            if let Some(description) = nonempty(description.as_deref()).or(argument_description) {
                 execute = execute.with_description(description);
             }
             apply_result(execute, result.as_deref())
         }
-        DshToolCallView::Generic {
+        Some(DshToolCallView::Generic {
             title,
             kind: DshToolKind::Execute,
             raw_input,
             content,
             ..
-        } => {
+        }) => {
             let command = raw_input
                 .as_ref()
                 .and_then(serde_json::Value::as_str)
+                .or(argument_command)
                 .unwrap_or(title);
             let mut execute = ExecuteToolCallBlock::new(command);
-            if let Some(description) = first_text(content) {
+            if let Some(description) = first_text(content).or(argument_description) {
+                execute = execute.with_description(description);
+            }
+            apply_result(execute, result.as_deref())
+        }
+        None if matches!(name.as_str(), "bash" | "pwsh") => {
+            let command = argument_command?;
+            let mut execute = ExecuteToolCallBlock::new(command);
+            if let Some(description) = argument_description {
                 execute = execute.with_description(description);
             }
             apply_result(execute, result.as_deref())
         }
         _ => None,
     }
+}
+
+fn argument_string<'a>(arguments: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
+    nonempty(arguments?.get(key)?.as_str())
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn apply_result(
@@ -174,5 +201,58 @@ mod tests {
         assert_eq!(execute.command, "node worker.js");
         assert_eq!(execute.description.as_deref(), Some("Run retry jobs"));
         assert!(execute.output.is_none());
+    }
+
+    #[test]
+    fn shell_arguments_restore_description_when_presenter_view_is_missing() {
+        let block = DshRenderBlock::ToolCall {
+            name: "bash".into(),
+            call_id: Some("call-old".into()),
+            arguments:
+                r#"{"command":"cargo test --workspace","description":"Verify the workspace"}"#
+                    .into(),
+            edit: None,
+            view: None,
+            result: None,
+        };
+        let execute = project_execute_tool(&block).expect("argument fallback");
+        assert_eq!(execute.command, "cargo test --workspace");
+        assert_eq!(execute.description.as_deref(), Some("Verify the workspace"));
+    }
+
+    #[test]
+    fn presenter_description_wins_over_argument_fallback() {
+        let block = DshRenderBlock::ToolCall {
+            name: "bash".into(),
+            call_id: Some("call-new".into()),
+            arguments: r#"{"command":"pwd","description":"Argument summary"}"#.into(),
+            edit: None,
+            view: Some(DshToolCallView::Terminal {
+                title: "pwd".into(),
+                description: Some("Presenter summary".into()),
+                cwd: None,
+            }),
+            result: None,
+        };
+        let execute = project_execute_tool(&block).expect("terminal projection");
+        assert_eq!(execute.description.as_deref(), Some("Presenter summary"));
+    }
+
+    #[test]
+    fn blank_presenter_description_falls_back_to_arguments() {
+        let block = DshRenderBlock::ToolCall {
+            name: "bash".into(),
+            call_id: Some("call-blank".into()),
+            arguments: r#"{"command":"pwd","description":"Print the workspace"}"#.into(),
+            edit: None,
+            view: Some(DshToolCallView::Terminal {
+                title: "pwd".into(),
+                description: Some("  ".into()),
+                cwd: None,
+            }),
+            result: None,
+        };
+        let execute = project_execute_tool(&block).expect("terminal projection");
+        assert_eq!(execute.description.as_deref(), Some("Print the workspace"));
     }
 }

@@ -436,6 +436,9 @@ fn semantic_lines(
     };
     let mut semantic = semantic;
     if projection.group_header {
+        let single_read_detail = (projection.group_count == 1 && projection.verb_counts.read == 1)
+            .then(|| tool_block(entry).and_then(read_summary_detail))
+            .flatten();
         let label = group_header_label(
             projection.group_kind,
             projection.group_count,
@@ -443,6 +446,7 @@ fn semantic_lines(
             projection.group_running,
             projection.group_failed,
             projection.group_expanded,
+            single_read_detail.as_deref(),
         );
         let header = Line::from(Span::styled(
             label,
@@ -1085,11 +1089,17 @@ fn group_header_label(
     running: bool,
     failed: bool,
     expanded: bool,
+    single_read_detail: Option<&str>,
 ) -> String {
     let count = count.max(1);
     match (kind, expanded) {
         (Some(GroupKind::Context), false) => format!("◆ Context · {count} injected messages"),
         (Some(GroupKind::Context), true) => format!("▾ Context · {count} injected messages"),
+        (Some(GroupKind::VerbRun), false)
+            if count == 1 && counts.read == 1 && single_read_detail.is_some() =>
+        {
+            format!("◆ Read · {}", single_read_detail.unwrap_or_default())
+        }
         (Some(GroupKind::VerbRun), _) => {
             let mut parts = Vec::new();
             let mut push = |calls: usize, done: &str, doing: &str, one: &str, many: &str| {
@@ -1293,7 +1303,10 @@ fn tool_block(entry: &DshRenderEntry) -> Option<&DshRenderBlock> {
 }
 
 fn tool_verb(entry: &DshRenderEntry) -> Option<ToolVerb> {
-    let DshRenderBlock::ToolCall { view, result, .. } = tool_block(entry)? else {
+    let DshRenderBlock::ToolCall {
+        name, view, result, ..
+    } = tool_block(entry)?
+    else {
         return None;
     };
     if let Some(result_view) = result.as_ref().and_then(|result| result.view.as_ref()) {
@@ -1311,6 +1324,7 @@ fn tool_verb(entry: &DshRenderEntry) -> Option<ToolVerb> {
         Some(DshToolKind::Read) => Some(ToolVerb::Read),
         Some(DshToolKind::Search) => Some(ToolVerb::Search),
         Some(DshToolKind::Fetch) => Some(ToolVerb::WebFetch),
+        _ if name == "read" => Some(ToolVerb::Read),
         _ => None,
     }
 }
@@ -1373,8 +1387,10 @@ fn tool_header_text(block: &DshRenderBlock) -> String {
         .and_then(DshToolResultView::title);
     let title = completed_title
         .or_else(|| view.as_ref().map(DshToolCallView::title))
-        .unwrap_or(name);
-    let mut label = title.to_string();
+        .map(str::to_string)
+        .or_else(|| read_summary_detail(block).map(|detail| format!("Read {detail}")))
+        .unwrap_or_else(|| name.to_string());
+    let mut label = title;
     if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
         let (added, removed) = diffstat(diffs);
         if added > 0 || removed > 0 {
@@ -1382,6 +1398,63 @@ fn tool_header_text(block: &DshRenderBlock) -> String {
         }
     }
     label
+}
+
+/// DSH Web uses the call arguments as the stable one-line summary for read
+/// tools. The presenter title/result path remain replay-safe fallbacks for
+/// events recorded before those arguments were available to the renderer.
+fn read_summary_detail(block: &DshRenderBlock) -> Option<String> {
+    let DshRenderBlock::ToolCall {
+        name,
+        arguments,
+        view,
+        result,
+        ..
+    } = block
+    else {
+        return None;
+    };
+    let is_read = name == "read"
+        || view
+            .as_ref()
+            .is_some_and(|view| view.kind() == DshToolKind::Read)
+        || matches!(
+            result.as_ref().and_then(|result| result.view.as_ref()),
+            Some(DshToolResultView::Read { .. })
+        );
+    if !is_read {
+        return None;
+    }
+
+    if let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(summary) = ["path", "file_path", "url"].iter().find_map(|key| {
+            arguments
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .and_then(nonempty_first_line)
+        })
+    {
+        return Some(summary.to_string());
+    }
+    if let Some(DshToolResultView::Read { path, .. }) =
+        result.as_ref().and_then(|result| result.view.as_ref())
+        && let Some(path) = nonempty_first_line(path)
+    {
+        return Some(path.to_string());
+    }
+    view.as_ref()
+        .map(DshToolCallView::title)
+        .and_then(|title| title.strip_prefix("Read "))
+        .and_then(nonempty_first_line)
+        .map(str::to_string)
+}
+
+fn nonempty_first_line(value: &str) -> Option<&str> {
+    value
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) -> Color {
@@ -3117,7 +3190,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.copy_text.contains("Reading 1 file"))
+                .any(|line| line.copy_text.contains("Read · a.rs"))
         );
         assert!(
             lines
@@ -3214,6 +3287,55 @@ mod tests {
                 .count(),
             1,
             "the generic call description is promoted into the header, not repeated"
+        );
+    }
+
+    #[test]
+    fn bash_and_single_read_restore_dsh_argument_summaries_without_views() {
+        let mut scrollback = Scrollback::default();
+        for (seq, name, arguments) in [
+            (
+                60,
+                "bash",
+                r#"{"command":"cargo test","description":"Verify the workspace"}"#,
+            ),
+            (61, "read", r#"{"file_path":"src/lib.rs"}"#),
+        ] {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "tool/call".into(),
+                    seq,
+                    time: 1.0,
+                    data: json!({
+                        "name": name,
+                        "callId": format!("call-{seq}"),
+                        "arguments": arguments
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, *Theme::current());
+        let lines = pane.visible_lines(&mut scrollback, 0, 20);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.copy_text.contains("Run Verify the workspace"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line.group_header && line.copy_text.contains("Read · src/lib.rs") })
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.copy_text.contains("cargo test"))
         );
     }
 
