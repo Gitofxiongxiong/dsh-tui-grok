@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Small PTY smoke for the Grok-derived successor UI.
 
-It checks the new vertical slice: load a real mock session, open/close the
-Grok picker, and leave the terminal in a restored state. More specialized
-view behavior belongs in widget tests and future golden PTY fixtures.
+It checks the new vertical slice: load a real mock session, run `/resume`,
+open/close the Grok session picker, and leave the terminal in a restored
+state. More specialized view behavior belongs in widget tests and future
+golden PTY fixtures.
 """
 
 from __future__ import annotations
@@ -95,30 +96,61 @@ def main() -> int:
     def visible() -> bytes:
         return ANSI_RE.sub(b"", bytes(output))
 
+    def visible_since(raw_offset: int) -> bytes:
+        return ANSI_RE.sub(b"", bytes(output[raw_offset:]))
+
     try:
         while b"SessionLoaded" not in visible() and time.monotonic() < deadline:
             pump()
         if b"SessionLoaded" not in visible():
             raise RuntimeError("timed out loading backend session")
 
-        # Grok picker vertical slice: open, exercise search input, close.
-        os.write(fd, b"p")
-        while b"search:" not in visible() and time.monotonic() < deadline:
+        # Grok native resume vertical slice: dispatch the local slash command,
+        # wait for modal chrome and its inactive search hint, activate search,
+        # then close it with an empty query.
+        before_resume = len(output)
+        os.write(fd, b"/resume\r")
+        while time.monotonic() < deadline:
             pump()
-        if b"search:" not in visible():
-            raise RuntimeError("picker did not render its search bar")
-        # Leave the query empty so the first Esc exercises Grok's close path
-        # (a non-empty query intentionally consumes Esc to clear itself).
+            resume_output = visible_since(before_resume)
+            if b"Resume session" in resume_output and b"/ to search" in resume_output:
+                break
+        resume_output = visible_since(before_resume)
+        if b"Resume session" not in resume_output:
+            raise RuntimeError("/resume did not render the native session modal")
+        if b"/ to search" not in resume_output:
+            raise RuntimeError("resume picker did not render its search hint")
+        before_search = len(output)
+        os.write(fd, b"/")
+        while b"search:" not in visible_since(before_search) and time.monotonic() < deadline:
+            pump()
+        if b"search:" not in visible_since(before_search):
+            raise RuntimeError("resume picker did not activate its search bar")
+        # Grok's first Esc leaves the active search field; the second closes
+        # the modal. The query stays empty throughout this focus ladder.
         pump(0.2)
         before_close = len(output)
+        os.write(fd, b"\x1b")
+        pump(0.2)
         os.write(fd, b"\x1b")
         # The inline terminal paints only changed cells, so the status line
         # may arrive as a short diff rather than the complete phrase. Wait
         # for the first changed footer cell before sending the shell Esc.
         while time.monotonic() < deadline:
             pump()
-            if b"clos" in visible()[before_close:]:
+            if b"clos" in visible_since(before_close):
                 break
+
+        # The removed shortcut must stay removed: plain `p` edits the prompt
+        # and cannot reopen the resume modal. Backspace restores an empty draft
+        # before the existing queue/full and final Esc paths continue.
+        before_plain_p = len(output)
+        os.write(fd, b"p")
+        pump(0.3)
+        if b"Resume session" in visible_since(before_plain_p):
+            raise RuntimeError("plain p unexpectedly reopened the resume picker")
+        os.write(fd, b"\x7f")
+        pump(0.1)
 
         if args.full:
             # M8/M10 input matrix smoke: resize invalidates geometry, queue and
