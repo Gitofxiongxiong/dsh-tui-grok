@@ -9,7 +9,9 @@ use dsh_pager::{
     DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
     DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, SessionState,
 };
-use dsh_pager_protocol::{PromptMode, SessionEvent};
+use dsh_pager_protocol::{
+    PromptMode, SessionEvent, SessionListValue, SessionSearchValue, SessionSummary,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -373,6 +375,97 @@ pub struct HostRowOwned {
     pub label: String,
     pub detail: String,
     pub expanded: bool,
+}
+
+/// Project the authoritative `session.list` value into the native-only Grok
+/// resume picker DTO. Blank, subagent and non-root rows stay on their dedicated
+/// DSH surfaces instead of appearing as resumable top-level conversations.
+pub fn resume_picker_entries(
+    list: &SessionListValue,
+    current: &SessionState,
+) -> Vec<crate::views::session_picker::SessionPickerEntry> {
+    let mut entries = list
+        .items
+        .iter()
+        .filter(|summary| {
+            !summary.blank
+                && summary.parent_session_id.is_none()
+                && !summary
+                    .origin
+                    .as_deref()
+                    .is_some_and(|origin| origin.eq_ignore_ascii_case("subagent"))
+        })
+        .map(resume_picker_entry)
+        .collect::<Vec<_>>();
+    if !entries.iter().any(|entry| entry.id == current.session_id()) {
+        entries.push(crate::views::session_picker::SessionPickerEntry {
+            id: current.session_id().to_string(),
+            summary: current
+                .title()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Session {}", current.session_id())),
+            updated_at_ms: 0,
+            cwd: current
+                .projection("cwd")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            model_id: current
+                .projection("model")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    entries
+}
+
+fn resume_picker_entry(
+    summary: &SessionSummary,
+) -> crate::views::session_picker::SessionPickerEntry {
+    let projection = |keys: &[&str]| {
+        summary.projections.as_ref().and_then(|projections| {
+            keys.iter().find_map(|key| {
+                projections
+                    .values
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+        })
+    };
+    crate::views::session_picker::SessionPickerEntry {
+        id: summary.session_id.clone(),
+        summary: projection(&["title", "summary", "lastTurnSummary"])
+            .unwrap_or_default()
+            .to_string(),
+        updated_at_ms: finite_epoch_ms(summary.updated_at),
+        cwd: summary.cwd.clone().unwrap_or_else(|| "unknown".to_string()),
+        model_id: summary
+            .agent_preset
+            .clone()
+            .or_else(|| projection(&["model", "modelId"]).map(str::to_string)),
+    }
+}
+
+pub fn resume_picker_search_hits(
+    value: &SessionSearchValue,
+) -> Vec<crate::views::session_picker::SessionSearchHit> {
+    value
+        .items
+        .iter()
+        .map(|item| crate::views::session_picker::SessionSearchHit {
+            session_id: item.session_id.clone(),
+            snippet: item.snippet.clone(),
+        })
+        .collect()
+}
+
+fn finite_epoch_ms(value: f64) -> u64 {
+    if value.is_finite() && value > 0.0 {
+        value.min(u64::MAX as f64) as u64
+    } else {
+        0
+    }
 }
 
 impl GrokHostSnapshot {
@@ -1584,5 +1677,65 @@ mod tests {
         let filtered = snapshot.picker_entries_filtered("review");
         assert_eq!(filtered.len(), 1);
         assert_eq!(all[0], "session-1");
+    }
+
+    #[test]
+    fn resume_projection_keeps_only_native_top_level_nonblank_sessions() {
+        let mut values = serde_json::Map::new();
+        values.insert("title".into(), json!("Native conversation"));
+        values.insert("model".into(), json!("deepseek-reasoner"));
+        let list = SessionListValue {
+            items: vec![
+                SessionSummary {
+                    session_id: "native".into(),
+                    updated_at: 42_000.0,
+                    running: false,
+                    blank: false,
+                    parent_session_id: None,
+                    origin: Some("native".into()),
+                    cwd: Some("/work/native/repo".into()),
+                    agent_preset: None,
+                    projections: Some(dsh_pager_protocol::SessionProjectionsBlock {
+                        as_of_seq: 4,
+                        values,
+                    }),
+                },
+                SessionSummary {
+                    session_id: "blank".into(),
+                    updated_at: 41_000.0,
+                    running: false,
+                    blank: true,
+                    parent_session_id: None,
+                    origin: None,
+                    cwd: None,
+                    agent_preset: None,
+                    projections: None,
+                },
+                SessionSummary {
+                    session_id: "child".into(),
+                    updated_at: 40_000.0,
+                    running: true,
+                    blank: false,
+                    parent_session_id: Some("native".into()),
+                    origin: Some("subagent".into()),
+                    cwd: Some("/work/native/repo".into()),
+                    agent_preset: None,
+                    projections: None,
+                },
+            ],
+        };
+        let current = state();
+        let entries = resume_picker_entries(&list, &current);
+        assert_eq!(entries.len(), 2);
+        let native = entries
+            .iter()
+            .find(|entry| entry.id == "native")
+            .expect("native row");
+        assert_eq!(native.summary, "Native conversation");
+        assert_eq!(native.updated_at_ms, 42_000);
+        assert_eq!(native.model_id.as_deref(), Some("deepseek-reasoner"));
+        assert!(entries.iter().any(|entry| entry.id == "session-1"));
+        assert!(!entries.iter().any(|entry| entry.id == "blank"));
+        assert!(!entries.iter().any(|entry| entry.id == "child"));
     }
 }

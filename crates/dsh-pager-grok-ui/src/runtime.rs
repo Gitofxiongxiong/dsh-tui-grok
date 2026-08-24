@@ -43,7 +43,7 @@ use crate::geometry::{
 };
 use crate::host_adapter::{
     AgentSnapshot, FeatureStatus, FileSearchRow, FileSearchSnapshot, GrokHostSnapshot,
-    MediaSnapshot,
+    MediaSnapshot, SuggestionSnapshot, resume_picker_entries, resume_picker_search_hits,
 };
 use crate::input::{PromptEditor, key::KeyShortcut, line_editor::LineEditOutcome};
 use crate::media::{
@@ -73,15 +73,12 @@ use crate::views::{
     permission_view::{
         PermissionChoice, PermissionViewState, permission_view_height, render_permission_view,
     },
-    picker::{
-        PickerConfig, PickerEntry, PickerMode, PickerOutcome, PickerState, handle_picker_input,
-        picker_shortcuts, render_picker_in_modal,
-    },
     prompt_contract::{
         PromptFlagContract, PromptGeometry, PromptInfoContract, PromptStyleContract,
     },
     prompt_widget::GrokPromptRenderer,
     queue::{QueueRenderState, moved_selection, render_queue_content},
+    session_picker::{ResumePickerOutcome, ResumePickerState},
     shortcuts_bar::{HintItem, ShortcutsBar},
     status_bar::StatusBar,
     suggestion_controller::{SuggestionController, SuggestionOutcome},
@@ -112,6 +109,13 @@ fn elapsed_since_epoch_ms(started_at_ms: Option<u64>) -> Option<Duration> {
     Some(Duration::from_millis(
         u64::try_from(elapsed_ms).unwrap_or(u64::MAX),
     ))
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -278,13 +282,11 @@ struct UiState {
     transcript_width: Option<u16>,
     scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
     scrollback_pane: ScrollbackPane,
-    picker: PickerState,
-    picker_entry_count: usize,
+    resume_picker: ResumePickerState,
     modal: ModalWindowState,
     prompt: PromptEditor,
     prompt_renderer: GrokPromptRenderer,
     prompt_mode: Option<PromptMode>,
-    picker_selected_id: Option<String>,
     queue_selected_id: Option<String>,
     queue_editing: bool,
     queue_editor: PromptEditor,
@@ -368,6 +370,8 @@ impl UiState {
         let subject = match &completion.effect {
             UiEffect::CancelSession { .. } => "Cancel session",
             UiEffect::SubmitPrompt { .. } => "Prompt",
+            UiEffect::ListSessions { .. } => "Session list",
+            UiEffect::SearchSessions { .. } => "Session search",
             UiEffect::QueueMutation { .. } => "Queue update",
             UiEffect::RespondInteraction { .. } => "Interaction response",
             UiEffect::RenameSession { .. } => "Rename session",
@@ -388,6 +392,58 @@ impl UiState {
                 "Ignored stale {subject} completion for {}",
                 completion.receipt.operation.request_id
             ));
+            return;
+        }
+        if let UiEffect::ListSessions { revision, .. } = &completion.effect {
+            let applied = if completion.receipt.status == UiEffectStatus::Accepted {
+                if let Some(list) = completion.session_list.as_ref() {
+                    self.resume_picker
+                        .apply_entries(*revision, resume_picker_entries(list, session))
+                } else {
+                    self.resume_picker
+                        .fail_entries(*revision, "session.list returned no value")
+                }
+            } else {
+                self.resume_picker.fail_entries(
+                    *revision,
+                    completion
+                        .receipt
+                        .diagnostic
+                        .clone()
+                        .unwrap_or_else(|| "host rejected session.list".to_string()),
+                )
+            };
+            if applied {
+                self.status = completion
+                    .receipt
+                    .diagnostic
+                    .as_ref()
+                    .map(|_| receipt_status_message(&completion.receipt, subject));
+            }
+            return;
+        }
+        if let UiEffect::SearchSessions { revision, .. } = &completion.effect {
+            let applied = if completion.receipt.status == UiEffectStatus::Accepted {
+                if let Some(value) = completion.session_search.as_ref() {
+                    self.resume_picker
+                        .apply_search(*revision, resume_picker_search_hits(value))
+                } else {
+                    self.resume_picker
+                        .fail_search(*revision, "session.search returned no value")
+                }
+            } else {
+                self.resume_picker.fail_search(
+                    *revision,
+                    completion
+                        .receipt
+                        .diagnostic
+                        .clone()
+                        .unwrap_or_else(|| "host rejected session.search".to_string()),
+                )
+            };
+            if applied && completion.receipt.status != UiEffectStatus::Accepted {
+                self.status = Some(receipt_status_message(&completion.receipt, subject));
+            }
             return;
         }
         if let UiEffect::FileSearchQuery { revision, .. } = &completion.effect {
@@ -789,7 +845,7 @@ impl UiState {
         self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
 
         if self.shell.overlay() == Overlay::Picker {
-            self.render_picker(frame, area, &snapshot);
+            self.render_resume_picker(frame, area, compact);
         } else if self.shell.overlay() == Overlay::Queue {
             self.render_queue(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::Interaction {
@@ -1204,54 +1260,15 @@ impl UiState {
         }
     }
 
-    fn render_picker(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
-        let theme = Theme::current();
-        let mut entries = snapshot.picker_entries_filtered(self.picker.query());
-        let row_ids = snapshot.picker_row_ids_filtered(self.picker.query());
-        if let Some(selected_id) = self.picker_selected_id.as_deref()
-            && let Some(index) = row_ids.iter().position(|id| *id == selected_id)
-        {
-            self.picker.selected = index;
-        }
-        self.picker_entry_count = entries.len();
-        for (index, entry) in entries.iter_mut().enumerate() {
-            if let PickerEntry::Row(row) = entry {
-                row.selected = index == self.picker.selected;
-            }
-        }
-        let shortcuts = [
-            Shortcut {
-                label: "Enter select",
-                clickable: true,
-                id: 1,
-            },
-            Shortcut {
-                label: "Esc close",
-                clickable: true,
-                id: 2,
-            },
-        ];
-        let config = ModalWindowConfig {
-            title: "Sessions · DSH host adapter",
-            tabs: Some(&["sessions", "tasks"]),
-            shortcuts: &shortcuts,
-            sizing: ModalSizing::medium(),
-            fold_info: None,
-        };
-        let buf = frame.buffer_mut();
-        if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
-            render_picker_in_modal(
-                buf,
-                content.content,
-                content.inner_x,
-                content.inner_width,
-                theme,
-                &mut self.picker,
-                &entries,
-                &[],
-                false,
-            );
-        }
+    fn render_resume_picker(&mut self, frame: &mut Frame<'_>, area: Rect, compact: bool) {
+        self.resume_picker.render(
+            frame.buffer_mut(),
+            area,
+            Theme::current(),
+            compact,
+            self.frame as u64,
+            now_epoch_ms(),
+        );
     }
 
     fn render_queue(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
@@ -1604,12 +1621,29 @@ impl UiState {
         }
     }
 
-    fn suggestion_items<'a>(&self, snapshot: &'a GrokHostSnapshot) -> Option<Vec<&'a str>> {
-        if !snapshot.capabilities.prompt_suggestions {
-            return None;
-        }
+    fn suggestion_items(&self, snapshot: &GrokHostSnapshot) -> Option<Vec<String>> {
+        let merged = Self::merged_suggestion_snapshot(snapshot);
         self.suggestions
-            .visible_items(&snapshot.suggestions, self.prompt.text())
+            .visible_items(&merged, self.prompt.text())
+            .map(|items| items.into_iter().map(str::to_string).collect())
+    }
+
+    fn merged_suggestion_snapshot(snapshot: &GrokHostSnapshot) -> SuggestionSnapshot {
+        let mut merged = SuggestionSnapshot {
+            status: FeatureStatus::Available,
+            active: true,
+            selected: None,
+            items: if snapshot.capabilities.prompt_suggestions
+                && snapshot.suggestions.status == FeatureStatus::Available
+                && snapshot.suggestions.active
+            {
+                snapshot.suggestions.items.clone()
+            } else {
+                Vec::new()
+            },
+        };
+        crate::slash::merge_builtin_suggestions(&mut merged.items);
+        merged
     }
 
     fn dispatch_event(
@@ -1662,22 +1696,6 @@ impl UiState {
         let action = self.shell.dispatch(event, prompt_empty);
         match action {
             ShellAction::Quit => Ok(true),
-            ShellAction::OpenPicker => {
-                if let Err(error) = dsh_pager::list_sessions(transport) {
-                    self.status = Some(format!("Session refresh failed: {error}"));
-                }
-                self.picker = PickerState::input_active();
-                self.picker.mode = PickerMode::Floating;
-                self.picker_selected_id = Some(session.session_id().to_string());
-                self.picker_entry_count = GrokHostSnapshot::from_session_with_control_plane(
-                    session,
-                    Some(transport.control_plane()),
-                )
-                .picker_row_ids_filtered("")
-                .len();
-                self.status = Some("Session picker opened".into());
-                Ok(false)
-            }
             ShellAction::OpenQueue => {
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
@@ -1829,7 +1847,9 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::SubmitPrompt => {
-                self.submit_prompt(transport, session)?;
+                if !self.dispatch_local_slash_command(transport, session) {
+                    self.submit_prompt(transport, session)?;
+                }
                 Ok(false)
             }
             ShellAction::PromptKey(key) => {
@@ -2349,6 +2369,63 @@ impl UiState {
         }
     }
 
+    fn dispatch_local_slash_command(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> bool {
+        match crate::slash::dispatch(self.prompt.text()) {
+            crate::slash::DispatchResult::NotLocal => false,
+            crate::slash::DispatchResult::InvalidUsage(usage) => {
+                self.status = Some(format!("Usage: {usage}"));
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::ShowSessionPicker) => {
+                self.open_resume_picker(transport, session);
+                self.prompt.reset();
+                self.suggestions.reset();
+                self.prompt_history_index = None;
+                true
+            }
+        }
+    }
+
+    fn open_resume_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
+        let cwd = transport
+            .control_plane()
+            .snapshot(session.session_id())
+            .and_then(|snapshot| snapshot.cwd.clone())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        self.shell.open_picker();
+        let revision = self.resume_picker.open(session.session_id(), cwd.as_str());
+        let context = UiContext::from_session(session);
+        match self.submit_effect(transport, UiIntent::ListSessions { revision }, &context) {
+            Ok(receipt)
+                if matches!(
+                    receipt.status,
+                    UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+                ) =>
+            {
+                self.status = None;
+            }
+            Ok(receipt) => {
+                let message = receipt_status_message(&receipt, "Session list");
+                self.resume_picker.fail_entries(revision, message.clone());
+                self.status = Some(message);
+            }
+            Err(error) => {
+                let message = format!("Session list failed: {error}");
+                self.resume_picker.fail_entries(revision, message.clone());
+                self.status = Some(message);
+            }
+        }
+    }
+
     fn submit_prompt(
         &mut self,
         transport: &mut RpcTransport,
@@ -2393,14 +2470,15 @@ impl UiState {
         snapshot: &GrokHostSnapshot,
     ) -> bool {
         use crossterm::event::KeyModifiers;
+        let merged = Self::merged_suggestion_snapshot(snapshot);
         match self
             .suggestions
-            .handle_key(key.code, &snapshot.suggestions, self.prompt.text())
+            .handle_key(key.code, &merged, self.prompt.text())
         {
             SuggestionOutcome::Accepted => {
                 let accepted = self
                     .suggestions
-                    .accepted_item(&snapshot.suggestions, self.prompt.text())
+                    .accepted_item(&merged, self.prompt.text())
                     .map(str::to_string);
                 if let Some(accepted) = accepted {
                     let _ = self.prompt.replace_text(&accepted);
@@ -3255,57 +3333,17 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> bool {
-        let config = PickerConfig {
-            title: Some("Sessions"),
-            show_search_hint: false,
-            expandable: true,
-            esc_clears_query: true,
-            shortcuts: Some(picker_shortcuts()),
-            pending_hint: None,
-            shortcuts_area: None,
-            non_selectable: &[],
-            non_selectable_clickable: &[],
-            tabs: None,
-            active_tab: 0,
-            filter_label: None,
-            filter_key_hint: None,
-            filter_active: false,
-            header_note: None,
-            action_keys: &[],
-            disable_search: false,
-            compact_bottom_bar: false,
-            search_only_on_slash: false,
-            vim_normal_first: false,
-        };
-        match handle_picker_input(
-            &event,
-            &mut self.picker,
-            self.picker_entry_count.max(1),
-            &config,
-        ) {
-            PickerOutcome::Closed => {
+        match self.resume_picker.handle_event(event) {
+            ResumePickerOutcome::Closed => {
+                self.resume_picker.close();
                 self.shell.close_overlay();
                 self.status = Some("Session picker closed".into());
                 false
             }
-            PickerOutcome::Selected(index) => {
-                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-                    session,
-                    Some(transport.control_plane()),
-                );
-                let ids = snapshot.picker_row_ids_filtered(self.picker.query());
-                let Some(target) = ids.get(index).copied() else {
-                    self.status = Some("Selected session is no longer available".into());
-                    return false;
-                };
-                self.picker_selected_id = Some(target.to_string());
-                if target.contains(':') {
-                    self.status = Some("Selected row is not attachable".into());
-                    return false;
-                }
+            ResumePickerOutcome::Selected(target) => {
                 let effect = compile_intent(
                     UiIntent::AttachSession {
-                        session_id: dsh_pager::DshSessionId::new(target),
+                        session_id: dsh_pager::DshSessionId::new(target.clone()),
                     },
                     &UiContext::from_session(session),
                 );
@@ -3314,6 +3352,7 @@ impl UiState {
                     return false;
                 };
                 if session_id.as_str() == session.session_id() {
+                    self.resume_picker.close();
                     self.shell.close_overlay();
                     self.status = Some("Already attached".into());
                     return false;
@@ -3327,8 +3366,7 @@ impl UiState {
                     Ok(next) => {
                         *session = next;
                         self.reset_transcript_view();
-                        self.picker.reset();
-                        self.picker_selected_id = None;
+                        self.resume_picker.close();
                         self.shell.close_overlay();
                         self.status = Some("Session attached".into());
                     }
@@ -3338,11 +3376,41 @@ impl UiState {
                 }
                 false
             }
-            PickerOutcome::QueryChanged | PickerOutcome::Changed => {
+            ResumePickerOutcome::QueryChanged { query, revision } => {
+                self.status = None;
+                if !query.trim().is_empty() {
+                    let context = UiContext::from_session(session);
+                    match self.submit_effect(
+                        transport,
+                        UiIntent::SearchSessions { query, revision },
+                        &context,
+                    ) {
+                        Ok(receipt)
+                            if matches!(
+                                receipt.status,
+                                UiEffectStatus::Accepted
+                                    | UiEffectStatus::Queued
+                                    | UiEffectStatus::Pending
+                            ) => {}
+                        Ok(receipt) => {
+                            let message = receipt_status_message(&receipt, "Session search");
+                            self.resume_picker.fail_search(revision, message.clone());
+                            self.status = Some(message);
+                        }
+                        Err(error) => {
+                            let message = format!("Session search failed: {error}");
+                            self.resume_picker.fail_search(revision, message.clone());
+                            self.status = Some(message);
+                        }
+                    }
+                }
+                false
+            }
+            ResumePickerOutcome::Changed => {
                 self.status = None;
                 false
             }
-            _ => false,
+            ResumePickerOutcome::Unchanged => false,
         }
     }
 }
@@ -3624,6 +3692,8 @@ mod tests {
                     diagnostic: None,
                     retryable: Some(false),
                 },
+                session_list: None,
+                session_search: None,
                 file_references: None,
                 attachment_preview: None,
             },
@@ -4147,7 +4217,7 @@ mod tests {
         let _ = ui.prompt.replace_text("/h");
         assert_eq!(
             ui.suggestion_items(&snapshot),
-            Some(vec!["/help", "/history"])
+            Some(vec!["/help".to_string(), "/history".to_string()])
         );
         let down =
             crossterm::event::KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE);
@@ -4160,6 +4230,12 @@ mod tests {
         let mut unsupported = snapshot.clone();
         unsupported.capabilities.prompt_suggestions = false;
         assert!(ui.suggestion_items(&unsupported).is_none());
+        let _ = ui.prompt.replace_text("/r");
+        ui.suggestions.text_changed();
+        assert_eq!(
+            ui.suggestion_items(&unsupported),
+            Some(vec!["/resume".to_string()])
+        );
     }
 
     #[test]

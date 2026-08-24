@@ -102,7 +102,6 @@ pub enum ShellEvent {
 pub enum ShellAction {
     None,
     Quit,
-    OpenPicker,
     CloseOverlay,
     ClearPrompt,
     ScrollUp(u16),
@@ -500,10 +499,6 @@ impl AppShell {
         }
         if prompt_empty {
             match key.code {
-                KeyCode::Char('p') if key.modifiers.is_empty() => {
-                    self.open_picker();
-                    return ShellAction::OpenPicker;
-                }
                 KeyCode::Char('q') => {
                     self.open_queue();
                     return ShellAction::OpenQueue;
@@ -559,17 +554,19 @@ mod tests {
     #[test]
     fn owner_priority_and_esc_ladder_are_deterministic() {
         let mut shell = AppShell::default();
-        assert_eq!(
+        assert!(matches!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Char('p'))), true),
-            ShellAction::OpenPicker
-        );
+            ShellAction::PromptKey(_)
+        ));
+        assert_eq!(shell.overlay(), Overlay::None);
+        shell.open_picker();
         assert_eq!(shell.owner(), KeyOwner::Picker);
         assert!(matches!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
             ShellAction::PickerKey(_)
         ));
         shell.close_overlay();
-        assert_eq!(shell.owner(), KeyOwner::Transcript);
+        assert_eq!(shell.owner(), KeyOwner::Prompt);
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), false),
             ShellAction::ClearPrompt

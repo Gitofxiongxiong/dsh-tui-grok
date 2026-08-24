@@ -15,6 +15,7 @@ pub mod input;
 #[path = "../vendor/grok/xai-grok-pager-render/src/modal_window_state.rs"]
 pub mod modal_window_state;
 pub mod render;
+pub mod slash;
 pub mod terminal;
 pub mod theme;
 pub mod views;

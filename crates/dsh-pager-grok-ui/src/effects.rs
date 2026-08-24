@@ -22,6 +22,13 @@ pub enum UiIntent {
     AttachSession {
         session_id: DshSessionId,
     },
+    ListSessions {
+        revision: u64,
+    },
+    SearchSessions {
+        query: String,
+        revision: u64,
+    },
     QueueMutation {
         item_id: DshQueueItemId,
         action: QueueAction,
@@ -163,6 +170,15 @@ pub enum UiEffect {
     AttachSession {
         operation: OperationKey,
         session_id: DshSessionId,
+    },
+    ListSessions {
+        operation: OperationKey,
+        revision: u64,
+    },
+    SearchSessions {
+        operation: OperationKey,
+        query: String,
+        revision: u64,
     },
     QueueMutation {
         operation: OperationKey,
@@ -330,6 +346,8 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::CancelSession => "cancel-session",
         UiIntent::SubmitPrompt { .. } => "submit",
         UiIntent::AttachSession { .. } => "attach",
+        UiIntent::ListSessions { .. } => "list-sessions",
+        UiIntent::SearchSessions { .. } => "search-sessions",
         UiIntent::QueueMutation { .. } => "queue-mutation",
         UiIntent::RespondInteraction { .. } => "respond-interaction",
         UiIntent::RenameSession { .. } => "rename",
@@ -351,6 +369,10 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
             )
         }
         UiIntent::AttachSession { session_id } => format!("{action_name}:{session_id}"),
+        UiIntent::ListSessions { revision } => format!("{action_name}:{revision}"),
+        UiIntent::SearchSessions { query, revision } => {
+            format!("{action_name}:{revision}:{}", prompt_digest(query))
+        }
         UiIntent::QueueMutation { item_id, action } => {
             format!("{action_name}:{item_id}:{action:?}")
         }
@@ -410,6 +432,15 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::AttachSession { session_id } => UiEffect::AttachSession {
             operation,
             session_id,
+        },
+        UiIntent::ListSessions { revision } => UiEffect::ListSessions {
+            operation,
+            revision,
+        },
+        UiIntent::SearchSessions { query, revision } => UiEffect::SearchSessions {
+            operation,
+            query,
+            revision,
         },
         UiIntent::QueueMutation { item_id, action } => UiEffect::QueueMutation {
             operation,
@@ -484,6 +515,29 @@ impl DshEffectSink<'_, '_> {
                     mode,
                 );
                 (operation, result.map(|value| value.accepted))
+            }
+            UiEffect::ListSessions {
+                mut operation,
+                revision: _,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::list_sessions(self.transport);
+                (operation, result.map(|_| true))
+            }
+            UiEffect::SearchSessions {
+                mut operation,
+                query,
+                revision: _,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::search_sessions(self.transport, &query);
+                (operation, result.map(|_| true))
             }
             UiEffect::QueueMutation {
                 mut operation,
@@ -678,6 +732,8 @@ impl DshEffectSink<'_, '_> {
 pub struct UiEffectCompletion {
     pub effect: UiEffect,
     pub receipt: UiEffectReceipt,
+    pub session_list: Option<dsh_pager_protocol::SessionListValue>,
+    pub session_search: Option<dsh_pager_protocol::SessionSearchValue>,
     pub file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
 }
@@ -760,6 +816,8 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
         UiEffect::CancelSession { operation }
         | UiEffect::SubmitPrompt { operation, .. }
         | UiEffect::AttachSession { operation, .. }
+        | UiEffect::ListSessions { operation, .. }
+        | UiEffect::SearchSessions { operation, .. }
         | UiEffect::QueueMutation { operation, .. }
         | UiEffect::RespondInteraction { operation, .. }
         | UiEffect::RenameSession { operation, .. }
@@ -780,6 +838,12 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
             operation: target, ..
         }
         | UiEffect::AttachSession {
+            operation: target, ..
+        }
+        | UiEffect::ListSessions {
+            operation: target, ..
+        }
+        | UiEffect::SearchSessions {
             operation: target, ..
         }
         | UiEffect::QueueMutation {
@@ -829,6 +893,8 @@ fn encode_async_request(
                 "content": [{"type": "text", "text": text}],
             }),
         )),
+        UiEffect::ListSessions { .. } => Some(("session.list", json!({}))),
+        UiEffect::SearchSessions { query, .. } => Some(("session.search", json!({"query": query}))),
         UiEffect::QueueMutation {
             item_id, action, ..
         } => Some((
@@ -906,6 +972,8 @@ fn encode_async_request(
 
 struct DecodedAsyncResult {
     accepted: bool,
+    session_list: Option<dsh_pager_protocol::SessionListValue>,
+    session_search: Option<dsh_pager_protocol::SessionSearchValue>,
     file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
 }
@@ -915,15 +983,39 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         let value: dsh_pager_protocol::TuiRespondResult = serde_json::from_value(raw)?;
         return Ok(DecodedAsyncResult {
             accepted: value.accepted,
+            session_list: None,
+            session_search: None,
             file_references: None,
             attachment_preview: None,
         });
     }
     let value = unwrap_api_value(raw)?;
+    if matches!(effect, UiEffect::ListSessions { .. }) {
+        let session_list = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            session_list: Some(session_list),
+            session_search: None,
+            file_references: None,
+            attachment_preview: None,
+        });
+    }
+    if matches!(effect, UiEffect::SearchSessions { .. }) {
+        let session_search = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            session_list: None,
+            session_search: Some(session_search),
+            file_references: None,
+            attachment_preview: None,
+        });
+    }
     if matches!(effect, UiEffect::FileSearchQuery { .. }) {
         let file_references = serde_json::from_value(value)?;
         return Ok(DecodedAsyncResult {
             accepted: true,
+            session_list: None,
+            session_search: None,
             file_references: Some(file_references),
             attachment_preview: None,
         });
@@ -931,6 +1023,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
     if matches!(effect, UiEffect::PreviewMedia { .. }) {
         return Ok(DecodedAsyncResult {
             accepted: true,
+            session_list: None,
+            session_search: None,
             file_references: None,
             attachment_preview: Some(parse_attachment_preview(value)?),
         });
@@ -941,6 +1035,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         .unwrap_or(true);
     Ok(DecodedAsyncResult {
         accepted,
+        session_list: None,
+        session_search: None,
         file_references: None,
         attachment_preview: None,
     })
@@ -1011,6 +1107,8 @@ fn build_completion(
                     diagnostic: None,
                     retryable: Some(false),
                 },
+                session_list: decoded.session_list,
+                session_search: decoded.session_search,
                 file_references: decoded.file_references,
                 attachment_preview: decoded.attachment_preview,
             }
@@ -1023,6 +1121,8 @@ fn build_completion(
                 diagnostic: Some("host rejected operation".into()),
                 retryable: Some(false),
             },
+            session_list: decoded.session_list,
+            session_search: decoded.session_search,
             file_references: decoded.file_references,
             attachment_preview: decoded.attachment_preview,
         },
@@ -1034,6 +1134,8 @@ fn build_completion(
                 diagnostic: Some(error.to_string()),
                 retryable: Some(true),
             },
+            session_list: None,
+            session_search: None,
             file_references: None,
             attachment_preview: None,
         },
@@ -1173,6 +1275,85 @@ mod tests {
         assert!(operation.dedupe_key.contains(":7:"));
         assert_eq!(query, "src/main");
         assert_eq!(revision, 7);
+    }
+
+    #[test]
+    fn resume_list_and_search_effects_keep_revision_and_decode_typed_values() {
+        let session = SessionState::new("active".into(), 9);
+        let list = compile_intent(
+            UiIntent::ListSessions { revision: 3 },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::ListSessions {
+            operation,
+            revision,
+        } = &list
+        else {
+            panic!("list effect");
+        };
+        assert_eq!(*revision, 3);
+        assert_eq!(operation.action, "list-sessions");
+        assert!(operation.dedupe_key.ends_with(":3"));
+        let (method, params) = encode_async_request(&list, operation)
+            .expect("list encode")
+            .expect("list supported");
+        assert_eq!(method, "session.list");
+        assert_eq!(params, json!({}));
+        let decoded = decode_async_result(
+            &list,
+            json!({
+                "ok": true,
+                "value": {"items": [{
+                    "sessionId": "s1",
+                    "updatedAt": 1000.0,
+                    "running": false,
+                    "blank": false
+                }]}
+            }),
+        )
+        .expect("list decode");
+        assert_eq!(
+            decoded.session_list.expect("list").items[0].session_id,
+            "s1"
+        );
+
+        let search = compile_intent(
+            UiIntent::SearchSessions {
+                query: "needle".into(),
+                revision: 4,
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::SearchSessions {
+            operation,
+            query,
+            revision,
+        } = &search
+        else {
+            panic!("search effect");
+        };
+        assert_eq!(query, "needle");
+        assert_eq!(*revision, 4);
+        let (method, params) = encode_async_request(&search, operation)
+            .expect("search encode")
+            .expect("search supported");
+        assert_eq!(method, "session.search");
+        assert_eq!(params, json!({"query": "needle"}));
+        let decoded = decode_async_result(
+            &search,
+            json!({
+                "ok": true,
+                "value": {
+                    "items": [{"sessionId": "s2", "snippet": "needle here"}],
+                    "hasMore": false
+                }
+            }),
+        )
+        .expect("search decode");
+        assert_eq!(
+            decoded.session_search.expect("search").items[0].snippet,
+            "needle here"
+        );
     }
 
     #[test]
