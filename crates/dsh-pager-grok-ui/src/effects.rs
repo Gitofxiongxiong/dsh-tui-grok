@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 /// renderer references and can be reduced in a host-neutral test harness.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiIntent {
+    CancelSession,
     SubmitPrompt {
         text: String,
         mode: PromptMode,
@@ -151,6 +152,9 @@ pub fn receipt_status_message(receipt: &UiEffectReceipt, subject: &str) -> Strin
 /// DSH-neutral effect after intent compilation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UiEffect {
+    CancelSession {
+        operation: OperationKey,
+    },
     SubmitPrompt {
         operation: OperationKey,
         text: String,
@@ -323,6 +327,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         _ => context.session_id.clone(),
     };
     let action_name = match &intent {
+        UiIntent::CancelSession => "cancel-session",
         UiIntent::SubmitPrompt { .. } => "submit",
         UiIntent::AttachSession { .. } => "attach",
         UiIntent::QueueMutation { .. } => "queue-mutation",
@@ -337,6 +342,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
     };
     let dedupe_key = match &intent {
+        UiIntent::CancelSession => action_name.to_string(),
         UiIntent::SubmitPrompt { text, mode } => {
             format!(
                 "{action_name}:{}:{}",
@@ -395,6 +401,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         dedupe_key,
     };
     match intent {
+        UiIntent::CancelSession => UiEffect::CancelSession { operation },
         UiIntent::SubmitPrompt { text, mode } => UiEffect::SubmitPrompt {
             operation,
             text,
@@ -452,6 +459,15 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
 impl DshEffectSink<'_, '_> {
     pub fn dispatch_effect(&mut self, effect: UiEffect) -> PagerResult<UiEffectReceipt> {
         let (operation, result) = match effect {
+            UiEffect::CancelSession { mut operation } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result =
+                    dsh_pager::cancel_session_id(self.transport, operation.session_id.as_str());
+                (operation, result.map(|value| value.accepted))
+            }
             UiEffect::SubmitPrompt {
                 mut operation,
                 text,
@@ -741,7 +757,8 @@ impl AsyncEffectExecutor {
 
 fn effect_operation(effect: &UiEffect) -> &OperationKey {
     match effect {
-        UiEffect::SubmitPrompt { operation, .. }
+        UiEffect::CancelSession { operation }
+        | UiEffect::SubmitPrompt { operation, .. }
         | UiEffect::AttachSession { operation, .. }
         | UiEffect::QueueMutation { operation, .. }
         | UiEffect::RespondInteraction { operation, .. }
@@ -758,7 +775,8 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
 
 fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
     match effect {
-        UiEffect::SubmitPrompt {
+        UiEffect::CancelSession { operation: target }
+        | UiEffect::SubmitPrompt {
             operation: target, ..
         }
         | UiEffect::AttachSession {
@@ -800,6 +818,9 @@ fn encode_async_request(
     operation: &OperationKey,
 ) -> PagerResult<Option<(&'static str, Value)>> {
     let request = match effect {
+        UiEffect::CancelSession { .. } => {
+            Some(("session.cancel", json!({"sessionId": operation.session_id})))
+        }
         UiEffect::SubmitPrompt { text, mode, .. } => Some((
             "session.prompt",
             json!({
@@ -1060,6 +1081,29 @@ mod tests {
     use super::*;
     use dsh_pager_protocol::PromptMode;
     use serde_json::json;
+
+    #[test]
+    fn cancel_effect_keeps_session_generation_and_stable_dedupe_identity() {
+        let session = SessionState::new("cancel-me".into(), 7);
+        let effect = compile_intent(UiIntent::CancelSession, &UiContext::from_session(&session));
+        let UiEffect::CancelSession { operation } = effect else {
+            panic!("expected cancel effect");
+        };
+        assert_eq!(operation.session_id.as_str(), "cancel-me");
+        assert_eq!(operation.generation.get(), 7);
+        assert_eq!(operation.action, "cancel-session");
+        assert_eq!(operation.dedupe_key, "cancel-session");
+        let (method, params) = encode_async_request(
+            &UiEffect::CancelSession {
+                operation: operation.clone(),
+            },
+            &operation,
+        )
+        .expect("encode cancel")
+        .expect("cancel is supported");
+        assert_eq!(method, "session.cancel");
+        assert_eq!(params["sessionId"], "cancel-me");
+    }
 
     #[test]
     fn compile_intent_is_neutral_and_carries_generation_and_operation_kind() {

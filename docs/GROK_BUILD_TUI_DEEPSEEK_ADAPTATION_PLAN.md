@@ -805,7 +805,9 @@ control plane，处理异步切换的身份安全。
 - M7.4 迁移 tasks pane、agent status、progress、running/error/completed 状态；
   DSH jobs/subagents 只提供 projection。
 - M7.5 迁移 timeline/turn status、jump、sticky indicator 和 shortcut bar，
-  与 M4 scrollback 同用 entry/turn geometry。
+  与 M4 scrollback 同用 entry/turn geometry。**Turn Status 垂直切片已完成
+  （2026-08-24）：DSH history/context/interaction 投影驱动 Grok spinner、活动、
+  双计时、token、等待输入菱形和 `[stop]`；timeline jump/sticky 仍按原任务保留。**
 - M7.6 统一 status line/bar 的 connection、model、queue、diagnostic、pending
   receipt、capability blocked 文案和颜色语义。
 - M7.7 加入 conflict/retry/timeout/permission denied/error modal 的完整路径；
@@ -1251,10 +1253,13 @@ source manifest/license 变化：
 17. **M5.6-M5.8**：接入 capability-gated history/slash 与外部进程边界、错误输入测试；**已完成 completion slice**。
 18. **M6.6-M6.8**：接入 Dashboard/workspace/peek-back 和 stable-ID refresh；**已完成 completion slice**。
 19. **M7.7-M7.8**：接入 typed conflict/stale/timeout/unsupported receipt、retry 文案和行为测试；**已完成 completion slice**。
-20. **M10.1/M10.2**：建立 Grok reference 与 80×24/窄屏 semantic golden；
-21. **M10.6**：对真实 DeepSeek Harness 跑 hello→attach→stream→prompt→exit；
-22. 只有上述 critical slice 全绿后，才继续扩展 media、bidi 和完整 selection；
-23. 每完成一个切片，回写本文件的状态、证据、遗留差异和下一删除出口。
+20. **M7.5（Turn Status）**：接入 replay-stable DSH 活动计时、Grok 动效和
+    CancelSession authoritative convergence；**已完成该子切片，Grok-only
+    watcher/MCP/goal/background 分支不伪造，timeline jump/sticky 仍待完成**。
+21. **M10.1/M10.2**：建立 Grok reference 与 80×24/窄屏 semantic golden；
+22. **M10.6**：对真实 DeepSeek Harness 跑 hello→attach→stream→prompt→exit；
+23. 只有上述 critical slice 全绿后，才继续扩展 media、bidi 和完整 selection；
+24. 每完成一个切片，回写本文件的状态、证据、遗留差异和下一删除出口。
 
 第一条垂直切片的最低定义是：
 

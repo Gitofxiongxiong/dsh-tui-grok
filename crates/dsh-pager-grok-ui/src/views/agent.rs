@@ -466,36 +466,6 @@ impl AgentView {
         }
     }
 
-    pub fn render_turn_status(
-        frame: &mut Frame<'_>,
-        area: Rect,
-        running: bool,
-        status: Option<&str>,
-        theme: &Theme,
-    ) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let (glyph, label, color) = if running {
-            (
-                '●',
-                status.unwrap_or("Generating response"),
-                theme.accent_user,
-            )
-        } else {
-            ('○', status.unwrap_or("Ready"), theme.gray)
-        };
-        let text = format!(" {glyph} {label}");
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                fit_text(&text, area.width as usize),
-                Style::default().fg(color).bg(theme.bg_base),
-            )))
-            .style(Style::default().bg(theme.bg_base)),
-            area,
-        );
-    }
-
     pub fn render_status_line(frame: &mut Frame<'_>, area: Rect, text: &str, theme: &Theme) {
         if area.height == 0 || area.width == 0 {
             return;

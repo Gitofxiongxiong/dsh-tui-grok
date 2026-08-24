@@ -9,7 +9,7 @@ use dsh_pager::{
     DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
     DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, SessionState,
 };
-use dsh_pager_protocol::PromptMode;
+use dsh_pager_protocol::{PromptMode, SessionEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -235,6 +235,43 @@ pub struct ContextUsageSnapshot {
     pub total_tokens: Option<u64>,
 }
 
+/// DSH-neutral activity consumed by Grok's single-row turn status renderer.
+/// The adapter deliberately names only states that can be proven from the
+/// Harness event log; Grok-only watcher/MCP/goal states are not fabricated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TurnActivitySnapshot {
+    Thinking,
+    Responding,
+    ToolRunning {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    Compacting,
+    Retrying {
+        attempt: u64,
+    },
+    WritingToolCall,
+    #[default]
+    Waiting,
+    WaitingForInput,
+}
+
+/// Replay-stable turn timing and activity projection. Timestamps are host
+/// event epoch milliseconds; the renderer computes elapsed time per frame so
+/// constructing a snapshot remains deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStatusSnapshot {
+    pub visible: bool,
+    pub activity: TurnActivitySnapshot,
+    pub turn_started_at_ms: Option<u64>,
+    pub activity_started_at_ms: Option<u64>,
+    pub pending_user_input: bool,
+    pub total_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHeader {
     pub id: DshSessionId,
@@ -325,6 +362,8 @@ pub struct GrokHostSnapshot {
     pub agent: AgentSnapshot,
     #[serde(default)]
     pub context_usage: ContextUsageSnapshot,
+    #[serde(default)]
+    pub turn_status: TurnStatusSnapshot,
     pub capabilities: CapabilityMatrix,
 }
 
@@ -435,6 +474,12 @@ impl GrokHostSnapshot {
         let capabilities = CapabilityMatrix::from_session(session);
         let context_usage = context_usage_snapshot(session);
         let interaction = presentation.interaction.clone();
+        let turn_status = turn_status_snapshot(
+            session,
+            &transcript,
+            interaction.as_ref(),
+            context_usage.used_tokens,
+        );
         let queue = presentation.queue.clone();
         let queue_revision = presentation.queue_revision;
         let tasks = control_plane
@@ -510,6 +555,7 @@ impl GrokHostSnapshot {
             workspace,
             agent,
             context_usage,
+            turn_status,
             capabilities,
         }
     }
@@ -577,6 +623,12 @@ impl GrokHostSnapshot {
             workspace: WorkspaceSnapshot::default(),
             agent: AgentSnapshot::default(),
             context_usage: ContextUsageSnapshot::default(),
+            turn_status: TurnStatusSnapshot {
+                visible: true,
+                activity: TurnActivitySnapshot::Thinking,
+                total_tokens: Some(12_000),
+                ..TurnStatusSnapshot::default()
+            },
             capabilities: CapabilityMatrix::default(),
         }
     }
@@ -695,6 +747,212 @@ fn context_usage_snapshot(session: &SessionState) -> ContextUsageSnapshot {
         used_tokens,
         total_tokens,
     }
+}
+
+fn turn_status_snapshot(
+    session: &SessionState,
+    transcript: &[TranscriptRow],
+    interaction: Option<&DshInteraction>,
+    total_tokens: Option<u64>,
+) -> TurnStatusSnapshot {
+    if !session.running() {
+        return TurnStatusSnapshot::default();
+    }
+
+    let history = session.history();
+    let turn_start = history
+        .iter()
+        .rposition(|entry| entry.event.event_type == "turn/start");
+    let turn_started_at_ms = turn_start.and_then(|index| event_epoch_ms(history[index].event.time));
+    let mut activity = TurnActivitySnapshot::Waiting;
+    let mut activity_started_at_ms = turn_started_at_ms;
+
+    for entry in turn_start.map_or(history, |index| &history[index.saturating_add(1)..]) {
+        let Some(next) = activity_for_event(&entry.event, entry.view.as_ref()) else {
+            continue;
+        };
+        if next != activity {
+            activity = next;
+            activity_started_at_ms = event_epoch_ms(entry.event.time).or(activity_started_at_ms);
+        }
+    }
+
+    // The typed presentation surface is authoritative for a still-running
+    // tool's final title/description. Event folding above owns phase timing,
+    // so streaming deltas cannot reset the timer on every frame.
+    if let Some(tool) = transcript.iter().rev().find_map(running_tool_activity) {
+        if !matches!(activity, TurnActivitySnapshot::ToolRunning { .. }) {
+            activity_started_at_ms = transcript
+                .iter()
+                .rev()
+                .find(|row| row.finish == DshRenderFinish::Running)
+                .and_then(|row| event_time_for_seq(history, row.source_seq))
+                .or(activity_started_at_ms);
+        }
+        activity = tool;
+    }
+
+    let pending_user_input = interaction.is_some();
+    if pending_user_input && !matches!(activity, TurnActivitySnapshot::ToolRunning { .. }) {
+        activity = TurnActivitySnapshot::WaitingForInput;
+    }
+
+    TurnStatusSnapshot {
+        visible: true,
+        activity,
+        turn_started_at_ms,
+        activity_started_at_ms,
+        pending_user_input,
+        total_tokens,
+    }
+}
+
+fn activity_for_event(event: &SessionEvent, view: Option<&Value>) -> Option<TurnActivitySnapshot> {
+    match event.event_type.as_str() {
+        "turn/start" | "step/start" | "tool/result" | "step/end" => {
+            Some(TurnActivitySnapshot::Waiting)
+        }
+        "assistant/chunk" => assistant_chunk_activity(&event.data),
+        "assistant/message" => assistant_message_activity(&event.data),
+        "tool/call" | "command/run" => Some(tool_activity(&event.data, view)),
+        "llm/retry" => Some(TurnActivitySnapshot::Retrying {
+            attempt: event
+                .data
+                .get("retry")
+                .or_else(|| event.data.get("attempt"))
+                .and_then(Value::as_u64)
+                .unwrap_or(1),
+        }),
+        "compaction/start" => Some(TurnActivitySnapshot::Compacting),
+        "compaction/end" => Some(TurnActivitySnapshot::Waiting),
+        _ => None,
+    }
+}
+
+fn assistant_chunk_activity(data: &Value) -> Option<TurnActivitySnapshot> {
+    let chunk = data.get("chunk")?;
+    let chunk_type = chunk.get("type").and_then(Value::as_str)?;
+    match chunk_type {
+        "reasoning-delta" => Some(TurnActivitySnapshot::Thinking),
+        "text-delta" => Some(TurnActivitySnapshot::Responding),
+        "tool-call-delta" => Some(TurnActivitySnapshot::WritingToolCall),
+        "block-start" => match chunk.get("blockType").and_then(Value::as_str) {
+            Some("reasoning") => Some(TurnActivitySnapshot::Thinking),
+            Some("text") => Some(TurnActivitySnapshot::Responding),
+            Some("tool-call") => Some(TurnActivitySnapshot::WritingToolCall),
+            _ => None,
+        },
+        "block-end" => match chunk
+            .get("block")
+            .and_then(|block| block.get("type"))
+            .and_then(Value::as_str)
+        {
+            Some("reasoning") => Some(TurnActivitySnapshot::Thinking),
+            Some("text") => Some(TurnActivitySnapshot::Responding),
+            Some("tool-call") => Some(TurnActivitySnapshot::WritingToolCall),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn assistant_message_activity(data: &Value) -> Option<TurnActivitySnapshot> {
+    data.pointer("/message/content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .rev()
+                .find_map(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("reasoning") => Some(TurnActivitySnapshot::Thinking),
+                    Some("text") => Some(TurnActivitySnapshot::Responding),
+                    Some("tool-call") => Some(TurnActivitySnapshot::WritingToolCall),
+                    _ => None,
+                })
+        })
+}
+
+fn tool_activity(data: &Value, view: Option<&Value>) -> TurnActivitySnapshot {
+    let presented = view.map(|value| value.get("view").unwrap_or(value));
+    let arguments = data
+        .get("arguments")
+        .and_then(Value::as_str)
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    let title = presented
+        .and_then(|value| value.get("title"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            arguments.as_ref().and_then(|value| {
+                value
+                    .get("command")
+                    .or_else(|| value.get("cmd"))
+                    .and_then(Value::as_str)
+            })
+        })
+        .or_else(|| data.get("command").and_then(Value::as_str))
+        .or_else(|| data.get("name").and_then(Value::as_str))
+        .unwrap_or("tool")
+        .to_string();
+    let description = presented
+        .and_then(|value| value.get("description"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            arguments
+                .as_ref()
+                .and_then(|value| value.get("description"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    TurnActivitySnapshot::ToolRunning { title, description }
+}
+
+fn running_tool_activity(row: &TranscriptRow) -> Option<TurnActivitySnapshot> {
+    if row.kind != DshRenderKind::ToolCall || row.finish != DshRenderFinish::Running {
+        return None;
+    }
+    row.content.blocks.iter().find_map(|block| {
+        let DshRenderBlock::ToolCall {
+            name,
+            arguments,
+            view,
+            ..
+        } = block
+        else {
+            return None;
+        };
+        let (title, description) = match view {
+            Some(dsh_pager::DshToolCallView::Terminal {
+                title, description, ..
+            }) => (title.clone(), description.clone()),
+            Some(view) => (view.title().to_string(), None),
+            None => {
+                let data = serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null);
+                let title = data
+                    .get("command")
+                    .or_else(|| data.get("cmd"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(name)
+                    .to_string();
+                let description = data
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                (title, description)
+            }
+        };
+        Some(TurnActivitySnapshot::ToolRunning { title, description })
+    })
+}
+
+fn event_time_for_seq(history: &[dsh_pager_protocol::HistoryEntry], seq: i64) -> Option<u64> {
+    history
+        .iter()
+        .find(|entry| entry.event.seq == seq)
+        .and_then(|entry| event_epoch_ms(entry.event.time))
+}
+
+fn event_epoch_ms(time: f64) -> Option<u64> {
+    (time.is_finite() && time >= 0.0 && time <= u64::MAX as f64).then(|| time.round() as u64)
 }
 
 /// Project the optional host-owned file search result. The projection is
@@ -942,6 +1200,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         workspace: WorkspaceSnapshot::default(),
         agent: AgentSnapshot::default(),
         context_usage: ContextUsageSnapshot::default(),
+        turn_status: TurnStatusSnapshot::default(),
         capabilities: CapabilityMatrix::default(),
     }
 }
@@ -971,7 +1230,9 @@ fn projection_strings(session: &SessionState, keys: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsh_pager_protocol::{HistoryEntry, SessionEvent, SessionHistoryValue};
+    use dsh_pager_protocol::{
+        HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
+    };
     use serde_json::json;
 
     fn state() -> SessionState {
@@ -1018,6 +1279,177 @@ mod tests {
         state.set_projection("promptHistory", 8, json!(["first", "second"]));
         state.set_projection("promptSuggestions", 9, json!(["/help", "/model"]));
         state
+    }
+
+    fn mark_running(state: &mut SessionState) {
+        state
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.host".into(),
+                params: Some(json!({
+                    "type": "host/session-status",
+                    "sessionId": state.session_id(),
+                    "generation": state.generation(),
+                    "running": true
+                })),
+            })
+            .expect("running status");
+    }
+
+    #[test]
+    fn turn_status_folds_stream_activity_without_resetting_each_delta() {
+        let base = 1_787_500_000_000_f64;
+        let mut state = SessionState::new("turn-session".into(), 2);
+        state
+            .install_initial(SessionHistoryValue {
+                events: vec![
+                    HistoryEntry {
+                        event: SessionEvent {
+                            event_type: "turn/start".into(),
+                            seq: 0,
+                            time: base,
+                            data: json!({"turn": 1}),
+                            source_event_seqs: None,
+                            surface_op: None,
+                            ignorable: None,
+                        },
+                        view: None,
+                    },
+                    HistoryEntry {
+                        event: SessionEvent {
+                            event_type: "assistant/chunk".into(),
+                            seq: 1,
+                            time: base + 100.0,
+                            data: json!({
+                                "turn": 1,
+                                "step": 1,
+                                "chunk": {"type": "reasoning-delta", "index": 0, "text": "a"}
+                            }),
+                            source_event_seqs: None,
+                            surface_op: None,
+                            ignorable: None,
+                        },
+                        view: None,
+                    },
+                    HistoryEntry {
+                        event: SessionEvent {
+                            event_type: "assistant/chunk".into(),
+                            seq: 2,
+                            time: base + 800.0,
+                            data: json!({
+                                "turn": 1,
+                                "step": 1,
+                                "chunk": {"type": "reasoning-delta", "index": 0, "text": "b"}
+                            }),
+                            source_event_seqs: None,
+                            surface_op: None,
+                            ignorable: None,
+                        },
+                        view: None,
+                    },
+                ],
+                has_more: false,
+                projections: None,
+            })
+            .expect("turn history");
+        mark_running(&mut state);
+
+        let snapshot = GrokHostSnapshot::from_session(&state);
+        assert!(snapshot.turn_status.visible);
+        assert_eq!(
+            snapshot.turn_status.activity,
+            TurnActivitySnapshot::Thinking
+        );
+        assert_eq!(snapshot.turn_status.turn_started_at_ms, Some(base as u64));
+        assert_eq!(
+            snapshot.turn_status.activity_started_at_ms,
+            Some(base as u64 + 100),
+            "the second reasoning delta must not restart the phase timer"
+        );
+    }
+
+    #[test]
+    fn running_tool_and_approval_project_title_tokens_and_user_wait() {
+        let base = 1_787_500_000_000_f64;
+        let mut state = SessionState::new("approval-turn".into(), 3);
+        state
+            .install_initial(SessionHistoryValue {
+                events: vec![
+                    HistoryEntry {
+                        event: SessionEvent {
+                            event_type: "turn/start".into(),
+                            seq: 0,
+                            time: base,
+                            data: json!({"turn": 1}),
+                            source_event_seqs: None,
+                            surface_op: None,
+                            ignorable: None,
+                        },
+                        view: None,
+                    },
+                    HistoryEntry {
+                        event: SessionEvent {
+                            event_type: "tool/call".into(),
+                            seq: 1,
+                            time: base + 250.0,
+                            data: json!({
+                                "turn": 1,
+                                "step": 1,
+                                "name": "bash",
+                                "callId": "call-1",
+                                "arguments": "{\"command\":\"find /work -maxdepth 3\"}"
+                            }),
+                            source_event_seqs: None,
+                            surface_op: None,
+                            ignorable: None,
+                        },
+                        view: Some(json!({
+                            "for": "call",
+                            "view": {
+                                "card": "terminal",
+                                "title": "find /work -maxdepth 3",
+                                "description": "List project files",
+                                "cwd": "/work"
+                            }
+                        })),
+                    },
+                ],
+                has_more: false,
+                projections: None,
+            })
+            .expect("tool history");
+        state.set_projection("contextPressure", 3, json!({"projectedTokens": 12_345}));
+        mark_running(&mut state);
+        state
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "type": "approval/requested",
+                    "sessionId": "approval-turn",
+                    "generation": 3,
+                    "requestId": "rpc-1",
+                    "approvalId": "approval-1",
+                    "callId": "call-1",
+                    "toolName": "bash"
+                })),
+            })
+            .expect("approval");
+
+        let snapshot = GrokHostSnapshot::from_session(&state);
+        assert_eq!(
+            snapshot.turn_status.activity,
+            TurnActivitySnapshot::ToolRunning {
+                title: "find /work -maxdepth 3".into(),
+                description: Some("List project files".into()),
+            }
+        );
+        assert_eq!(
+            snapshot.turn_status.activity_started_at_ms,
+            Some(base as u64 + 250)
+        );
+        assert_eq!(snapshot.turn_status.total_tokens, Some(12_345));
+        assert!(snapshot.turn_status.pending_user_input);
     }
 
     #[test]

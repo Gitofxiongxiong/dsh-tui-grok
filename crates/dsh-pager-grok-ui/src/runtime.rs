@@ -9,7 +9,7 @@
 //! a second layout or dispatch system here. Removal exits when M3 production
 //! shell and its focus/dispatch fixtures replace this entry path.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -85,17 +85,31 @@ use crate::views::{
     suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
     transcript::ScrollbackPane,
+    turn_status::{MouseButtons as TurnStatusMouseButtons, TurnStatusArgs, render_turn_status},
     workspace::WorkspaceTreeController,
 };
 use serde_json::json;
 use xai_ratatui_textarea::MouseAction;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const ANIMATION_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const NOTIFICATION_BUDGET: usize = 256;
 const TRANSCRIPT_DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 fn contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
+fn elapsed_since_epoch_ms(started_at_ms: Option<u64>) -> Option<Duration> {
+    let started_at_ms = u128::from(started_at_ms?);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let elapsed_ms = now_ms.checked_sub(started_at_ms)?;
+    Some(Duration::from_millis(
+        u64::try_from(elapsed_ms).unwrap_or(u64::MAX),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -180,7 +194,12 @@ fn run_loop(
         terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
         })?;
-        if !event::poll(POLL_INTERVAL)? {
+        let poll_interval = if session.running() {
+            ANIMATION_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
+        if !event::poll(poll_interval)? {
             continue;
         }
         let event = event::read()?;
@@ -273,6 +292,7 @@ struct UiState {
     interaction_request_id: Option<DshRequestId>,
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
+    cancel_pending: Option<OperationKey>,
     interaction_args_expanded: bool,
     permission_area: Rect,
     permission_option_rows: Vec<Rect>,
@@ -310,6 +330,7 @@ struct UiState {
     last_transcript_click: Option<(Instant, dsh_pager::DshRenderEntryId, Option<usize>)>,
     hover_link: Option<LinkTarget>,
     context_hovered: bool,
+    turn_stop_hovered: bool,
     frame_links: Vec<dsh_grok_inline::LinkSpan>,
     pending_copy: Option<String>,
     scheduler_stats: SchedulerStats,
@@ -343,6 +364,7 @@ impl UiState {
 
     fn apply_effect_completion(&mut self, completion: UiEffectCompletion, session: &SessionState) {
         let subject = match &completion.effect {
+            UiEffect::CancelSession { .. } => "Cancel session",
             UiEffect::SubmitPrompt { .. } => "Prompt",
             UiEffect::QueueMutation { .. } => "Queue update",
             UiEffect::RespondInteraction { .. } => "Interaction response",
@@ -403,6 +425,17 @@ impl UiState {
             )
         {
             self.interaction_pending = None;
+        }
+        if matches!(completion.effect, UiEffect::CancelSession { .. }) {
+            if matches!(
+                completion.receipt.status,
+                UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+            ) {
+                self.status = Some("Cancellation accepted; waiting for host snapshot".into());
+            } else {
+                self.cancel_pending = None;
+                self.turn_stop_hovered = false;
+            }
         }
         if let UiEffect::SubmitPrompt { text, .. } = &completion.effect
             && completion.receipt.status == UiEffectStatus::Accepted
@@ -559,7 +592,7 @@ impl UiState {
             todo_height: 0,
             queue_height,
             btw_height: 0,
-            turn_status_height: u16::from(snapshot.running && !short),
+            turn_status_height: u16::from(snapshot.turn_status.visible),
             banner_height: suggestion_rows,
             cta_height: 0,
             follow_ups_height: 0,
@@ -704,13 +737,36 @@ impl UiState {
                 priority: 5,
             });
         }
-        AgentView::render_turn_status(
-            frame,
+        let turn_status_output = render_turn_status(
+            frame.buffer_mut(),
             agent_layout.turn_status,
-            snapshot.running,
-            snapshot.status.as_deref(),
+            TurnStatusArgs {
+                activity: &snapshot.turn_status.activity,
+                turn_elapsed: elapsed_since_epoch_ms(snapshot.turn_status.turn_started_at_ms),
+                activity_elapsed: elapsed_since_epoch_ms(
+                    snapshot.turn_status.activity_started_at_ms,
+                ),
+                tick: self.frame as u64,
+                pending_user_input: snapshot.turn_status.pending_user_input,
+                buttons: self.capabilities.mouse.then_some(TurnStatusMouseButtons {
+                    cancel_hovered: self.turn_stop_hovered,
+                }),
+                total_tokens: snapshot.turn_status.total_tokens,
+                cancelling: self.cancel_pending.is_some() && snapshot.running,
+            },
             theme,
         );
+        if let Some(cancel_button) = turn_status_output.cancel_button {
+            self.hit_map.insert(crate::geometry::HitRegion {
+                target: HitTarget::Overlay("turn-stop".into()),
+                rect: cancel_button,
+                label: "stop current turn".into(),
+                link: None,
+                priority: 30,
+            });
+        } else {
+            self.turn_stop_hovered = false;
+        }
         let capability_notice = if !self.capabilities.bracketed_paste {
             Some("Paste unavailable")
         } else if !self.capabilities.mouse {
@@ -818,6 +874,17 @@ impl UiState {
     }
 
     fn reconcile_snapshot(&mut self, snapshot: &GrokHostSnapshot) {
+        if self.cancel_pending.as_ref().is_some_and(|pending| {
+            pending.session_id != snapshot.session_header.id
+                || pending.generation != snapshot.session_header.generation
+        }) {
+            self.cancel_pending = None;
+            self.turn_stop_hovered = false;
+        } else if !snapshot.running && self.cancel_pending.take().is_some() {
+            self.turn_stop_hovered = false;
+            self.status = Some("Turn cancelled; host snapshot converged".into());
+        }
+
         if let Some(interaction) = snapshot.interaction.as_ref() {
             let request_id = DshRequestId::new(interaction.request_id());
             let generation = snapshot.session_header.generation;
@@ -1813,7 +1880,9 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::TranscriptMouse(mouse) => {
-                self.handle_transcript_mouse(mouse);
+                if !self.handle_turn_status_mouse(mouse, transport, session)? {
+                    self.handle_transcript_mouse(mouse);
+                }
                 Ok(false)
             }
             ShellAction::Resized(area) => {
@@ -1943,6 +2012,47 @@ impl UiState {
             }
             _ => {}
         }
+    }
+
+    fn handle_turn_status_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<bool> {
+        let over_stop = self.hit_map.hit_test(mouse.column, mouse.row).is_some_and(
+            |region| matches!(&region.target, HitTarget::Overlay(name) if name == "turn-stop"),
+        );
+        if mouse.kind == MouseEventKind::Moved {
+            self.turn_stop_hovered = over_stop;
+            return Ok(false);
+        }
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) || !over_stop {
+            return Ok(false);
+        }
+        if !session.running() {
+            self.status = Some("Turn already finished".into());
+            return Ok(true);
+        }
+        if self.cancel_pending.is_some() {
+            self.status = Some("Cancellation already pending".into());
+            return Ok(true);
+        }
+
+        let request_id = DshRequestId::new(format!("cancel-{}", self.next_operation));
+        self.next_operation = self.next_operation.saturating_add(1);
+        let context = UiContext::for_operation(session, request_id);
+        let receipt = self.submit_effect(transport, UiIntent::CancelSession, &context)?;
+        if matches!(
+            receipt.status,
+            UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+        ) {
+            self.cancel_pending = Some(receipt.operation.clone());
+            self.status = Some("Cancelling turn; waiting for host snapshot".into());
+        } else {
+            self.status = Some(receipt_status_message(&receipt, "Cancel session"));
+        }
+        Ok(true)
     }
 
     fn handle_file_search_key(
@@ -3401,6 +3511,64 @@ mod tests {
         assert_eq!(snapshot.picker_entries().len(), 3);
     }
 
+    #[test]
+    fn cancel_receipt_stays_pending_until_host_running_state_converges() {
+        let mut session = SessionState::new("cancel-session".into(), 4);
+        let host_status = |running| JsonRpcNotification {
+            jsonrpc: "2.0".into(),
+            method: "events.host".into(),
+            params: Some(json!({
+                "type": "host/session-status",
+                "sessionId": "cancel-session",
+                "generation": 4,
+                "running": running
+            })),
+        };
+        session
+            .accept_notification(host_status(true))
+            .expect("running host state");
+        let operation = crate::effects::OperationKey {
+            session_id: dsh_pager::DshSessionId::new("cancel-session"),
+            generation: dsh_pager::DshGeneration::new(4),
+            request_id: dsh_pager::DshRequestId::new("cancel-1"),
+            action: "cancel-session".into(),
+            dedupe_key: "cancel-session:cancel-1".into(),
+        };
+        let mut ui = UiState {
+            cancel_pending: Some(operation.clone()),
+            ..UiState::default()
+        };
+        ui.apply_effect_completion(
+            crate::effects::UiEffectCompletion {
+                effect: crate::effects::UiEffect::CancelSession {
+                    operation: operation.clone(),
+                },
+                receipt: crate::effects::UiEffectReceipt {
+                    status: UiEffectStatus::Accepted,
+                    operation: operation.clone(),
+                    diagnostic: None,
+                    retryable: Some(false),
+                },
+                file_references: None,
+                attachment_preview: None,
+            },
+            &session,
+        );
+        assert_eq!(ui.cancel_pending.as_ref(), Some(&operation));
+        ui.reconcile_snapshot(&GrokHostSnapshot::from_session(&session));
+        assert!(ui.cancel_pending.is_some());
+
+        session
+            .accept_notification(host_status(false))
+            .expect("idle host state");
+        ui.reconcile_snapshot(&GrokHostSnapshot::from_session(&session));
+        assert!(ui.cancel_pending.is_none());
+        assert_eq!(
+            ui.status.as_deref(),
+            Some("Turn cancelled; host snapshot converged")
+        );
+    }
+
     fn session_with_long_messages(count: usize) -> SessionState {
         let events = (0..count)
             .map(|index| HistoryEntry {
@@ -3564,6 +3732,18 @@ mod tests {
                 })),
             })
             .expect("approval fixture");
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.host".into(),
+                params: Some(json!({
+                    "type": "host/session-status",
+                    "sessionId": "approval-session",
+                    "generation": 3,
+                    "running": true
+                })),
+            })
+            .expect("running fixture");
 
         let control_plane = ControlPlaneStore::default();
         let mut ui = UiState::default();
@@ -3580,6 +3760,11 @@ mod tests {
         assert!(screen.contains("find /work -maxdepth 3"));
         assert!(screen.contains("1 (●) Yes, proceed"));
         assert!(screen.contains("2 (○) No, reject"));
+        assert!(screen.contains('◆'));
+        assert!(screen.contains("List project files…"));
+        assert!(ui.hit_map.regions().iter().any(|region| {
+            matches!(&region.target, HitTarget::Overlay(name) if name == "turn-stop")
+        }));
         assert!(!screen.contains("Interaction · host request"));
     }
 

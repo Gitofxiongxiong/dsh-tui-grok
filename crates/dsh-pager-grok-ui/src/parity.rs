@@ -19,6 +19,7 @@ use crate::views::agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, eff
 use crate::views::prompt_contract::{PromptFlagContract, PromptInfoContract, PromptStyleContract};
 use crate::views::prompt_widget::GrokPromptRenderer;
 use crate::views::transcript::RichTranscript;
+use crate::views::turn_status::{MouseButtons, TurnStatusArgs, render_turn_status};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticRect {
@@ -335,7 +336,7 @@ impl ReferenceRunner {
                 tasks_height: (snapshot.tasks.len() as u16).min(8),
                 catalog_height: (snapshot.agent.subagents.len() as u16).min(8),
                 queue_height: (snapshot.queue.len() as u16).clamp(0, 3),
-                turn_status_height: u16::from(snapshot.running && !short),
+                turn_status_height: u16::from(snapshot.turn_status.visible),
                 banner_height: u16::from(!snapshot.prompt.suggestions.is_empty()),
                 status_line_height: u16::from(snapshot.status.is_some() && !short),
                 prompt_gap: u16::from(!compact && !short),
@@ -540,6 +541,42 @@ pub fn render_semantic(
             semantic_row_style(&row.role, theme),
         );
     }
+    if layout.turn_status.height > 0 {
+        let output = render_turn_status(
+            &mut screen_buffer,
+            layout.turn_status,
+            TurnStatusArgs {
+                activity: &snapshot.turn_status.activity,
+                turn_elapsed: None,
+                activity_elapsed: None,
+                tick: 0,
+                pending_user_input: snapshot.turn_status.pending_user_input,
+                buttons: Some(MouseButtons::default()),
+                total_tokens: snapshot.turn_status.total_tokens,
+                cancelling: false,
+            },
+            theme,
+        );
+        let text = (layout.turn_status.x..layout.turn_status.right())
+            .map(|x| screen_buffer[(x, layout.turn_status.y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        rows.push(SemanticRow {
+            role: "turn-status".into(),
+            text,
+            rect: layout.turn_status.into(),
+        });
+        if let Some(rect) = output.cancel_button {
+            map.insert(crate::geometry::HitRegion {
+                target: HitTarget::Overlay("turn-stop".into()),
+                rect,
+                label: "stop current turn".into(),
+                link: None,
+                priority: 30,
+            });
+        }
+    }
     let mut prompt = PromptEditor::default();
     let prompt_style = PromptStyleContract {
         focused: shell.owner() == KeyOwner::Prompt,
@@ -629,6 +666,46 @@ mod tests {
         assert!(matrix.has_size(40, 12));
         assert!(matrix.has_size(160, 50));
         assert!(matrix.case_count() >= 600);
+    }
+
+    #[test]
+    fn turn_status_is_semantic_at_80x24_and_survives_40x12() {
+        let runner = ReferenceRunner::new(ParityMatrix::default());
+        let snapshot = GrokHostSnapshot::demo();
+        let mut shell = AppShell::default();
+        let regular = runner.render(
+            &snapshot,
+            &mut shell,
+            TerminalSize {
+                width: 80,
+                height: 24,
+            },
+        );
+        let status = regular
+            .row_text("turn-status")
+            .expect("regular terminal turn status");
+        assert!(status.starts_with('⠋'));
+        assert!(status.contains("Thinking…"));
+        assert!(
+            regular
+                .hits
+                .iter()
+                .any(|hit| hit.target.contains("turn-stop"))
+        );
+
+        let narrow = runner.render(
+            &snapshot,
+            &mut shell,
+            TerminalSize {
+                width: 40,
+                height: 12,
+            },
+        );
+        let narrow_status = narrow
+            .row_text("turn-status")
+            .expect("short terminal keeps the active turn status");
+        assert!(narrow_status.starts_with('⠋'));
+        assert!(narrow_status.ends_with("[stop]"));
     }
 
     #[test]

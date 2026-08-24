@@ -37,4 +37,6 @@ pub mod suggestion_controller;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/timeline.rs"]
 pub mod timeline;
 pub mod transcript;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/turn_status.rs"]
+pub mod turn_status;
 pub mod workspace;
