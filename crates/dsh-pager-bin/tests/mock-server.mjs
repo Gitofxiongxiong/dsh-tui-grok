@@ -141,6 +141,7 @@ function entry(event) {
 function emitTailOnce() {
   if (tailPushed) return
   tailPushed = true
+  const now = Date.now()
   write({
     jsonrpc: '2.0',
     method: 'events.mux',
@@ -175,17 +176,42 @@ function emitTailOnce() {
     params: {
       type: 'session/jobs',
       sessionId,
-      jobs: [{
-        id: 'job-long',
-        kind: 'command',
-        label: 'Long background demo',
-        status: 'running',
-        detail: 'sleep 90',
-        activity: 'sleeping for 90 seconds',
-        startedAt: Date.now(),
-        output: 'Task started\n',
-        outputLines: 1,
-      }],
+      jobs: [
+        {
+          id: 'job-long',
+          kind: 'command',
+          label: 'Long background demo',
+          status: 'running',
+          detail: 'sleep 90',
+          startedAt: now - 15_000,
+        },
+        {
+          id: 'job-stopping',
+          kind: 'bash',
+          label: 'Stopping background demo',
+          status: 'stopping',
+          detail: 'signal: SIGTERM',
+          startedAt: now - 6_000,
+        },
+        {
+          id: 'job-killed',
+          kind: 'bash',
+          label: 'Killed background demo',
+          status: 'killed',
+          detail: 'signal: SIGTERM',
+          startedAt: now - 3_000,
+          finishedAt: now - 1_000,
+        },
+        {
+          id: 'job-completed',
+          kind: 'bash',
+          label: 'Completed background demo',
+          status: 'completed',
+          detail: 'exit code: 0',
+          startedAt: now - 20_000,
+          finishedAt: now - 5_000,
+        },
+      ],
     },
   })
 }

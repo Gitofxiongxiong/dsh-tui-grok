@@ -52,10 +52,11 @@ impl AgentPaneController {
 
     pub fn sync(&mut self, snapshot: &AgentSnapshot) {
         self.order.clear();
+        let mut tasks = snapshot.tasks.iter().collect::<Vec<_>>();
+        tasks.sort_by(task_ordering);
         self.order.extend(
-            snapshot
-                .tasks
-                .iter()
+            tasks
+                .into_iter()
                 .map(|task| AgentItemId::Task(task.id.clone())),
         );
         self.order.extend(
@@ -123,11 +124,7 @@ pub fn inline_agent_pane_height(snapshot: &AgentSnapshot, view_height: u16) -> u
     if snapshot.status != FeatureStatus::Available {
         return 0;
     }
-    let tasks = snapshot
-        .tasks
-        .iter()
-        .filter(|task| task.is_running())
-        .count();
+    let tasks = snapshot.tasks.iter().filter(|task| task.is_live()).count();
     let subagents = snapshot
         .subagents
         .iter()
@@ -186,7 +183,9 @@ pub fn render_agent_tasks_content(
                 );
                 row = row.saturating_add(1);
             }
-            for task in &snapshot.tasks {
+            let mut tasks = snapshot.tasks.iter().collect::<Vec<_>>();
+            tasks.sort_by(task_ordering);
+            for task in tasks {
                 if row >= area.height.saturating_sub(2) {
                     break;
                 }
@@ -280,11 +279,7 @@ pub fn render_inline_agent_panes(
     let groups = [
         (
             "Tasks",
-            snapshot
-                .tasks
-                .iter()
-                .filter(|task| task.is_running())
-                .count(),
+            snapshot.tasks.iter().filter(|task| task.is_live()).count(),
         ),
         (
             "Subagents",
@@ -313,7 +308,13 @@ pub fn render_inline_agent_panes(
         let _ = header;
         match group {
             "Tasks" => {
-                for task in snapshot.tasks.iter().filter(|task| task.is_running()) {
+                let mut tasks = snapshot
+                    .tasks
+                    .iter()
+                    .filter(|task| task.is_live())
+                    .collect::<Vec<_>>();
+                tasks.sort_by(task_ordering);
+                for task in tasks {
                     if row >= area.height {
                         break;
                     }
@@ -418,34 +419,13 @@ pub fn render_agent_detail_content(
                 false,
             );
             row += 1;
-            if let Some(activity) = task.activity.as_deref().or(task.detail.as_deref()) {
+            if let Some(detail) = task.detail.as_deref() {
                 put_at(
                     buffer,
                     area,
                     row,
-                    &format!("activity: {activity}"),
+                    &format!("detail: {detail}"),
                     theme.text_secondary,
-                    theme,
-                    false,
-                );
-                row += 1;
-            }
-            if let Some(output) = task.output.as_deref() {
-                for line in output
-                    .lines()
-                    .take(area.height.saturating_sub(row + 2) as usize)
-                {
-                    put_at(buffer, area, row, line, theme.gray, theme, false);
-                    row += 1;
-                }
-            }
-            if task.output_truncated {
-                put_at(
-                    buffer,
-                    area,
-                    row,
-                    "output truncated by host",
-                    theme.gray_dim,
                     theme,
                     false,
                 );
@@ -588,26 +568,19 @@ pub fn watcher_label(snapshot: &AgentSnapshot) -> Option<String> {
 
 fn task_line(task: &TaskRow, selected: bool, detailed: bool) -> String {
     let marker = if selected { "▸" } else { " " };
-    let activity = task
-        .activity
-        .as_deref()
-        .or(task.detail.as_deref())
-        .unwrap_or("");
-    let elapsed = elapsed_label(task.started_at_ms);
+    let detail = task.detail.as_deref().unwrap_or("");
+    let elapsed = elapsed_label(task.started_at_ms, task.finished_at_ms, task.is_live());
     let mut line = format!(
         "{marker} {} {} · {}",
         status_icon(&task.status, task.is_running()),
         task.label,
         task.status
     );
-    if !activity.is_empty() {
-        line.push_str(&format!(" · {activity}"));
+    if !detail.is_empty() {
+        line.push_str(&format!(" · {detail}"));
     }
     if !elapsed.is_empty() {
         line.push_str(&format!(" · {elapsed}"));
-    }
-    if task.is_monitor {
-        line.push_str(" · monitor");
     }
     if detailed && !task.id.is_empty() {
         line.push_str(&format!(" · {}", task.id));
@@ -623,7 +596,11 @@ fn subagent_line(agent: &SubagentRow, selected: bool) -> String {
         .or(agent.status.as_deref())
         .unwrap_or("unknown");
     let mode = agent.mode.as_deref().unwrap_or("unknown");
-    let elapsed = elapsed_label(agent.started_at_ms);
+    let elapsed = elapsed_label(
+        agent.started_at_ms,
+        agent.finished_at_ms,
+        agent.is_running(),
+    );
     let mut line = format!(
         "{marker} {} {} · {} · {}",
         status_icon(activity, agent.is_running()),
@@ -638,30 +615,65 @@ fn subagent_line(agent: &SubagentRow, selected: bool) -> String {
 }
 
 fn status_icon(status: &str, running: bool) -> &'static str {
-    if running {
-        return "⠴";
-    }
     match status.to_ascii_lowercase().as_str() {
+        "running" if running => "⠴",
+        "stopping" => "!",
         "completed" | "done" | "success" | "succeeded" => "✓",
         "failed" | "error" | "cancelled" | "canceled" => "✗",
+        _ if running => "⠴",
         _ => "·",
     }
 }
 
-fn elapsed_label(started_at_ms: Option<u64>) -> String {
+fn elapsed_label(started_at_ms: Option<u64>, finished_at_ms: Option<u64>, live: bool) -> String {
     let Some(started_at_ms) = started_at_ms else {
         return String::new();
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(started_at_ms);
-    let seconds = now.saturating_sub(started_at_ms) / 1000;
+    let end = if live {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(started_at_ms)
+    } else {
+        finished_at_ms.unwrap_or(started_at_ms)
+    };
+    let seconds = end.saturating_sub(started_at_ms) / 1000;
     if seconds < 60 {
         format!("{seconds}s")
     } else {
         format!("{}m{:02}s", seconds / 60, seconds % 60)
     }
+}
+
+fn task_ordering(left: &&TaskRow, right: &&TaskRow) -> std::cmp::Ordering {
+    let left_live = left.is_live();
+    let right_live = right.is_live();
+    if left_live != right_live {
+        return right_live.cmp(&left_live);
+    }
+    if left_live {
+        return left
+            .started_at_ms
+            .unwrap_or_default()
+            .cmp(&right.started_at_ms.unwrap_or_default())
+            .then_with(|| left.id.cmp(&right.id));
+    }
+    right
+        .finished_at_ms
+        .or(right.started_at_ms)
+        .unwrap_or_default()
+        .cmp(
+            &left
+                .finished_at_ms
+                .or(left.started_at_ms)
+                .unwrap_or_default(),
+        )
+        .then_with(|| {
+            left.started_at_ms
+                .unwrap_or_default()
+                .cmp(&right.started_at_ms.unwrap_or_default())
+        })
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn put(buffer: &mut Buffer, area: Rect, text: &str, color: Color, theme: &Theme) {
@@ -769,6 +781,54 @@ mod tests {
         assert_eq!(
             watcher_label(&snapshot).as_deref(),
             Some("1 background task · 1 subagent still running")
+        );
+    }
+
+    #[test]
+    fn task_order_matches_dsh_live_then_newest_settled() {
+        let tasks = vec![
+            TaskRow {
+                id: "done-old".into(),
+                kind: "bash".into(),
+                label: "old".into(),
+                status: "completed".into(),
+                started_at_ms: Some(10),
+                finished_at_ms: Some(20),
+                ..Default::default()
+            },
+            TaskRow {
+                id: "live-late".into(),
+                kind: "bash".into(),
+                label: "late".into(),
+                status: "running".into(),
+                started_at_ms: Some(30),
+                ..Default::default()
+            },
+            TaskRow {
+                id: "done-new".into(),
+                kind: "bash".into(),
+                label: "new".into(),
+                status: "killed".into(),
+                started_at_ms: Some(40),
+                finished_at_ms: Some(50),
+                ..Default::default()
+            },
+            TaskRow {
+                id: "live-early".into(),
+                kind: "bash".into(),
+                label: "early".into(),
+                status: "stopping".into(),
+                started_at_ms: Some(5),
+                ..Default::default()
+            },
+        ];
+        let mut refs = tasks.iter().collect::<Vec<_>>();
+        refs.sort_by(task_ordering);
+        assert_eq!(
+            refs.into_iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live-early", "live-late", "done-new", "done-old"]
         );
     }
 }
