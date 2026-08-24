@@ -30,6 +30,24 @@ pnpm install
 pnpm run verify:ts
 ```
 
+## 启动新对话
+
+本机开发环境可直接运行：
+
+```bash
+./scripts/start-new-chat.sh
+```
+
+脚本会构建最新 `dsh-pager`，连接 `grok-tui` profile，并使用 `--new` 创建新会话。
+只检查 backend/profile 是否可用而不创建会话时运行：
+
+```bash
+./scripts/start-new-chat.sh --check
+```
+
+可用 `DSH_HARNESS_ROOT`、`DSH_TUI_PROFILE`、`DSH_TUI_SERVER` 和
+`DSH_TUI_CARGO` 覆盖本机默认路径或命令。
+
 需要连接真实后端时，开发期可以把本仓库的三个 TypeScript 包一次性 link 到隔离
 profile，再运行只读真实 E2E：
 
