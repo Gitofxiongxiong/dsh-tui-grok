@@ -22,11 +22,26 @@ pnpm run verify:ts
 
 ## 安装到 DSH profile
 
+### 开发期推荐入口
+
+开发期推荐使用仓库脚本创建项目专属 profile。它会构建三个 TypeScript 包，并在一次
+`dsh plugin add` 中 link protocol、server 和 embedded，避免依赖本机遗留 profile：
+
+```bash
+DSH_TUI_PROFILE=dsh-pager-grok-dev \
+  scripts/setup-dev-profile.sh
+```
+
+`scripts/start-new-chat.sh` 默认会自动执行同样的准备；`--skip-setup` 仅用于已经
+准备好的 profile。profile 位于 `$DSH_HOME/profiles/<name>`，不会写入 Harness checkout。
+
+### 发布包
+
 发布到 npm 后，推荐只把 bundle 加到一个自定义 profile；profile 的依赖会带入 protocol/server 和官方 host 插件：
 
 ```bash
-dsh plugin --profile grok-tui add @dsh-pager-grok/tui-embedded@0.1.0
-dsh --profile grok-tui
+dsh plugin --profile dsh-pager-grok add @dsh-pager-grok/tui-embedded@0.1.0
+dsh --profile dsh-pager-grok
 ```
 
 开发期不发布 npm 时，不要把三个 tarball 分三次装进 profile。`pnpm pack` 会把
@@ -36,19 +51,19 @@ dsh --profile grok-tui
 
 ```bash
 pnpm run build:ts
-dsh plugin --profile grok-tui add \
+dsh plugin --profile dsh-pager-grok add \
   /home/leo/code/dsh-pager-grok/packages/dsh-tui-protocol \
   /home/leo/code/dsh-pager-grok/packages/dsh-tui-server \
   /home/leo/code/dsh-pager-grok/packages/dsh-tui-embedded
-dsh --profile grok-tui
+dsh --profile dsh-pager-grok
 ```
 
 真实联调脚本也可以自动完成这一步。它仍然只改 profile 的依赖，不改
-`deepseek-harness` checkout：
+`deepseek-harness` checkout；建议使用隔离的项目 profile：
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-DSH_TUI_PROFILE=grok-tui \
+DSH_TUI_PROFILE=dsh-pager-grok-e2e \
 DSH_TUI_INSTALL_LOCAL=1 \
 scripts/real-e2e.sh
 ```

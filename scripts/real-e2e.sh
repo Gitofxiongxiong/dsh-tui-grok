@@ -2,34 +2,32 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-harness_root="${DSH_HARNESS_ROOT:-/home/leo/code/deepseek-harness}"
-tui_profile="${DSH_TUI_PROFILE:-grok-tui}"
-server_program="${DSH_TUI_SERVER:-$harness_root/apps/cli/lib/bin.js --profile $tui_profile}"
+# shellcheck source=./dsh-tui-common.sh
+source "$(dirname "$0")/dsh-tui-common.sh"
+
+tui_profile="${DSH_TUI_PROFILE:-$dsh_tui_default_profile}"
+dsh_tui_validate_profile_name "$tui_profile"
 timeout_seconds="${REAL_E2E_TIMEOUT:-45}"
 session_id="${REAL_E2E_SESSION:-}"
 install_local="${DSH_TUI_INSTALL_LOCAL:-0}"
+harness_root="$(dsh_tui_resolve_harness_root "$repo_root")"
+harness_entry="$(dsh_tui_require_harness_entry "$harness_root")"
 
-if [[ ! -x "$harness_root/apps/cli/lib/bin.js" ]]; then
-  printf 'real Harness entry is not executable: %s\n' "$harness_root/apps/cli/lib/bin.js" >&2
+if [[ "$install_local" == "1" && -n "${DSH_TUI_SERVER:-}" ]]; then
+  printf 'DSH_TUI_INSTALL_LOCAL=1 cannot be combined with a custom DSH_TUI_SERVER\n' >&2
   exit 2
 fi
 
-if [[ "$install_local" == "1" ]]; then
-  if [[ "$server_program" != "$harness_root/apps/cli/lib/bin.js --profile $tui_profile" ]]; then
-    printf 'DSH_TUI_INSTALL_LOCAL=1 cannot be combined with a custom DSH_TUI_SERVER\n' >&2
-    exit 2
+if [[ -n "${DSH_TUI_SERVER:-}" ]]; then
+  server_program="$DSH_TUI_SERVER"
+else
+  server_program="$harness_entry --profile $tui_profile"
+
+  if [[ "$install_local" == "1" ]]; then
+    "$repo_root/scripts/setup-dev-profile.sh"
+  else
+    dsh_tui_require_profile "$tui_profile" "$repo_root"
   fi
-  for package_dir in dsh-tui-protocol dsh-tui-server dsh-tui-embedded; do
-    if [[ ! -f "$repo_root/packages/$package_dir/lib/index.js" ]]; then
-      printf 'built package is missing: %s (run pnpm run build:ts first)\n' \
-        "$repo_root/packages/$package_dir/lib/index.js" >&2
-      exit 2
-    fi
-  done
-  node "$harness_root/apps/cli/lib/bin.js" plugin --profile "$tui_profile" add \
-    "$repo_root/packages/dsh-tui-protocol" \
-    "$repo_root/packages/dsh-tui-server" \
-    "$repo_root/packages/dsh-tui-embedded"
 fi
 
 cd "$repo_root"

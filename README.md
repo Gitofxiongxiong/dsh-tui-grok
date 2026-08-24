@@ -32,28 +32,38 @@ pnpm run verify:ts
 
 ## 启动新对话
 
-本机开发环境可直接运行：
+本机开发环境可直接运行。首次运行会自动检查并构建三个 TypeScript 包，然后把它们
+一次性 link 到项目专属的 `dsh-pager-grok-dev` profile；profile 位于 Harness 的
+`$DSH_HOME`，不会修改 `deepseek-harness` checkout：
 
 ```bash
 ./scripts/start-new-chat.sh
 ```
 
-脚本会构建最新 `dsh-pager`，连接 `grok-tui` profile，并使用 `--new` 创建新会话。
-只检查 backend/profile 是否可用而不创建会话时运行：
+脚本随后会构建最新 `dsh-pager`，连接该 profile，并使用 `--new` 创建新会话。只检查
+backend/profile 是否可用而不创建会话时运行：
 
 ```bash
 ./scripts/start-new-chat.sh --check
 ```
 
-可用 `DSH_HARNESS_ROOT`、`DSH_TUI_PROFILE`、`DSH_TUI_SERVER` 和
-`DSH_TUI_CARGO` 覆盖本机默认路径或命令。
+需要显式准备 profile 时运行：
 
-需要连接真实后端时，开发期可以把本仓库的三个 TypeScript 包一次性 link 到隔离
-profile，再运行只读真实 E2E：
+```bash
+./scripts/setup-dev-profile.sh
+```
+
+启动脚本默认会自举 profile；`--skip-setup` 只适合已经准备好 profile 的场景。可用
+`DSH_HARNESS_ROOT`、`DSH_HOME`、`DSH_TUI_PROFILE`、`DSH_TUI_SERVER` 和
+`DSH_TUI_CARGO` 覆盖本机默认路径或命令。指定已有的非本项目 profile 时，初始化脚本
+默认拒绝覆盖；确认后可设置 `DSH_TUI_PROFILE_ALLOW_UPDATE=1`。
+
+真实 E2E 使用同一套 profile 自举逻辑。下面的命令显式使用隔离 profile；脚本会一次性
+link 本仓库的三个 TypeScript 包：
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-DSH_TUI_PROFILE=dsh-tui-grok-dev \
+DSH_TUI_PROFILE=dsh-pager-grok-e2e \
 DSH_TUI_INSTALL_LOCAL=1 \
 bash scripts/real-e2e.sh
 ```

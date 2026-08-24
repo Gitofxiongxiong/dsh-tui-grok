@@ -61,20 +61,35 @@ mock 证据，并将真实后端状态记录为 unavailable，而不会伪造成
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-  DSH_TUI_PROFILE=grok-tui scripts/real-e2e.sh
+  DSH_TUI_PROFILE=dsh-pager-grok-e2e scripts/real-e2e.sh
 ```
 
-如果三个外置包尚未发布到 npm，先运行 `pnpm run build:ts`，再加上
-`DSH_TUI_INSTALL_LOCAL=1`。脚本会一次性 link 本仓库的 protocol、server 和
-embedded 源码包；不要把 packed tarball 分三次安装，因为 packed manifest 中的
-`workspace:*` 会变成 registry semver，最后一个包会触发 npm 404：
+`real-e2e.sh` 在未设置 `DSH_TUI_INSTALL_LOCAL=1` 时只检查 profile，并在 profile
+缺失或不包含本项目 bundle 时提前失败；不会把 Node 的 profile 堆栈错误留给用户。
+开发期没有发布 npm 包时，使用 `DSH_TUI_INSTALL_LOCAL=1`，脚本会自动构建并一次性
+link 本仓库的 protocol、server 和 embedded 源码包。不要把 packed tarball 分三次安装，
+因为 packed manifest 中的 `workspace:*` 会变成 registry semver，最后一个包会触发
+npm 404：
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-  DSH_TUI_PROFILE=grok-tui \
+  DSH_TUI_PROFILE=dsh-pager-grok-e2e \
   DSH_TUI_INSTALL_LOCAL=1 \
   scripts/real-e2e.sh
 ```
+
+首次准备 profile 也可以单独运行：
+
+```bash
+DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
+  DSH_TUI_PROFILE=dsh-pager-grok-dev \
+  scripts/setup-dev-profile.sh
+```
+
+启动脚本和真实 E2E 都优先使用仓库旁的 `../deepseek-harness`，其次使用已知本机路径；
+生产或 CI 不应依赖这些机器路径，应显式设置 `DSH_HARNESS_ROOT`。`DSH_HOME` 默认是
+`$HOME/.dsh`，profile 属于本机运行环境，不提交到仓库。CI/干净环境测试应使用临时
+`DSH_HOME`，先运行 `setup-dev-profile.sh`，再运行 `--check` 或 `real-e2e.sh`。
 
 `scripts/real-e2e.sh` 默认只验证 hello/list/dashboard/load/PTY，不提交 prompt。
 `--smoke-interactions`、`--smoke-queue` 和 `--smoke-lifecycle` 是 checked-in mock
@@ -87,7 +102,7 @@ REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
 ```
 
 默认 backend 为
-`/home/leo/code/deepseek-harness/apps/cli/lib/bin.js --profile grok-tui`，
+`<DSH_HARNESS_ROOT>/apps/cli/lib/bin.js --profile dsh-pager-grok-dev`，
 并从 Harness 自己的 `$DSH_HOME` credentials/settings 层读取配置；密钥不写入本仓库。
 如果刚修改过 Harness 的 TypeScript 源码，先在该 checkout 重建 host bundle：
 

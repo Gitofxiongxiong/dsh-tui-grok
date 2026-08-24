@@ -1,43 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tui_profile="${DSH_TUI_PROFILE:-grok-tui}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./dsh-tui-common.sh
+source "$script_dir/dsh-tui-common.sh"
+
+repo_root="$(dsh_tui_repo_root "$script_dir")"
+tui_profile="${DSH_TUI_PROFILE:-$dsh_tui_default_profile}"
+dsh_tui_validate_profile_name "$tui_profile"
 
 usage() {
   printf '%s\n' \
-    'Usage: scripts/start-new-chat.sh [--check]' \
+    'Usage: scripts/start-new-chat.sh [--check] [--skip-setup]' \
     '' \
     'Starts the Grok TUI with a new DeepSeek Harness session.' \
     '  --check  verify the backend handshake without creating a session' \
     '' \
     'Optional overrides:' \
     '  DSH_HARNESS_ROOT  DeepSeek Harness checkout' \
-    '  DSH_TUI_PROFILE   DSH profile (default: grok-tui)' \
+    '  DSH_HOME          Harness home (default: $HOME/.dsh)' \
+    '  DSH_TUI_PROFILE   DSH profile (default: dsh-pager-grok-dev)' \
+    '  DSH_TUI_PROFILE_ALLOW_UPDATE=1  allow updating a non-project profile' \
     '  DSH_TUI_SERVER    complete backend command' \
-    '  DSH_TUI_CARGO     Cargo executable'
+    '  DSH_TUI_CARGO     Cargo executable' \
+    '' \
+    'By default the local TypeScript packages are built and linked into the profile.' \
+    'Use --skip-setup only when the profile has already been prepared.'
 }
 
 check_only=0
-case "${1:-}" in
-  '') ;;
-  --check)
-    check_only=1
-    shift
-    ;;
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  *)
-    usage >&2
-    exit 2
-    ;;
-esac
-if (( $# > 0 )); then
-  usage >&2
-  exit 2
-fi
+skip_setup=0
+while (( $# > 0 )); do
+  case "$1" in
+    --check)
+      check_only=1
+      ;;
+    --skip-setup)
+      skip_setup=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 if [[ -n "${DSH_TUI_CARGO:-}" ]]; then
   cargo_program="$DSH_TUI_CARGO"
@@ -57,18 +68,12 @@ fi
 if [[ -n "${DSH_TUI_SERVER:-}" ]]; then
   server_program="$DSH_TUI_SERVER"
 else
-  if [[ -n "${DSH_HARNESS_ROOT:-}" ]]; then
-    harness_root="$DSH_HARNESS_ROOT"
-  elif [[ -x /home/leo/aidreamschool/deepseek-harness/apps/cli/lib/bin.js ]]; then
-    harness_root=/home/leo/aidreamschool/deepseek-harness
+  harness_root="$(dsh_tui_resolve_harness_root "$repo_root")"
+  harness_entry="$(dsh_tui_require_harness_entry "$harness_root")"
+  if (( skip_setup == 0 )); then
+    "$repo_root/scripts/setup-dev-profile.sh"
   else
-    harness_root=/home/leo/code/deepseek-harness
-  fi
-  harness_entry="$harness_root/apps/cli/lib/bin.js"
-  if [[ ! -x "$harness_entry" ]]; then
-    printf 'DeepSeek Harness entry is not executable: %s\n' "$harness_entry" >&2
-    printf 'Set DSH_HARNESS_ROOT or DSH_TUI_SERVER to override it.\n' >&2
-    exit 2
+    dsh_tui_require_profile "$tui_profile" "$repo_root"
   fi
   server_program="$harness_entry --profile $tui_profile"
 fi
