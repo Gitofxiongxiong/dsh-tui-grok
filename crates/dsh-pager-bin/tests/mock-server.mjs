@@ -50,6 +50,15 @@ const events = [
         new_string: 'new line',
       }),
     },
+    view: {
+      for: 'call',
+      view: {
+        card: 'diff',
+        title: 'Edit src/mock.rs',
+        diffs: [{ path: 'src/mock.rs', oldText: 'old line', newText: 'new line' }],
+        locations: [{ path: 'src/mock.rs' }],
+      },
+    },
   },
   {
     seq: 5,
@@ -57,7 +66,15 @@ const events = [
     type: 'tool/result',
     data: {
       message: {
+        source: { callId: 'call-edit-1' },
         content: [{ type: 'text', text: 'edit applied' }],
+      },
+    },
+    view: {
+      for: 'result',
+      view: {
+        card: 'diff',
+        diffs: [{ path: 'src/mock.rs', oldText: 'old line', newText: 'new line' }],
       },
     },
   },
@@ -117,7 +134,8 @@ function failure(id, code, message) {
 }
 
 function entry(event) {
-  return { event }
+  const { view, ...wireEvent } = event
+  return view === undefined ? { event: wireEvent } : { event: wireEvent, view }
 }
 
 function emitTailOnce() {

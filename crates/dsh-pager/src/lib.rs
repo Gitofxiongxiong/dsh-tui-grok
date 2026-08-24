@@ -39,8 +39,10 @@ pub use loader::{
 };
 pub use presentation::{
     DshEditDetail, DshInteraction, DshPresentationAdapter, DshPresentationModel, DshQueueContent,
-    DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
+    DshQueueItem, DshReadLine, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
     DshRenderFinish, DshRenderKind, DshRenderRole, DshRenderUpdate, DshRenderVisibility,
+    DshSearchFile, DshSearchMatch, DshToolCallView, DshToolDiff, DshToolKind, DshToolLocation,
+    DshToolResult, DshToolResultView, DshWebSource,
 };
 pub use scrollback::{EntryId, EntryLayout, ScrollAnchor, ScrollbackLayout};
 pub use session::{

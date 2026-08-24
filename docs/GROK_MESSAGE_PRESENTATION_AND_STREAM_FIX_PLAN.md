@@ -431,7 +431,7 @@ PTY 场景至少跑 80x24 和窄屏；记录事件 seq、turn/step、surface id�
 - 没有 terminal finalize，任何 streaming snapshot 都可能停在 `partial=true`；
 - 没有 stable surface id，final replacement 会造成 transcript 重排，后续 sticky/group/selection 都不可靠。
 
-当前实现已完成 Phase 0 的 DTO/fixture 基线、Phase 1 的 stable surface/finalize seam、Phase 2 的默认 Hidden/Collapsed 单条 entry context projection，并已把 Phase 3 的第一条 transcript vertical slice 接入默认生产路径：UserPrompt/AgentMessage 使用不同的 view wrapper，Thinking/Tool dense group 具备 synthetic header、零高度折叠成员、连续左 rail，以及按稳定 entry ID 保存的双击 fold/group toggle。对应单测、workspace gate、clippy gate 和 PTY smoke 已通过。special-tool viewer、完整 ContextGroup 交互、三击语义、geometry golden，以及 P19-A/P19-B/P20 的真实 DeepSeek Harness 采样仍未执行，因此不能宣称完整 renderer parity 或真实 backend 验收已经完成。
+当前实现已完成 Phase 0 的 DTO/fixture 基线、Phase 1 的 stable surface/finalize seam、Phase 2 的默认 Hidden/Collapsed 单条 entry context projection，并已把 Phase 3 的工具 vertical slice 接入默认生产路径：UserPrompt/AgentMessage 使用不同的 view wrapper；同一 `callId` 的 `tool/call` 与 `tool/result` 原位更新同一个 running/completed/failed surface；Harness 的 `terminal/diff/read/search/web/generic` presentation view 会投影为分类型工具卡片；Read/Search/Web 等非破坏性工具使用 Grok 风格的 tense-aware semantic verb header、零高度折叠成员和状态色 rail，Execute/Edit 保持独立并打断 verb run；缺少 view 或关联 ID 时仍保留可复制的原始回退。回放顺序反转、结构化 view、卡片渲染和分组边界已有单测。special-tool viewer、完整 ContextGroup/ThoughtMember 交互、运行波纹动画、语法高亮/上下文 diff、三击语义、geometry golden，以及 P19-A/P19-B/P20 的真实 DeepSeek Harness 采样仍未执行，因此不能宣称完整 renderer parity 或真实 backend 验收已经完成。
 
 本次真实 Grok 调研补齐了原方案此前不够硬的三类验收：
 

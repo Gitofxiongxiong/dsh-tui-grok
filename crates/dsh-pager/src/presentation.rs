@@ -92,6 +92,267 @@ pub struct DshEditDetail {
     pub new_text: String,
 }
 
+/// Provider-neutral tool category projected from DeepSeek Harness
+/// `ToolCallKind`.  The renderer uses this semantic value for Grok-style
+/// grouping and never guesses a category from the tool's registered name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DshToolKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Fetch,
+    #[default]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshToolLocation {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshToolDiff {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_text: Option<String>,
+    pub new_text: String,
+}
+
+/// Pending-call render intent emitted by the Harness tool presenter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DshToolCallView {
+    Generic {
+        title: String,
+        kind: DshToolKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        raw_input: Option<Value>,
+        content: Vec<DshRenderBlock>,
+        locations: Vec<DshToolLocation>,
+    },
+    Terminal {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    Diff {
+        title: String,
+        diffs: Vec<DshToolDiff>,
+        locations: Vec<DshToolLocation>,
+    },
+}
+
+impl DshToolCallView {
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Generic { title, .. }
+            | Self::Terminal { title, .. }
+            | Self::Diff { title, .. } => title,
+        }
+    }
+
+    pub fn kind(&self) -> DshToolKind {
+        match self {
+            Self::Generic { kind, .. } => *kind,
+            Self::Terminal { .. } => DshToolKind::Execute,
+            Self::Diff { .. } => DshToolKind::Edit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshSearchMatch {
+    pub line_number: u64,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshSearchFile {
+    pub path: String,
+    pub matches: Vec<DshSearchMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshReadLine {
+    pub number: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshWebSource {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+}
+
+/// Completed-call render intent emitted by the Harness tool presenter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DshToolResultView {
+    Generic {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        content: Vec<DshRenderBlock>,
+    },
+    Terminal {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
+    },
+    Diff {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        diffs: Vec<DshToolDiff>,
+    },
+    SearchMatches {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        files: Vec<DshSearchFile>,
+        truncated: bool,
+        total: u64,
+    },
+    SearchPaths {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        paths: Vec<String>,
+        truncated: bool,
+        total: u64,
+    },
+    Read {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        path: String,
+        offset: u64,
+        lines: Vec<DshReadLine>,
+        total_lines: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lang: Option<String>,
+        content: Vec<DshRenderBlock>,
+    },
+    WebSearch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        sources: Vec<DshWebSource>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+        truncated: bool,
+    },
+    WebFetch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        url: String,
+        status_code: u64,
+        truncated: bool,
+    },
+}
+
+impl DshToolResultView {
+    pub fn title(&self) -> Option<&str> {
+        match self {
+            Self::Generic { title, .. }
+            | Self::Terminal { title, .. }
+            | Self::Diff { title, .. }
+            | Self::SearchMatches { title, .. }
+            | Self::SearchPaths { title, .. }
+            | Self::Read { title, .. }
+            | Self::WebSearch { title, .. }
+            | Self::WebFetch { title, .. } => title.as_deref(),
+        }
+    }
+
+    fn display_text(&self) -> String {
+        match self {
+            Self::Generic { content, .. } => content
+                .iter()
+                .map(DshRenderBlock::display_text)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::Terminal { output, .. } => output.clone().unwrap_or_default(),
+            Self::Diff { diffs, .. } => diffs
+                .iter()
+                .map(|diff| {
+                    format!(
+                        "diff {}\n-{}\n+{}",
+                        diff.path,
+                        diff.old_text.as_deref().unwrap_or(""),
+                        diff.new_text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::SearchMatches { files, .. } => files
+                .iter()
+                .flat_map(|file| {
+                    file.matches.iter().map(|matched| {
+                        format!("{}:{}:{}", file.path, matched.line_number, matched.line)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::SearchPaths { paths, .. } => paths.join("\n"),
+            Self::Read { lines, .. } => lines
+                .iter()
+                .map(|line| format!("{}: {}", line.number, line.text))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::WebSearch {
+                sources, answer, ..
+            } => answer
+                .iter()
+                .cloned()
+                .chain(sources.iter().map(|source| source.url.clone()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::WebFetch {
+                url, status_code, ..
+            } => format!("HTTP {status_code} {url}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshToolResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view: Option<DshToolResultView>,
+    pub blocks: Vec<DshRenderBlock>,
+    pub is_error: bool,
+}
+
+impl DshToolResult {
+    fn display_text(&self) -> String {
+        let presented = self
+            .view
+            .as_ref()
+            .map(DshToolResultView::display_text)
+            .unwrap_or_default();
+        if !presented.is_empty() {
+            return presented;
+        }
+        self.blocks
+            .iter()
+            .map(DshRenderBlock::display_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// One content block crossing the DSH presentation boundary.  `Unknown`
 /// retains the complete value so a newer host block can be displayed and
 /// copied without teaching the pager about every future domain type first.
@@ -122,6 +383,10 @@ pub enum DshRenderBlock {
         arguments: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         edit: Option<DshEditDetail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        view: Option<DshToolCallView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<Box<DshToolResult>>,
     },
     ToolResult {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +484,8 @@ impl DshRenderEntry {
                 call_id: None,
                 arguments: String::new(),
                 edit: None,
+                view: None,
+                result: None,
             },
             DshRenderKind::ToolResult | DshRenderKind::Error => DshRenderBlock::ToolResult {
                 call_id: None,
@@ -339,21 +606,32 @@ impl DshRenderBlock {
                 name,
                 arguments,
                 edit,
+                view,
+                result,
                 ..
             } => {
-                if arguments.is_empty() {
-                    edit.as_ref().map_or_else(
-                        || name.clone(),
-                        |edit| format!("{name}\n-{}\n+{}", edit.old_text, edit.new_text),
-                    )
-                } else {
-                    edit.as_ref().map_or_else(
-                        || format!("{name} {arguments}"),
-                        |edit| {
-                            format!("{name} {arguments}\n-{}\n+{}", edit.old_text, edit.new_text)
-                        },
-                    )
+                let title = result
+                    .as_ref()
+                    .and_then(|result| result.view.as_ref())
+                    .and_then(DshToolResultView::title)
+                    .or_else(|| view.as_ref().map(DshToolCallView::title))
+                    .unwrap_or(name);
+                let mut parts = vec![title.to_string()];
+                if view.is_none() && !arguments.is_empty() {
+                    parts.push(arguments.clone());
                 }
+                if view.is_none() {
+                    if let Some(edit) = edit {
+                        parts.push(format!("-{}\n+{}", edit.old_text, edit.new_text));
+                    }
+                }
+                if let Some(result) = result {
+                    let output = result.display_text();
+                    if !output.is_empty() {
+                        parts.push(output);
+                    }
+                }
+                parts.join("\n")
             }
             Self::ToolResult { blocks, .. } => blocks
                 .iter()
@@ -416,6 +694,8 @@ fn parse_render_block(value: &Value) -> DshRenderBlock {
                     .map(str::to_string),
                 edit: edit_detail_from_arguments(&arguments, None),
                 arguments,
+                view: None,
+                result: None,
             }
         }
         "tool-result" => DshRenderBlock::ToolResult {
@@ -488,6 +768,238 @@ fn edit_detail_from_arguments(arguments: &str, view: Option<&Value>) -> Option<D
         old_text: old_text.to_string(),
         new_text: new_text.to_string(),
     })
+}
+
+fn tool_view_payload<'a>(wrapper: Option<&'a Value>, expected: &str) -> Option<&'a Value> {
+    let wrapper = wrapper?;
+    if let Some(target) = wrapper.get("for").and_then(Value::as_str) {
+        if target != expected {
+            return None;
+        }
+    }
+    Some(wrapper.get("view").unwrap_or(wrapper))
+}
+
+fn parse_tool_kind(value: Option<&Value>) -> DshToolKind {
+    match value.and_then(Value::as_str) {
+        Some("read") => DshToolKind::Read,
+        Some("edit") => DshToolKind::Edit,
+        Some("delete") => DshToolKind::Delete,
+        Some("move") => DshToolKind::Move,
+        Some("search") => DshToolKind::Search,
+        Some("execute") => DshToolKind::Execute,
+        Some("fetch") => DshToolKind::Fetch,
+        _ => DshToolKind::Other,
+    }
+}
+
+fn parse_tool_locations(value: Option<&Value>) -> Vec<DshToolLocation> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|location| {
+            Some(DshToolLocation {
+                path: string_field(location, "path")?.to_string(),
+                line: location.get("line").and_then(Value::as_u64),
+            })
+        })
+        .collect()
+}
+
+fn parse_tool_diffs(value: Option<&Value>) -> Vec<DshToolDiff> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|diff| {
+            Some(DshToolDiff {
+                path: string_field(diff, "path")?.to_string(),
+                old_text: diff
+                    .get("oldText")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                new_text: string_field(diff, "newText")?.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_tool_content(value: Option<&Value>) -> Vec<DshRenderBlock> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(parse_render_block)
+        .collect()
+}
+
+fn parse_tool_call_view(wrapper: Option<&Value>) -> Option<DshToolCallView> {
+    let view = tool_view_payload(wrapper, "call")?;
+    let card = string_field(view, "card")?;
+    let title = string_field(view, "title")?.to_string();
+    match card {
+        "generic" => Some(DshToolCallView::Generic {
+            title,
+            kind: parse_tool_kind(view.get("kind")),
+            raw_input: view.get("rawInput").cloned(),
+            content: parse_tool_content(view.get("content")),
+            locations: parse_tool_locations(view.get("locations")),
+        }),
+        "terminal" => Some(DshToolCallView::Terminal {
+            title,
+            description: string_field(view, "description").map(str::to_string),
+            cwd: string_field(view, "cwd").map(str::to_string),
+        }),
+        "diff" => Some(DshToolCallView::Diff {
+            title,
+            diffs: parse_tool_diffs(view.get("diffs")),
+            locations: parse_tool_locations(view.get("locations")),
+        }),
+        _ => None,
+    }
+}
+
+fn optional_title(view: &Value) -> Option<String> {
+    string_field(view, "title").map(str::to_string)
+}
+
+fn parse_tool_result_view(wrapper: Option<&Value>) -> Option<DshToolResultView> {
+    let view = tool_view_payload(wrapper, "result")?;
+    match string_field(view, "card")? {
+        "generic" => Some(DshToolResultView::Generic {
+            title: optional_title(view),
+            content: parse_tool_content(view.get("content")),
+        }),
+        "terminal" => Some(DshToolResultView::Terminal {
+            title: optional_title(view),
+            output: string_field(view, "output").map(str::to_string),
+            exit_code: view.get("exitCode").and_then(Value::as_i64),
+            signal: string_field(view, "signal").map(str::to_string),
+        }),
+        "diff" => Some(DshToolResultView::Diff {
+            title: optional_title(view),
+            diffs: parse_tool_diffs(view.get("diffs")),
+        }),
+        "search" if string_field(view, "shape") == Some("matches") => {
+            let files = view
+                .get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|file| {
+                    Some(DshSearchFile {
+                        path: string_field(file, "path")?.to_string(),
+                        matches: file
+                            .get("matches")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|line| {
+                                Some(DshSearchMatch {
+                                    line_number: line.get("lineNumber")?.as_u64()?,
+                                    line: string_field(line, "line")?.to_string(),
+                                })
+                            })
+                            .collect(),
+                    })
+                })
+                .collect();
+            Some(DshToolResultView::SearchMatches {
+                title: optional_title(view),
+                files,
+                truncated: view
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                total: view.get("total").and_then(Value::as_u64).unwrap_or(0),
+            })
+        }
+        "search" if string_field(view, "shape") == Some("paths") => {
+            Some(DshToolResultView::SearchPaths {
+                title: optional_title(view),
+                paths: view
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                truncated: view
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                total: view.get("total").and_then(Value::as_u64).unwrap_or(0),
+            })
+        }
+        "read" => Some(DshToolResultView::Read {
+            title: optional_title(view),
+            path: string_field(view, "path")?.to_string(),
+            offset: view.get("offset").and_then(Value::as_u64).unwrap_or(1),
+            lines: view
+                .get("lines")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|line| {
+                    Some(DshReadLine {
+                        number: line.get("number")?.as_u64()?,
+                        text: string_field(line, "text")?.to_string(),
+                    })
+                })
+                .collect(),
+            total_lines: view.get("totalLines").and_then(Value::as_u64).unwrap_or(0),
+            lang: string_field(view, "lang").map(str::to_string),
+            content: parse_tool_content(view.get("content")),
+        }),
+        "web" if string_field(view, "kind") == Some("search") => {
+            let sources = view
+                .get("sources")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|source| {
+                    Some(DshWebSource {
+                        url: string_field(source, "url")?.to_string(),
+                        title: string_field(source, "title").map(str::to_string),
+                        snippet: string_field(source, "snippet").map(str::to_string),
+                        published_at: string_field(source, "publishedAt").map(str::to_string),
+                    })
+                })
+                .collect();
+            Some(DshToolResultView::WebSearch {
+                title: optional_title(view),
+                sources,
+                answer: string_field(view, "answer").map(str::to_string),
+                truncated: view
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        }
+        "web" if string_field(view, "kind") == Some("fetch") => Some(DshToolResultView::WebFetch {
+            title: optional_title(view),
+            url: string_field(view, "url")?.to_string(),
+            status_code: view.get("statusCode")?.as_u64()?,
+            truncated: view
+                .get("truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }),
+        _ => None,
+    }
+}
+
+fn tool_result_call_id(data: &Value) -> Option<String> {
+    data.pointer("/message/source/callId")
+        .or_else(|| data.pointer("/message/source/toolCallId"))
+        .or_else(|| data.get("callId"))
+        .or_else(|| data.get("toolCallId"))
+        .or_else(|| data.pointer("/message/content/0/toolCallId"))
+        .or_else(|| data.pointer("/message/content/0/callId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Queue content after the host-owned message has crossed the presentation
@@ -749,15 +1261,69 @@ pub enum DshRenderUpdate {
     RemoveSourceRange { start: i64, end: i64 },
 }
 
+#[derive(Debug, Clone)]
+struct PendingToolCall {
+    seq: i64,
+    name: String,
+    call_id: String,
+    arguments: String,
+    edit: Option<DshEditDetail>,
+    view: Option<DshToolCallView>,
+    result: Option<DshToolResult>,
+    lineage: Vec<i64>,
+}
+
+impl PendingToolCall {
+    fn render_entry(&self) -> DshRenderEntry {
+        let finish = match &self.result {
+            Some(result) if result.is_error => DshRenderFinish::Failed,
+            Some(_) => DshRenderFinish::Completed,
+            None => DshRenderFinish::Running,
+        };
+        let content = DshRenderContent::from_blocks(vec![DshRenderBlock::ToolCall {
+            name: self.name.clone(),
+            call_id: Some(self.call_id.clone()),
+            arguments: self.arguments.clone(),
+            edit: self.edit.clone(),
+            view: self.view.clone(),
+            result: self.result.clone().map(Box::new),
+        }]);
+        DshRenderEntry {
+            id: DshRenderEntryId::Event { seq: self.seq },
+            source_seq: self.seq,
+            kind: DshRenderKind::ToolCall,
+            text: content.fallback.clone(),
+            partial: finish == DshRenderFinish::Running,
+            visibility: DshRenderVisibility::Visible,
+            finish,
+            group_key: Some(format!("tool:{}", self.call_id)),
+            selectable: true,
+            lineage: self.lineage.clone(),
+            content,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OrphanToolResult {
+    seq: i64,
+    result: DshToolResult,
+    lineage: Vec<i64>,
+}
+
 /// Converts value-backed session history into stable DSH presentation data.
 #[derive(Debug, Default)]
 pub struct DshPresentationAdapter {
     partials: BTreeMap<(i64, i64), PartialMessage>,
+    tool_calls: BTreeMap<String, PendingToolCall>,
+    orphan_tool_results: BTreeMap<String, OrphanToolResult>,
 }
 
 impl DshPresentationAdapter {
     pub fn reset(&mut self) {
         self.partials.clear();
+        self.tool_calls.clear();
+        self.orphan_tool_results.clear();
     }
 
     /// Finalize every currently running assistant surface. Host stream error,
@@ -793,18 +1359,34 @@ impl DshPresentationAdapter {
         let mut updates = Vec::new();
         if let Some((start, end)) = surface_replace(event.surface_op.as_ref()) {
             self.partials.clear();
+            self.tool_calls.clear();
+            self.orphan_tool_results.clear();
             updates.push(DshRenderUpdate::RemoveSourceRange { start, end });
         }
+        let lineage = event
+            .source_event_seqs
+            .clone()
+            .unwrap_or_else(|| vec![event.seq]);
         match event.event_type.as_str() {
             "user/message" => self.adapt_user_message(event.seq, &event.data, &mut updates),
             "assistant/chunk" => self.adapt_assistant_chunk(event.seq, &event.data, &mut updates),
             "assistant/message" => {
                 self.adapt_assistant_message(event.seq, &event.data, &mut updates)
             }
-            "tool/call" => {
-                self.adapt_tool_call(event.seq, &event.data, entry.view.as_ref(), &mut updates)
-            }
-            "tool/result" => self.adapt_tool_result(event.seq, &event.data, &mut updates),
+            "tool/call" => self.adapt_tool_call(
+                event.seq,
+                &event.data,
+                entry.view.as_ref(),
+                &lineage,
+                &mut updates,
+            ),
+            "tool/result" => self.adapt_tool_result(
+                event.seq,
+                &event.data,
+                entry.view.as_ref(),
+                &lineage,
+                &mut updates,
+            ),
             "todo/write" => self.adapt_todos(event.seq, &event.data, &mut updates),
             "command/done" => self.adapt_command(event.seq, &event.data, &mut updates),
             "llm/retry" => self.adapt_retry(event.seq, &event.data, &mut updates),
@@ -820,10 +1402,6 @@ impl DshPresentationAdapter {
             "compaction/prune" => self.adapt_compaction_prune(event.seq, &event.data, &mut updates),
             _ => {}
         }
-        let lineage = event
-            .source_event_seqs
-            .clone()
-            .unwrap_or_else(|| vec![event.seq]);
         for update in &mut updates {
             if let DshRenderUpdate::Upsert(render) = update {
                 if matches!(render.id, DshRenderEntryId::Event { seq: render_seq } if render_seq == event.seq)
@@ -1039,22 +1617,58 @@ impl DshPresentationAdapter {
         seq: i64,
         data: &Value,
         view: Option<&Value>,
+        lineage: &[i64],
         updates: &mut Vec<DshRenderUpdate>,
     ) {
         let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
         let arguments = data.get("arguments").and_then(Value::as_str).unwrap_or("");
-        let content = DshRenderContent::from_blocks(vec![DshRenderBlock::ToolCall {
+        let call_id = string_field(data, "callId")
+            .or_else(|| string_field(data, "id"))
+            .map(str::to_string);
+        let call_view = parse_tool_call_view(view);
+        let edit = edit_detail_from_arguments(arguments, view);
+        let Some(call_id) = call_id else {
+            let content = DshRenderContent::from_blocks(vec![DshRenderBlock::ToolCall {
+                name: name.to_string(),
+                call_id: None,
+                arguments: arguments.to_string(),
+                edit,
+                view: call_view,
+                result: None,
+            }]);
+            updates.push(upsert_event_content(seq, DshRenderKind::ToolCall, content));
+            return;
+        };
+
+        let mut call = PendingToolCall {
+            seq,
             name: name.to_string(),
-            call_id: string_field(data, "callId")
-                .or_else(|| string_field(data, "id"))
-                .map(str::to_string),
+            call_id: call_id.clone(),
             arguments: arguments.to_string(),
-            edit: edit_detail_from_arguments(arguments, view),
-        }]);
-        updates.push(upsert_event_content(seq, DshRenderKind::ToolCall, content));
+            edit,
+            view: call_view,
+            result: None,
+            lineage: lineage.to_vec(),
+        };
+        if let Some(orphan) = self.orphan_tool_results.remove(&call_id) {
+            call.result = Some(orphan.result);
+            append_lineage(&mut call.lineage, &orphan.lineage);
+            updates.push(DshRenderUpdate::Remove(DshRenderEntryId::Event {
+                seq: orphan.seq,
+            }));
+        }
+        updates.push(DshRenderUpdate::Upsert(call.render_entry()));
+        self.tool_calls.insert(call_id, call);
     }
 
-    fn adapt_tool_result(&mut self, seq: i64, data: &Value, updates: &mut Vec<DshRenderUpdate>) {
+    fn adapt_tool_result(
+        &mut self,
+        seq: i64,
+        data: &Value,
+        view: Option<&Value>,
+        lineage: &[i64],
+        updates: &mut Vec<DshRenderUpdate>,
+    ) {
         let Some(message) = data.get("message") else {
             return;
         };
@@ -1066,11 +1680,61 @@ impl DshPresentationAdapter {
             .blocks
             .iter()
             .any(|block| matches!(block, DshRenderBlock::ToolResult { is_error: true, .. }));
-        let kind = if nested_error || data.get("error").is_some_and(|value| !value.is_null()) {
+        let result_view = parse_tool_result_view(view);
+        let view_error = matches!(
+            &result_view,
+            Some(DshToolResultView::Terminal {
+                exit_code: Some(code),
+                ..
+            }) if *code != 0
+        ) || matches!(
+            &result_view,
+            Some(DshToolResultView::Terminal {
+                signal: Some(_),
+                ..
+            })
+        );
+        let is_error =
+            nested_error || view_error || data.get("error").is_some_and(|value| !value.is_null());
+        let blocks = if let [DshRenderBlock::ToolResult { blocks, .. }] = content.blocks.as_slice()
+        {
+            blocks.clone()
+        } else {
+            content.blocks
+        };
+        let call_id = tool_result_call_id(data);
+        let result = DshToolResult {
+            view: result_view,
+            blocks,
+            is_error,
+        };
+        if let Some(ref call_id) = call_id {
+            if let Some(call) = self.tool_calls.get_mut(call_id) {
+                call.result = Some(result);
+                append_lineage(&mut call.lineage, lineage);
+                updates.push(DshRenderUpdate::Upsert(call.render_entry()));
+                return;
+            }
+            self.orphan_tool_results.insert(
+                call_id.clone(),
+                OrphanToolResult {
+                    seq,
+                    result: result.clone(),
+                    lineage: lineage.to_vec(),
+                },
+            );
+        }
+
+        let kind = if is_error {
             DshRenderKind::Error
         } else {
             DshRenderKind::ToolResult
         };
+        let content = DshRenderContent::from_blocks(vec![DshRenderBlock::ToolResult {
+            call_id,
+            blocks: result.blocks,
+            is_error,
+        }]);
         updates.push(upsert_event_content(seq, kind, content));
     }
 
@@ -1360,6 +2024,8 @@ impl PartialBlock {
                 call_id: self.call_id.clone(),
                 arguments: self.text.clone(),
                 edit: edit_detail_from_arguments(&self.text, None),
+                view: None,
+                result: None,
             }),
             PartialKind::Image => Some(DshRenderBlock::Image {
                 attachment_id: None,
@@ -1663,6 +2329,12 @@ mod tests {
         }
     }
 
+    fn entry_with_view(seq: i64, event_type: &str, data: Value, view: Value) -> HistoryEntry {
+        let mut entry = entry(seq, event_type, data);
+        entry.view = Some(view);
+        entry
+    }
+
     #[test]
     fn partial_assistant_stream_becomes_one_replaceable_entry() {
         let history = vec![
@@ -1920,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_and_result_use_distinct_render_kinds() {
+    fn unpaired_tool_call_and_result_keep_lossless_fallback_entries() {
         let mut adapter = DshPresentationAdapter::default();
         let call = adapter.adapt_event(&entry(
             2,
@@ -1940,7 +2612,7 @@ mod tests {
                 kind: DshRenderKind::ToolCall,
                 text,
                 ..
-            })] if text == "bash -lc pwd"
+            })] if text == "bash\n-lc pwd"
         ));
         assert!(matches!(
             result.as_slice(),
@@ -1949,6 +2621,193 @@ mod tests {
                 text,
                 ..
             })] if text == "/work"
+        ));
+    }
+
+    #[test]
+    fn paired_tool_result_replaces_the_running_call_surface() {
+        let mut adapter = DshPresentationAdapter::default();
+        let call = adapter.adapt_event(&entry_with_view(
+            10,
+            "tool/call",
+            json!({
+                "name": "bash",
+                "callId": "call-10",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }),
+            json!({
+                "for": "call",
+                "view": {
+                    "card": "terminal",
+                    "title": "pwd",
+                    "description": "show the workspace",
+                    "cwd": "/work"
+                }
+            }),
+        ));
+        assert!(matches!(
+            call.as_slice(),
+            [DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Event { seq: 10 },
+                finish: DshRenderFinish::Running,
+                partial: true,
+                ..
+            })]
+        ));
+
+        let result = adapter.adapt_event(&entry_with_view(
+            11,
+            "tool/result",
+            json!({
+                "message": {
+                    "source": { "callId": "call-10" },
+                    "content": [{ "type": "text", "text": "/work" }]
+                }
+            }),
+            json!({
+                "for": "result",
+                "view": {
+                    "card": "terminal",
+                    "output": "/work\n",
+                    "exitCode": 0
+                }
+            }),
+        ));
+        let [DshRenderUpdate::Upsert(entry)] = result.as_slice() else {
+            panic!("paired result must replace one stable call surface");
+        };
+        assert_eq!(entry.id, DshRenderEntryId::Event { seq: 10 });
+        assert_eq!(entry.kind, DshRenderKind::ToolCall);
+        assert_eq!(entry.finish, DshRenderFinish::Completed);
+        assert!(!entry.partial);
+        assert_eq!(entry.lineage, vec![10, 11]);
+        let [DshRenderBlock::ToolCall { view, result, .. }] = entry.content.blocks.as_slice()
+        else {
+            panic!("expected one merged tool call block");
+        };
+        assert!(matches!(view, Some(DshToolCallView::Terminal { .. })));
+        assert!(matches!(
+            result.as_deref(),
+            Some(DshToolResult {
+                view: Some(DshToolResultView::Terminal {
+                    exit_code: Some(0),
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn orphan_tool_result_merges_when_an_older_call_page_arrives() {
+        let mut adapter = DshPresentationAdapter::default();
+        let orphan = adapter.adapt_event(&entry(
+            22,
+            "tool/result",
+            json!({
+                "message": {
+                    "source": { "callId": "call-page" },
+                    "content": [{ "type": "text", "text": "older result" }]
+                }
+            }),
+        ));
+        assert!(matches!(
+            orphan.as_slice(),
+            [DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Event { seq: 22 },
+                kind: DshRenderKind::ToolResult,
+                ..
+            })]
+        ));
+
+        let merged = adapter.adapt_event(&entry_with_view(
+            21,
+            "tool/call",
+            json!({
+                "name": "read",
+                "callId": "call-page",
+                "arguments": "{\"path\":\"src/lib.rs\"}"
+            }),
+            json!({
+                "for": "call",
+                "view": {
+                    "card": "generic",
+                    "title": "Read src/lib.rs",
+                    "kind": "read"
+                }
+            }),
+        ));
+        assert!(matches!(
+            merged.as_slice(),
+            [
+                DshRenderUpdate::Remove(DshRenderEntryId::Event { seq: 22 }),
+                DshRenderUpdate::Upsert(DshRenderEntry {
+                    id: DshRenderEntryId::Event { seq: 21 },
+                    finish: DshRenderFinish::Completed,
+                    ..
+                })
+            ]
+        ));
+    }
+
+    #[test]
+    fn structured_read_result_view_survives_the_presentation_boundary() {
+        let mut adapter = DshPresentationAdapter::default();
+        adapter.adapt_event(&entry_with_view(
+            30,
+            "tool/call",
+            json!({
+                "name": "read",
+                "callId": "call-read",
+                "arguments": "{\"path\":\"src/lib.rs\"}"
+            }),
+            json!({
+                "for": "call",
+                "view": {
+                    "card": "generic",
+                    "title": "Read src/lib.rs",
+                    "kind": "read",
+                    "locations": [{ "path": "src/lib.rs", "line": 7 }]
+                }
+            }),
+        ));
+        let updates = adapter.adapt_event(&entry_with_view(
+            31,
+            "tool/result",
+            json!({
+                "message": {
+                    "source": { "callId": "call-read" },
+                    "content": [{ "type": "text", "text": "7: fn main() {}" }]
+                }
+            }),
+            json!({
+                "for": "result",
+                "view": {
+                    "card": "read",
+                    "path": "src/lib.rs",
+                    "offset": 7,
+                    "lines": [{ "number": 7, "text": "fn main() {}" }],
+                    "totalLines": 42,
+                    "lang": "rs"
+                }
+            }),
+        ));
+        let [DshRenderUpdate::Upsert(entry)] = updates.as_slice() else {
+            panic!("expected merged read surface");
+        };
+        let [DshRenderBlock::ToolCall { result, .. }] = entry.content.blocks.as_slice() else {
+            panic!("expected one tool call block");
+        };
+        assert!(matches!(
+            result.as_deref(),
+            Some(DshToolResult {
+                view: Some(DshToolResultView::Read {
+                    path,
+                    total_lines: 42,
+                    ..
+                }),
+                ..
+            }) if path == "src/lib.rs"
         ));
     }
 

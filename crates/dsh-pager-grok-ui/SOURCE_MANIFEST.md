@@ -1,6 +1,6 @@
 # Grok source manifest
 
-Manifest updated: 2026-08-23 (+0800)
+Manifest updated: 2026-08-24 (+0800)
 DSH protocol fixture revision: `TUI_PROTOCOL_VERSION=1` (checked by
 `scripts/check-protocol-fixtures.py`).
 
@@ -48,7 +48,10 @@ as a completed production capability.
 | Scrollback render | `crates/codegen/xai-grok-pager/src/scrollback/render.rs` | `29fe2d148ec0feaed5acb08c590d7f4ad3cd852ec178832f4daaaf90c0e8a97f` | `RichTranscript` / block DTO | planned |
 | Scrollback layout | `crates/codegen/xai-grok-pager/src/scrollback/layout.rs` | `863ad75266d7e991b299e41bc872c648ef54dba2bb023b2e7e2a01605c630c7c` | `DshRenderContent` | planned |
 | Markdown blocks | `crates/codegen/xai-grok-pager/src/scrollback/blocks/markdown_content.rs` | `cc3d18620be6756344bf69f093bb5d05b825e27a47d737a4a8e915a03c9aa5ad` | `DshRenderBlock::Markdown` | planned |
-| Diff blocks | `crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/edit.rs` | `31f7f39a277a15151cf75d43258f6fb9967ea44025adb7db1e7dee73185f7371` | `DshRenderBlock::Diff` | planned |
+| Diff blocks | `crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/edit.rs` | `31f7f39a277a15151cf75d43258f6fb9967ea44025adb7db1e7dee73185f7371` | `DshRenderBlock::Diff` / `DshToolDiff` | basic DSH projection integrated; contextual hunk/gutter parity pending |
+| Tool block family | `crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/mod.rs` | `4ee3869c6f7f5f5485cbcf886b04ac3535b2abcef484e81031a54e0de9ac070b` | `DshToolCallView` / `DshToolResultView` + `transcript::render_tool_call` | integrated DSH-neutral projection; advanced viewers pending |
+| Tool verb grouping | `crates/codegen/xai-grok-pager/src/scrollback/state/verb_group.rs` | `182f5a9534b00ba263fd313611e15318a9d8318189e9bb4d1cd71ad634c9e387` | typed Harness tool kind + `ScrollbackPane` projection | integrated semantic read/search/web runs; thought/subagent buckets pending |
+| Tool/group entry chrome | `crates/codegen/xai-grok-pager/src/scrollback/wrappers/entry_renderer.rs` | `184e7af597929559616c7baff365a3f447f6cbd0cbafeeaf6492fc6e6d61f72e` | transcript rail, group header, running/error accent | partial DSH-neutral projection; hover animation pending |
 | File Search | `crates/codegen/xai-grok-pager/src/views/file_search/mod.rs` | `55b60c8f7c943e93cf2c87bd56a04d6e3337b65b39053fd3fa9aea83635f2307` | typed search snapshot/effect | planned |
 | Suggestion | `crates/codegen/xai-grok-pager/src/views/suggestion_controller/mod.rs` | `f18ea878e39605513c90fd65a783e7b0b69dd0c613354e81f02054257ff98e4c` | `SuggestionSnapshot` | planned |
 | Prompt images | `crates/codegen/xai-grok-pager-render/src/prompt_images.rs` | source available in fixed mirror | `MediaSnapshot` + attachment effect | planned |

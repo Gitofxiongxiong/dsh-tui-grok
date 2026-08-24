@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use dsh_pager::scrollback::{Scrollback, compute_paint_window};
 use dsh_pager::{
     DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderFinish,
-    DshRenderKind, DshRenderVisibility, ScrollAnchor,
+    DshRenderKind, DshRenderVisibility, DshToolCallView, DshToolDiff, DshToolKind, DshToolResult,
+    DshToolResultView, ScrollAnchor,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -84,6 +85,33 @@ enum GroupKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolVerb {
+    Read,
+    Search,
+    WebFetch,
+    WebSearch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct VerbCounts {
+    read: usize,
+    search: usize,
+    web_fetch: usize,
+    web_search: usize,
+}
+
+impl VerbCounts {
+    fn add(&mut self, verb: ToolVerb) {
+        match verb {
+            ToolVerb::Read => self.read += 1,
+            ToolVerb::Search => self.search += 1,
+            ToolVerb::WebFetch => self.web_fetch += 1,
+            ToolVerb::WebSearch => self.web_search += 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProjectionInfo {
     mode: DisplayMode,
     group_anchor: Option<DshRenderEntryId>,
@@ -93,6 +121,9 @@ struct ProjectionInfo {
     group_last_visible: bool,
     group_kind: Option<GroupKind>,
     group_count: usize,
+    verb_counts: VerbCounts,
+    group_running: bool,
+    group_failed: bool,
     rail: bool,
     background: Option<Color>,
 }
@@ -108,7 +139,10 @@ impl ProjectionInfo {
             group_last_visible: false,
             group_kind: None,
             group_count: 0,
-            rail: false,
+            verb_counts: VerbCounts::default(),
+            group_running: false,
+            group_failed: false,
+            rail: entry.kind == DshRenderKind::ToolCall,
             background: (entry.kind == DshRenderKind::User).then_some(theme.bg_light),
         }
     }
@@ -382,12 +416,21 @@ fn semantic_lines(
         let label = group_header_label(
             projection.group_kind,
             projection.group_count,
+            projection.verb_counts,
+            projection.group_running,
+            projection.group_failed,
             projection.group_expanded,
         );
         let header = Line::from(Span::styled(
             label,
             Style::default()
-                .fg(theme.accent_tool)
+                .fg(if projection.group_failed {
+                    theme.accent_error
+                } else if projection.group_running {
+                    theme.accent_running
+                } else {
+                    theme.accent_tool
+                })
                 .add_modifier(Modifier::BOLD),
         ));
         if projection.group_expanded {
@@ -414,6 +457,14 @@ fn semantic_lines(
         }
     }
     let mut lines = Vec::new();
+    let rail_accent = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
+        theme.accent_error
+    } else if projection.group_running || entry.finish == DshRenderFinish::Running {
+        theme.accent_running
+    } else {
+        theme.accent_tool
+    };
+    let collapsed_rail = projection.group_header && !projection.group_expanded;
     let markdown_total = semantic
         .iter()
         .filter(|line| line.markdown)
@@ -431,7 +482,15 @@ fn semantic_lines(
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>();
-            let line = decorate_line(wrapped_line, width, line_rail, projection.background, theme);
+            let line = decorate_line(
+                wrapped_line,
+                width,
+                line_rail,
+                collapsed_rail,
+                rail_accent,
+                projection.background,
+                theme,
+            );
             lines.push(RichPaintLine {
                 entry_id: entry.id,
                 block_index: semantic_line.block_index,
@@ -471,6 +530,8 @@ fn semantic_lines(
                             Line::from(""),
                             width,
                             line_rail,
+                            collapsed_rail,
+                            rail_accent,
                             projection.background,
                             theme,
                         ),
@@ -575,10 +636,14 @@ fn collapsed_block_line(
                 .fg(theme.fuzzy_accent)
                 .add_modifier(Modifier::BOLD),
         )),
-        DshRenderBlock::ToolCall { name, .. } => Line::from(Span::styled(
-            format!("{} {name}", crate::glyphs::diamond_filled()),
+        DshRenderBlock::ToolCall { .. } => Line::from(Span::styled(
+            format!(
+                "{} {}",
+                crate::glyphs::diamond_filled(),
+                tool_header_text(block)
+            ),
             Style::default()
-                .fg(theme.gray_bright)
+                .fg(tool_accent(block, entry.finish, theme))
                 .add_modifier(Modifier::BOLD),
         )),
         DshRenderBlock::ToolResult { is_error, .. } => Line::from(Span::styled(
@@ -588,7 +653,7 @@ fn collapsed_block_line(
                 "✓ result"
             },
             Style::default().fg(if *is_error {
-                theme.accent_user
+                theme.accent_error
             } else {
                 theme.gray_bright
             }),
@@ -793,7 +858,15 @@ pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: The
 /// Grok block widgets. User and assistant messages render their content
 /// directly; operational rows retain a stable semantic header.
 pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
-    let color = color_for_kind(row.kind, theme);
+    let color = if row.kind == DshRenderKind::ToolCall {
+        match row.finish {
+            DshRenderFinish::Running => theme.accent_running,
+            DshRenderFinish::Failed => theme.accent_error,
+            _ => theme.gray_bright,
+        }
+    } else {
+        color_for_kind(row.kind, theme)
+    };
     let mut lines = if matches!(row.kind, DshRenderKind::User | DshRenderKind::Assistant) {
         Vec::new()
     } else {
@@ -853,6 +926,21 @@ fn projected_row(entry: &DshRenderEntry, mode: DisplayMode, width: usize) -> Opt
         return Some(row);
     }
     if mode == DisplayMode::Collapsed {
+        if let Some(tool) = entry
+            .content
+            .blocks
+            .iter()
+            .find(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
+        {
+            row.label = format!(
+                "{} {}",
+                crate::glyphs::diamond_filled(),
+                tool_header_text(tool)
+            );
+            row.text.clear();
+            row.content = DshRenderContent::default();
+            return Some(row);
+        }
         let summary = entry
             .text
             .lines()
@@ -901,19 +989,6 @@ fn truncate_summary(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn is_groupable_kind(kind: DshRenderKind) -> bool {
-    matches!(
-        kind,
-        DshRenderKind::Thinking
-            | DshRenderKind::ToolCall
-            | DshRenderKind::ToolResult
-            | DshRenderKind::Error
-            | DshRenderKind::AgentContext
-            | DshRenderKind::Context
-            | DshRenderKind::Compaction
-    )
-}
-
 fn is_foldable_kind(entry: Option<&DshRenderEntry>) -> bool {
     entry.is_some_and(|entry| {
         matches!(
@@ -958,13 +1033,51 @@ fn default_display_mode(entry: &DshRenderEntry, width: usize, theme: Theme) -> D
     }
 }
 
-fn group_header_label(kind: Option<GroupKind>, count: usize, expanded: bool) -> String {
+fn group_header_label(
+    kind: Option<GroupKind>,
+    count: usize,
+    counts: VerbCounts,
+    running: bool,
+    failed: bool,
+    expanded: bool,
+) -> String {
     let count = count.max(1);
     match (kind, expanded) {
         (Some(GroupKind::Context), false) => format!("◆ Context · {count} injected messages"),
         (Some(GroupKind::Context), true) => format!("▾ Context · {count} injected messages"),
-        (Some(GroupKind::VerbRun), false) => format!("◆ {count} more tool messages"),
-        (Some(GroupKind::VerbRun), true) => format!("▾ {count} tool messages"),
+        (Some(GroupKind::VerbRun), _) => {
+            let mut parts = Vec::new();
+            let mut push = |calls: usize, done: &str, doing: &str, one: &str, many: &str| {
+                if calls > 0 {
+                    parts.push(format!(
+                        "{} {calls} {}",
+                        if running { doing } else { done },
+                        if calls == 1 { one } else { many }
+                    ));
+                }
+            };
+            push(counts.read, "Read", "Reading", "file", "files");
+            push(
+                counts.search,
+                "Searched",
+                "Searching",
+                "pattern",
+                "patterns",
+            );
+            push(counts.web_fetch, "Fetched", "Fetching", "page", "pages");
+            push(
+                counts.web_search,
+                "Searched",
+                "Searching",
+                "web query",
+                "web queries",
+            );
+            let mut label = parts.join(", ");
+            if failed {
+                label.push_str(" · failed");
+            }
+            format!("{} {label}", if expanded { "▾" } else { "◆" })
+        }
         (None, false) => format!("◆ {count} more"),
         (None, true) => format!("▾ {count} messages"),
     }
@@ -974,6 +1087,8 @@ fn decorate_line(
     mut line: Line<'static>,
     width: usize,
     rail: bool,
+    collapsed_rail: bool,
+    rail_accent: Color,
     background: Option<Color>,
     theme: Theme,
 ) -> Line<'static> {
@@ -981,13 +1096,19 @@ fn decorate_line(
     // use the accent column as a continuous rail; plain Markdown keeps those
     // columns as spaces so its first glyph lands exactly where a tool diamond
     // would land.
-    let prefix = if rail { "│  " } else { "   " };
+    let prefix = if !rail {
+        "   "
+    } else if collapsed_rail {
+        "❙  "
+    } else {
+        "┃  "
+    };
     line.spans.insert(
         0,
         Span::styled(
             prefix,
             Style::default()
-                .fg(theme.accent_tool)
+                .fg(rail_accent)
                 .bg(background.unwrap_or(theme.bg_base)),
         ),
     );
@@ -1027,38 +1148,56 @@ fn build_projection(
 
     let mut index = 0usize;
     while index < entries.len() {
-        if entries[index].visibility == DshRenderVisibility::Hidden
-            || !is_groupable_kind(entries[index].kind)
-        {
+        if entries[index].visibility == DshRenderVisibility::Hidden {
             index += 1;
             continue;
         }
-        let kind = if matches!(
+        let context = matches!(
             entries[index].kind,
             DshRenderKind::AgentContext | DshRenderKind::Context | DshRenderKind::Compaction
-        ) {
+        );
+        let verb_member = tool_verb(&entries[index]).is_some();
+        if !context && !verb_member {
+            index += 1;
+            continue;
+        }
+        let kind = if context {
             GroupKind::Context
         } else {
             GroupKind::VerbRun
         };
         let start = index;
         index += 1;
-        while index < entries.len()
-            && entries[index].visibility != DshRenderVisibility::Hidden
-            && is_groupable_kind(entries[index].kind)
-            && (matches!(kind, GroupKind::Context)
-                == matches!(
+        while index < entries.len() && entries[index].visibility != DshRenderVisibility::Hidden {
+            let joins = match kind {
+                GroupKind::Context => matches!(
                     entries[index].kind,
                     DshRenderKind::AgentContext
                         | DshRenderKind::Context
                         | DshRenderKind::Compaction
-                ))
-        {
+                ),
+                GroupKind::VerbRun => tool_verb(&entries[index]).is_some(),
+            };
+            if !joins {
+                break;
+            }
             index += 1;
         }
         let count = index.saturating_sub(start);
-        if count < 2 {
+        if kind == GroupKind::Context && count < 2 {
             continue;
+        }
+        let mut verb_counts = VerbCounts::default();
+        let mut group_running = false;
+        let mut group_failed = false;
+        if kind == GroupKind::VerbRun {
+            for entry in &entries[start..index] {
+                if let Some(verb) = tool_verb(entry) {
+                    verb_counts.add(verb);
+                }
+                group_running |= entry.finish == DshRenderFinish::Running;
+                group_failed |= entry.finish == DshRenderFinish::Failed;
+            }
         }
         let anchor = entries[start].id;
         let expanded = expanded_groups.contains(&anchor);
@@ -1077,6 +1216,9 @@ fn build_projection(
             };
             projection.group_kind = Some(kind);
             projection.group_count = count;
+            projection.verb_counts = verb_counts;
+            projection.group_running = group_running;
+            projection.group_failed = group_failed;
             projection.rail = true;
         }
     }
@@ -1094,6 +1236,455 @@ fn copy_content(content: &DshRenderContent, fallback: &str) -> String {
         fallback.to_string()
     } else {
         content.display_text()
+    }
+}
+
+fn tool_block(entry: &DshRenderEntry) -> Option<&DshRenderBlock> {
+    entry
+        .content
+        .blocks
+        .iter()
+        .find(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
+}
+
+fn tool_verb(entry: &DshRenderEntry) -> Option<ToolVerb> {
+    let DshRenderBlock::ToolCall { view, result, .. } = tool_block(entry)? else {
+        return None;
+    };
+    if let Some(result_view) = result.as_ref().and_then(|result| result.view.as_ref()) {
+        match result_view {
+            DshToolResultView::Read { .. } => return Some(ToolVerb::Read),
+            DshToolResultView::SearchMatches { .. } | DshToolResultView::SearchPaths { .. } => {
+                return Some(ToolVerb::Search);
+            }
+            DshToolResultView::WebSearch { .. } => return Some(ToolVerb::WebSearch),
+            DshToolResultView::WebFetch { .. } => return Some(ToolVerb::WebFetch),
+            _ => {}
+        }
+    }
+    match view.as_ref().map(DshToolCallView::kind) {
+        Some(DshToolKind::Read) => Some(ToolVerb::Read),
+        Some(DshToolKind::Search) => Some(ToolVerb::Search),
+        Some(DshToolKind::Fetch) => Some(ToolVerb::WebFetch),
+        _ => None,
+    }
+}
+
+fn tool_diffs<'a>(
+    view: Option<&'a DshToolCallView>,
+    result: Option<&'a DshToolResult>,
+) -> Option<&'a [DshToolDiff]> {
+    if let Some(DshToolResultView::Diff { diffs, .. }) =
+        result.and_then(|result| result.view.as_ref())
+    {
+        return Some(diffs);
+    }
+    if let Some(DshToolCallView::Diff { diffs, .. }) = view {
+        return Some(diffs);
+    }
+    None
+}
+
+fn diffstat(diffs: &[DshToolDiff]) -> (usize, usize) {
+    diffs.iter().fold((0, 0), |(added, removed), diff| {
+        (
+            added + diff.new_text.lines().count(),
+            removed
+                + diff
+                    .old_text
+                    .as_deref()
+                    .map(str::lines)
+                    .map(Iterator::count)
+                    .unwrap_or(0),
+        )
+    })
+}
+
+fn tool_header_text(block: &DshRenderBlock) -> String {
+    let DshRenderBlock::ToolCall {
+        name, view, result, ..
+    } = block
+    else {
+        return String::new();
+    };
+    let completed_title = result
+        .as_ref()
+        .and_then(|result| result.view.as_ref())
+        .and_then(DshToolResultView::title);
+    let title = completed_title
+        .or_else(|| view.as_ref().map(DshToolCallView::title))
+        .unwrap_or(name);
+    let mut label = match view {
+        Some(DshToolCallView::Terminal {
+            description: Some(description),
+            ..
+        }) if !description.trim().is_empty() => {
+            let description = description.trim();
+            let description = description
+                .split_once(char::is_whitespace)
+                .filter(|(verb, rest)| {
+                    (verb.eq_ignore_ascii_case("run") || verb.eq_ignore_ascii_case("running"))
+                        && !rest.trim().is_empty()
+                })
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or(description);
+            format!("Run {description}")
+        }
+        Some(DshToolCallView::Terminal { .. }) => format!("$ {title}"),
+        _ => title.to_string(),
+    };
+    if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
+        let (added, removed) = diffstat(diffs);
+        if added > 0 || removed > 0 {
+            label.push_str(&format!(" +{added}/-{removed}"));
+        }
+    }
+    label
+}
+
+fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) -> Color {
+    let failed = match block {
+        DshRenderBlock::ToolCall { result, .. } => {
+            result.as_deref().is_some_and(|result| result.is_error)
+        }
+        _ => false,
+    } || finish == DshRenderFinish::Failed;
+    if failed {
+        theme.accent_error
+    } else if finish == DshRenderFinish::Running {
+        theme.accent_running
+    } else {
+        theme.gray_bright
+    }
+}
+
+fn push_panel_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    prefix: &str,
+    foreground: Color,
+    theme: Theme,
+) {
+    for line in text.split('\n') {
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{line}"),
+            Style::default().fg(foreground).bg(theme.bg_terminal),
+        )));
+    }
+}
+
+fn render_tool_children(
+    lines: &mut Vec<Line<'static>>,
+    blocks: &[DshRenderBlock],
+    theme: Theme,
+    indent: usize,
+) {
+    for child in blocks {
+        render_block(lines, child, theme, indent);
+    }
+}
+
+fn render_tool_call(
+    lines: &mut Vec<Line<'static>>,
+    block: &DshRenderBlock,
+    theme: Theme,
+    indent: usize,
+) {
+    let DshRenderBlock::ToolCall {
+        arguments,
+        edit,
+        view,
+        result,
+        ..
+    } = block
+    else {
+        return;
+    };
+    let prefix = " ".repeat(indent.saturating_mul(2));
+    let finish = match result {
+        Some(result) if result.is_error => DshRenderFinish::Failed,
+        Some(_) => DshRenderFinish::Completed,
+        None => DshRenderFinish::Running,
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{prefix}{} {}",
+            crate::glyphs::diamond_filled(),
+            tool_header_text(block)
+        ),
+        Style::default()
+            .fg(tool_accent(block, finish, theme))
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    match view {
+        Some(DshToolCallView::Terminal {
+            title,
+            description,
+            cwd,
+        }) => {
+            if let Some(cwd) = cwd {
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix}  {cwd}"),
+                    Style::default().fg(theme.gray_dim),
+                )));
+            }
+            if description
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                push_panel_lines(
+                    lines,
+                    &format!("$ {title}"),
+                    &format!("{prefix}  "),
+                    theme.command,
+                    theme,
+                );
+            }
+            if let Some(DshToolResultView::Terminal {
+                output,
+                exit_code,
+                signal,
+                ..
+            }) = result.as_ref().and_then(|result| result.view.as_ref())
+            {
+                if let Some(output) = output {
+                    push_panel_lines(
+                        lines,
+                        output,
+                        &format!("{prefix}  "),
+                        theme.text_secondary,
+                        theme,
+                    );
+                }
+                if let Some(status) = signal
+                    .as_deref()
+                    .map(|signal| format!("signal {signal}"))
+                    .or_else(|| exit_code.map(|code| format!("exit {code}")))
+                {
+                    lines.push(Line::from(Span::styled(
+                        format!("{prefix}  {status}"),
+                        Style::default().fg(if result.as_ref().is_some_and(|r| r.is_error) {
+                            theme.accent_error
+                        } else {
+                            theme.accent_success
+                        }),
+                    )));
+                }
+            } else if let Some(result) = result {
+                render_tool_children(lines, &result.blocks, theme, indent + 1);
+            }
+        }
+        Some(DshToolCallView::Diff { .. }) => {
+            if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
+                for diff in diffs {
+                    render_diff(
+                        lines,
+                        Some(&diff.path),
+                        diff.old_text.as_deref().unwrap_or(""),
+                        &diff.new_text,
+                        theme,
+                        indent + 1,
+                    );
+                }
+            }
+        }
+        Some(DshToolCallView::Generic {
+            raw_input, content, ..
+        }) => {
+            if let Some(raw_input) = raw_input {
+                let raw = raw_input.as_str().map(str::to_string).unwrap_or_else(|| {
+                    serde_json::to_string_pretty(raw_input)
+                        .unwrap_or_else(|_| raw_input.to_string())
+                });
+                push_panel_lines(
+                    lines,
+                    &raw,
+                    &format!("{prefix}  "),
+                    theme.text_secondary,
+                    theme,
+                );
+            }
+            render_tool_children(lines, content, theme, indent + 1);
+            match result.as_ref().and_then(|result| result.view.as_ref()) {
+                Some(DshToolResultView::Generic { content, .. }) => {
+                    render_tool_children(lines, content, theme, indent + 1)
+                }
+                Some(DshToolResultView::Read {
+                    path,
+                    lines: read_lines,
+                    total_lines,
+                    ..
+                }) => {
+                    let number_width = read_lines
+                        .last()
+                        .map(|line| line.number.to_string().len())
+                        .unwrap_or(1);
+                    for line in read_lines {
+                        push_panel_lines(
+                            lines,
+                            &format!(
+                                "{:>width$} │ {}",
+                                line.number,
+                                line.text,
+                                width = number_width
+                            ),
+                            &format!("{prefix}  "),
+                            theme.text_secondary,
+                            theme,
+                        );
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "{prefix}  {path} · {} of {total_lines} lines",
+                            read_lines.len()
+                        ),
+                        Style::default().fg(theme.gray_dim),
+                    )));
+                }
+                Some(DshToolResultView::SearchMatches {
+                    files,
+                    truncated,
+                    total,
+                    ..
+                }) => {
+                    for file in files {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}  {}", file.path),
+                            Style::default().fg(theme.path).add_modifier(Modifier::BOLD),
+                        )));
+                        for matched in &file.matches {
+                            push_panel_lines(
+                                lines,
+                                &format!("{} │ {}", matched.line_number, matched.line),
+                                &format!("{prefix}    "),
+                                theme.text_secondary,
+                                theme,
+                            );
+                        }
+                    }
+                    if *truncated {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}  showing capped results · {total} total"),
+                            Style::default().fg(theme.warning),
+                        )));
+                    }
+                }
+                Some(DshToolResultView::SearchPaths {
+                    paths,
+                    truncated,
+                    total,
+                    ..
+                }) => {
+                    for path in paths {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}  {path}"),
+                            Style::default().fg(theme.path),
+                        )));
+                    }
+                    if *truncated {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}  showing {} of {total} paths", paths.len()),
+                            Style::default().fg(theme.warning),
+                        )));
+                    }
+                }
+                Some(DshToolResultView::WebSearch {
+                    sources,
+                    answer,
+                    truncated,
+                    ..
+                }) => {
+                    if let Some(answer) = answer {
+                        push_plain_lines(
+                            lines,
+                            answer,
+                            Style::default().fg(theme.text_secondary),
+                            &format!("{prefix}  "),
+                        );
+                    }
+                    for (index, source) in sources.iter().enumerate() {
+                        let title = source.title.as_deref().unwrap_or(&source.url);
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("{prefix}  [{}] ", index + 1),
+                                Style::default().fg(theme.gray_dim),
+                            ),
+                            Span::styled(title.to_string(), Style::default().fg(theme.link_fg)),
+                        ]));
+                        if source.title.is_some() {
+                            lines.push(Line::from(Span::styled(
+                                format!("{prefix}      {}", source.url),
+                                Style::default().fg(theme.gray_dim),
+                            )));
+                        }
+                    }
+                    if *truncated {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}  source list truncated"),
+                            Style::default().fg(theme.warning),
+                        )));
+                    }
+                }
+                Some(DshToolResultView::WebFetch {
+                    url,
+                    status_code,
+                    truncated,
+                    ..
+                }) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{prefix}  HTTP {status_code} · "),
+                            Style::default().fg(theme.gray_dim),
+                        ),
+                        Span::styled(url.clone(), Style::default().fg(theme.link_fg)),
+                        Span::styled(
+                            if *truncated { " · truncated" } else { "" },
+                            Style::default().fg(theme.warning),
+                        ),
+                    ]));
+                    if let Some(result) = result {
+                        render_tool_children(lines, &result.blocks, theme, indent + 1);
+                    }
+                }
+                Some(DshToolResultView::Diff { diffs, .. }) => {
+                    for diff in diffs {
+                        render_diff(
+                            lines,
+                            Some(&diff.path),
+                            diff.old_text.as_deref().unwrap_or(""),
+                            &diff.new_text,
+                            theme,
+                            indent + 1,
+                        );
+                    }
+                }
+                Some(DshToolResultView::Terminal { .. }) => {}
+                None => {
+                    if let Some(result) = result {
+                        render_tool_children(lines, &result.blocks, theme, indent + 1);
+                    }
+                }
+            }
+        }
+        None => {
+            if !arguments.is_empty() {
+                push_panel_lines(lines, arguments, &format!("{prefix}  "), theme.gray, theme);
+            }
+            if let Some(edit) = edit {
+                render_diff(
+                    lines,
+                    edit.path.as_deref(),
+                    &edit.old_text,
+                    &edit.new_text,
+                    theme,
+                    indent + 1,
+                );
+            }
+            if let Some(result) = result {
+                render_tool_children(lines, &result.blocks, theme, indent + 1);
+            }
+        }
     }
 }
 
@@ -1140,37 +1731,7 @@ fn render_block(
                 Style::default().fg(theme.accent_assistant),
             )));
         }
-        DshRenderBlock::ToolCall {
-            name,
-            arguments,
-            edit,
-            ..
-        } => {
-            lines.push(Line::from(Span::styled(
-                format!("{prefix}{} {name}", crate::glyphs::diamond_filled()),
-                Style::default()
-                    .fg(theme.gray_bright)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            if !arguments.is_empty() {
-                push_plain_lines(
-                    lines,
-                    arguments,
-                    Style::default().fg(theme.gray),
-                    &format!("{prefix}  "),
-                );
-            }
-            if let Some(edit) = edit {
-                render_diff(
-                    lines,
-                    edit.path.as_deref(),
-                    &edit.old_text,
-                    &edit.new_text,
-                    theme,
-                    indent + 1,
-                );
-            }
-        }
+        DshRenderBlock::ToolCall { .. } => render_tool_call(lines, block, theme, indent),
         DshRenderBlock::ToolResult {
             blocks, is_error, ..
         } => {
@@ -1184,7 +1745,7 @@ fn render_block(
                     }
                 ),
                 Style::default().fg(if *is_error {
-                    theme.accent_user
+                    theme.accent_error
                 } else {
                     theme.gray_bright
                 }),
@@ -1618,6 +2179,8 @@ mod tests {
                         call_id: Some("call-1".into()),
                         arguments: "{\"cmd\":\"pwd\"}".into(),
                         edit: None,
+                        view: None,
+                        result: None,
                     },
                     DshRenderBlock::Markdown {
                         text: "final answer".into(),
@@ -1925,6 +2488,8 @@ mod tests {
                         call_id: None,
                         arguments: "{}".into(),
                         edit: None,
+                        view: None,
+                        result: None,
                     },
                     DshRenderBlock::ToolResult {
                         call_id: None,
@@ -1967,6 +2532,204 @@ mod tests {
                 "missing {expected} in {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn harness_tool_views_render_grok_terminal_diff_read_search_and_web_cards() {
+        let theme = *Theme::current();
+        let render = |block: DshRenderBlock| {
+            let row = TranscriptRow {
+                id: DshRenderEntryId::Event { seq: 90 },
+                label: "Tool".into(),
+                text: block.display_text(),
+                kind: DshRenderKind::ToolCall,
+                visibility: DshRenderVisibility::Visible,
+                finish: DshRenderFinish::Completed,
+                group_key: Some("tool:test".into()),
+                selectable: true,
+                source_seq: 90,
+                seq: dsh_pager::DshSeq::new(90),
+                content: DshRenderContent {
+                    fallback: block.display_text(),
+                    blocks: vec![block],
+                },
+            };
+            render_row(&row, theme)
+        };
+
+        let terminal = render(DshRenderBlock::ToolCall {
+            name: "bash".into(),
+            call_id: Some("terminal".into()),
+            arguments: "{\"cmd\":\"pwd\"}".into(),
+            edit: None,
+            view: Some(DshToolCallView::Terminal {
+                title: "pwd".into(),
+                description: Some("show workspace".into()),
+                cwd: Some("/work".into()),
+            }),
+            result: Some(Box::new(DshToolResult {
+                view: Some(DshToolResultView::Terminal {
+                    title: None,
+                    output: Some("/work\n".into()),
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+                blocks: Vec::new(),
+                is_error: false,
+            })),
+        });
+        let terminal_text = terminal
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(terminal_text.contains("◆ Run show workspace"));
+        assert!(terminal_text.contains("$ pwd"));
+        assert!(terminal_text.contains("/work"));
+        assert!(terminal_text.contains("exit 0"));
+        assert!(
+            terminal
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.style.bg == Some(theme.bg_terminal))
+        );
+
+        let diff = render(DshRenderBlock::ToolCall {
+            name: "edit".into(),
+            call_id: Some("diff".into()),
+            arguments: "{}".into(),
+            edit: None,
+            view: Some(DshToolCallView::Diff {
+                title: "Edit src/lib.rs".into(),
+                diffs: vec![DshToolDiff {
+                    path: "src/lib.rs".into(),
+                    old_text: Some("old".into()),
+                    new_text: "new".into(),
+                }],
+                locations: Vec::new(),
+            }),
+            result: None,
+        });
+        let diff_text = diff
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(diff_text.contains("Edit src/lib.rs +1/-1"));
+        assert!(diff_text.contains("- old"));
+        assert!(diff_text.contains("+ new"));
+
+        let read = render(DshRenderBlock::ToolCall {
+            name: "read".into(),
+            call_id: Some("read".into()),
+            arguments: "{}".into(),
+            edit: None,
+            view: Some(DshToolCallView::Generic {
+                title: "Read src/lib.rs".into(),
+                kind: DshToolKind::Read,
+                raw_input: None,
+                content: Vec::new(),
+                locations: Vec::new(),
+            }),
+            result: Some(Box::new(DshToolResult {
+                view: Some(DshToolResultView::Read {
+                    title: None,
+                    path: "src/lib.rs".into(),
+                    offset: 7,
+                    lines: vec![dsh_pager::DshReadLine {
+                        number: 7,
+                        text: "fn main() {}".into(),
+                    }],
+                    total_lines: 42,
+                    lang: Some("rs".into()),
+                    content: Vec::new(),
+                }),
+                blocks: Vec::new(),
+                is_error: false,
+            })),
+        });
+        let read_text = read
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(read_text.contains("7 │ fn main() {}"));
+        assert!(read_text.contains("1 of 42 lines"));
+
+        let search = render(DshRenderBlock::ToolCall {
+            name: "grep".into(),
+            call_id: Some("search".into()),
+            arguments: "{}".into(),
+            edit: None,
+            view: Some(DshToolCallView::Generic {
+                title: "Search TODO".into(),
+                kind: DshToolKind::Search,
+                raw_input: None,
+                content: Vec::new(),
+                locations: Vec::new(),
+            }),
+            result: Some(Box::new(DshToolResult {
+                view: Some(DshToolResultView::SearchMatches {
+                    title: None,
+                    files: vec![dsh_pager::DshSearchFile {
+                        path: "src/lib.rs".into(),
+                        matches: vec![dsh_pager::DshSearchMatch {
+                            line_number: 9,
+                            line: "// TODO".into(),
+                        }],
+                    }],
+                    truncated: true,
+                    total: 3,
+                }),
+                blocks: Vec::new(),
+                is_error: false,
+            })),
+        });
+        let search_text = search
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(search_text.contains("src/lib.rs"));
+        assert!(search_text.contains("9 │ // TODO"));
+        assert!(search_text.contains("3 total"));
+
+        let web = render(DshRenderBlock::ToolCall {
+            name: "web_search".into(),
+            call_id: Some("web".into()),
+            arguments: "{}".into(),
+            edit: None,
+            view: Some(DshToolCallView::Generic {
+                title: "Search the web".into(),
+                kind: DshToolKind::Search,
+                raw_input: None,
+                content: Vec::new(),
+                locations: Vec::new(),
+            }),
+            result: Some(Box::new(DshToolResult {
+                view: Some(DshToolResultView::WebSearch {
+                    title: None,
+                    sources: vec![dsh_pager::DshWebSource {
+                        url: "https://example.com".into(),
+                        title: Some("Example".into()),
+                        snippet: None,
+                        published_at: None,
+                    }],
+                    answer: Some("answer".into()),
+                    truncated: false,
+                }),
+                blocks: Vec::new(),
+                is_error: false,
+            })),
+        });
+        let web_text = web
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(web_text.contains("answer"));
+        assert!(web_text.contains("Example"));
+        assert!(web_text.contains("https://example.com"));
     }
 
     #[test]
@@ -2089,9 +2852,12 @@ mod tests {
     }
 
     #[test]
-    fn dense_tool_group_has_zero_height_members_and_expands_from_header() {
+    fn semantic_tool_group_has_zero_height_members_and_expands_from_header() {
         let mut scrollback = Scrollback::default();
-        for (seq, name) in [(20, "read"), (21, "execute")] {
+        for (seq, name, kind, title) in [
+            (20, "read", "read", "Read src/a.rs"),
+            (21, "grep", "search", "Search TODO"),
+        ] {
             scrollback.apply_event(&HistoryEntry {
                 event: SessionEvent {
                     event_type: "tool/call".into(),
@@ -2099,28 +2865,30 @@ mod tests {
                     time: 1.0,
                     data: json!({
                         "name": name,
+                        "callId": format!("call-{seq}"),
                         "arguments": "{}"
                     }),
                     source_event_seqs: None,
                     surface_op: None,
                     ignorable: None,
                 },
-                view: None,
+                view: Some(json!({
+                    "for": "call",
+                    "view": { "card": "generic", "title": title, "kind": kind }
+                })),
             });
         }
         let theme = *Theme::current();
         let mut pane = ScrollbackPane::default();
         pane.sync(&mut scrollback, 80, theme);
         let collapsed = pane.visible_lines(&mut scrollback, 0, 20);
-        assert!(
-            collapsed
-                .iter()
-                .any(|line| line.group_header && line.copy_text.contains("2 more tool"))
-        );
+        assert!(collapsed.iter().any(|line| line.group_header
+            && line.copy_text.contains("Reading 1 file")
+            && line.copy_text.contains("Searching 1 pattern")));
         assert!(
             !collapsed
                 .iter()
-                .any(|line| line.copy_text.contains("execute"))
+                .any(|line| line.copy_text.contains("Search TODO"))
         );
         assert_eq!(scrollback.layout(80).entries[1].height, 0);
 
@@ -2130,15 +2898,80 @@ mod tests {
         assert!(
             expanded
                 .iter()
-                .any(|line| line.group_header && line.copy_text.contains("2 tool messages"))
+                .any(|line| line.group_header && line.copy_text.contains("Reading 1 file"))
         );
         assert!(
             expanded
                 .iter()
-                .any(|line| line.copy_text.contains("execute"))
+                .any(|line| line.copy_text.contains("Search TODO"))
         );
         assert!(expanded.iter().all(|line| line.rail));
         assert!(scrollback.layout(80).entries[1].height > 0);
+    }
+
+    #[test]
+    fn execute_and_edit_cards_break_non_destructive_verb_runs() {
+        let mut scrollback = Scrollback::default();
+        for (seq, name, view) in [
+            (
+                40,
+                "read",
+                json!({ "card": "generic", "title": "Read a.rs", "kind": "read" }),
+            ),
+            (
+                41,
+                "bash",
+                json!({ "card": "terminal", "title": "cargo test", "description": "run tests" }),
+            ),
+            (
+                42,
+                "grep",
+                json!({ "card": "generic", "title": "Search TODO", "kind": "search" }),
+            ),
+        ] {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "tool/call".into(),
+                    seq,
+                    time: 1.0,
+                    data: json!({
+                        "name": name,
+                        "callId": format!("call-{seq}"),
+                        "arguments": "{}"
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: Some(json!({ "for": "call", "view": view })),
+            });
+        }
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, *Theme::current());
+        let lines = pane.visible_lines(&mut scrollback, 0, 20);
+        assert_eq!(lines.iter().filter(|line| line.group_header).count(), 2);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.copy_text.contains("Reading 1 file"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.copy_text.contains("Run tests"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.copy_text.contains("Searching 1 pattern"))
+        );
+        assert!(
+            scrollback
+                .layout(80)
+                .entries
+                .iter()
+                .all(|entry| entry.height > 0)
+        );
     }
 
     #[test]
