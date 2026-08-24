@@ -29,6 +29,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+use crate::actions::{ActionId, ActionRegistry};
 use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard::{self, ClipboardBackend};
@@ -58,6 +59,7 @@ use crate::views::{
         AgentView, AgentViewLayout, AgentViewLayoutParams, ScrollInfo, effective_compact,
         render_scrollbar,
     },
+    agent_hints::{self, ActivePane, build_hints, prompt_focus_hint},
     agent_panes::{AgentPaneController, render_agent_tasks_content, render_inline_agent_panes},
     agent_status::AgentStatusBar,
     context_bar::context_bar_line,
@@ -780,7 +782,8 @@ impl UiState {
         if let Some(permission) = permission.as_ref() {
             self.render_permission_shortcuts(frame, agent_layout.shortcuts, permission, compact);
         } else {
-            AgentView::render_shortcuts(frame, agent_layout.shortcuts, compact);
+            let (hints, help_hint) = self.pane_shortcut_hints(&snapshot, textarea_rows > 1);
+            AgentView::render_shortcuts(frame, agent_layout.shortcuts, &hints, help_hint);
         }
 
         self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
@@ -844,7 +847,7 @@ impl UiState {
             .as_deref()
             .or(snapshot.status.as_deref())
             .or(capability_notice)
-            .unwrap_or("Enter send  p sessions  q queue  i interaction  Esc quit");
+            .unwrap_or("");
         let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
         let mut details = format!(
             "mode {} · queue r{}",
@@ -1335,6 +1338,78 @@ impl UiState {
                 theme,
             );
         }
+    }
+
+    fn active_pane(&self) -> ActivePane {
+        match self.shell.overlay() {
+            Overlay::Queue => ActivePane::Queue,
+            Overlay::AgentTasks => ActivePane::Tasks,
+            _ => match self.shell.owner() {
+                KeyOwner::Queue => ActivePane::Queue,
+                KeyOwner::AgentTasks => ActivePane::Tasks,
+                KeyOwner::Transcript => ActivePane::Scrollback,
+                _ => ActivePane::Prompt,
+            },
+        }
+    }
+
+    /// Grok `AgentView::normal_pane_hints`: `build_hints` plus the queue toggle.
+    fn pane_shortcut_hints(
+        &self,
+        snapshot: &GrokHostSnapshot,
+        multiline_mode: bool,
+    ) -> (
+        Vec<crate::views::shortcuts_bar::HintItem>,
+        Option<crate::views::shortcuts_bar::HintItem>,
+    ) {
+        let registry = ActionRegistry::defaults();
+        let active_pane = self.active_pane();
+        let prompt = agent_hints::PromptWidget::from_composer(
+            self.prompt.text(),
+            self.prompt.cursor(),
+            self.suggestion_items(snapshot).is_some(),
+        );
+        debug_assert_eq!(
+            prompt.can_send(),
+            self.prompt.can_send(),
+            "hint-seam can_send must match the composer predicate"
+        );
+        let mut hints = build_hints(
+            active_pane,
+            prompt_focus_hint(),
+            &prompt,
+            &registry,
+            self.queue_editing,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            multiline_mode,
+            false,
+            false,
+            snapshot.running,
+            false,
+            !snapshot.queue.is_empty(),
+            false,
+            false,
+            false,
+            crate::terminal::terminal_context().shift_enter_unavailable(),
+            None,
+        );
+        if (self.shell.overlay() == Overlay::Queue || !snapshot.queue.is_empty())
+            && active_pane != ActivePane::Queue
+            && !self.queue_editing
+            && let Some(def) = registry.find(ActionId::ToggleQueue)
+        {
+            hints.push(def.hint());
+        }
+        let help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| def.hint());
+        (hints, help_hint)
     }
 
     fn render_permission_shortcuts(

@@ -4,14 +4,18 @@
 //! upstream module paths.  DSH-specific knowledge lives in `host_adapter` and
 //! `runtime`, so the same view layer can later be attached to another harness.
 
+#[path = "../vendor/grok/xai-grok-pager/src/actions/mod.rs"]
+pub mod actions;
 pub mod app;
 pub mod appearance;
 pub mod clipboard;
 pub mod glyphs;
+pub mod host;
 pub mod input;
 #[path = "../vendor/grok/xai-grok-pager-render/src/modal_window_state.rs"]
 pub mod modal_window_state;
 pub mod render;
+pub mod terminal;
 pub mod theme;
 pub mod views;
 

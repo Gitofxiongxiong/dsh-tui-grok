@@ -69,6 +69,22 @@ impl PromptEditor {
     pub(crate) fn textarea(&self) -> &TextArea {
         &self.textarea
     }
+    pub(crate) fn cursor(&self) -> usize {
+        self.textarea.cursor()
+    }
+    /// Grok `PromptWidget::can_send`: trim-empty drafts and trailing `\`
+    /// continuations are not sendable, so the shortcuts bar hides Enter:send.
+    pub(crate) fn can_send(&self) -> bool {
+        let text = self.textarea.text();
+        if text.trim().is_empty() {
+            return false;
+        }
+        let cursor = self.textarea.cursor();
+        if cursor > 0 && text.as_bytes().get(cursor - 1) == Some(&b'\\') {
+            return false;
+        }
+        true
+    }
     pub(crate) fn textarea_mut(&mut self) -> &mut TextArea {
         &mut self.textarea
     }
@@ -138,6 +154,20 @@ mod prompt_tests {
         let mut editor = PromptEditor::default();
         let _ = editor.insert_paste("a\0b\t\r\nc");
         assert_eq!(editor.text(), "ab\t\nc");
+    }
+
+    #[test]
+    fn can_send_matches_grok_empty_and_backslash_rules() {
+        let mut editor = PromptEditor::default();
+        assert!(!editor.can_send());
+        let _ = editor.insert_paste("hello");
+        assert!(editor.can_send());
+        editor.reset();
+        let _ = editor.insert_paste("   ");
+        assert!(!editor.can_send());
+        editor.reset();
+        let _ = editor.insert_paste("line\\");
+        assert!(!editor.can_send());
     }
 
     #[test]

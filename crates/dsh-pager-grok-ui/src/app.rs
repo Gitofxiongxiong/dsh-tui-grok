@@ -35,6 +35,25 @@ pub enum Overlay {
     Dashboard,
 }
 
+/// Whether the pager uses the alternate screen (fullscreen) or stays inline.
+///
+/// Copied from Grok `crate::app::ScreenMode` so vendored `ActionRegistry`
+/// defaults keep their mode-specific Ctrl+G / dashboard / scrollback set.
+/// Inline/Minimal are constructed by registry tests and future mode switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ScreenMode {
+    Fullscreen,
+    Inline,
+    Minimal,
+}
+
+impl ScreenMode {
+    pub(crate) fn is_minimal(self) -> bool {
+        matches!(self, Self::Minimal)
+    }
+}
+
 impl KeyOwner {
     pub const fn priority(self) -> u8 {
         match self {
@@ -453,8 +472,18 @@ impl AppShell {
                 ShellAction::ClearPrompt
             };
         }
-        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        if key.code == KeyCode::Enter
+            && key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        {
             return ShellAction::PromptNewline;
+        }
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            self.owner = KeyOwner::Prompt;
+            return ShellAction::TogglePromptMode;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
@@ -643,6 +672,30 @@ mod tests {
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Char('s'))), true),
             ShellAction::PromptKey(key(KeyCode::Char('s')))
+        );
+    }
+
+    #[test]
+    fn grok_mode_and_newline_chords_reach_the_same_actions() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::BackTab)), true),
+            ShellAction::TogglePromptMode
+        );
+        let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(shift_tab), true),
+            ShellAction::TogglePromptMode
+        );
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(alt_enter), false),
+            ShellAction::PromptNewline
+        );
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(shift_enter), false),
+            ShellAction::PromptNewline
         );
     }
 

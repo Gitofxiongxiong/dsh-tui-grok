@@ -5,9 +5,6 @@
 //! contract into the DSH-neutral UI seam; runtime state is only used to choose
 //! requested row heights and to paint the already-computed rectangles.
 
-use std::borrow::Cow;
-
-use crossterm::event::KeyCode;
 use dsh_pager_protocol::PromptMode;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -19,7 +16,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::AppShell;
 use crate::appearance::{LayoutConfig, ScrollbarConfig};
-use crate::input::key::KeyShortcut;
 use crate::render::scrollbar::render_scrollbar_styled;
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
@@ -480,25 +476,17 @@ impl AgentView {
         );
     }
 
-    pub fn render_shortcuts(frame: &mut Frame<'_>, area: Rect, compact: bool) {
+    /// Paint the Grok pane shortcuts bar: `compact(5, ShortcutsHelp)`.
+    pub fn render_shortcuts(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        hints: &[HintItem],
+        help_hint: Option<HintItem>,
+    ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        let hints = [
-            HintItem::new(KeyShortcut::key(KeyCode::Enter), Cow::Borrowed("send")),
-            HintItem::new(
-                KeyShortcut::key(KeyCode::Char('p')),
-                Cow::Borrowed("sessions"),
-            ),
-            HintItem::new(KeyShortcut::key(KeyCode::Char('q')), Cow::Borrowed("queue")),
-            HintItem::new(KeyShortcut::key(KeyCode::Esc), Cow::Borrowed("clear/quit")),
-        ];
-        let widget = if compact {
-            ShortcutsBar::new(&hints).compact(2, None)
-        } else {
-            ShortcutsBar::new(&hints)
-        };
-        frame.render_widget(widget, area);
+        frame.render_widget(ShortcutsBar::new(hints).compact(5, help_hint), area);
     }
 }
 

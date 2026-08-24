@@ -5,6 +5,8 @@ pub mod file_search {
     pub mod line_viewer;
 }
 pub mod agent;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/agent_hints.rs"]
+pub mod agent_hints;
 pub mod agent_panes;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/agent_status.rs"]
 pub mod agent_status;
