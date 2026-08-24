@@ -381,6 +381,7 @@ pub fn render_semantic(
             .map(|row| DshRenderEntry {
                 id: row.id,
                 source_seq: row.source_seq,
+                created_at_ms: row.created_at_ms,
                 kind: row.kind,
                 text: row.text.clone(),
                 partial: false,
@@ -465,6 +466,7 @@ pub fn render_semantic(
         .map(|row| DshRenderEntry {
             id: row.id,
             source_seq: row.source_seq,
+            created_at_ms: row.created_at_ms,
             kind: row.kind,
             text: row.text.clone(),
             partial: false,

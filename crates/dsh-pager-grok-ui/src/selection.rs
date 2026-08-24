@@ -233,12 +233,17 @@ fn entry_order(left: &DshRenderEntryId, right: &DshRenderEntryId) -> Ordering {
             DshRenderEntryId::Partial {
                 turn: left_turn,
                 step: left_step,
+                surface: left_surface,
             },
             DshRenderEntryId::Partial {
                 turn: right_turn,
                 step: right_step,
+                surface: right_surface,
             },
-        ) => left_turn.cmp(right_turn).then(left_step.cmp(right_step)),
+        ) => left_turn
+            .cmp(right_turn)
+            .then(left_step.cmp(right_step))
+            .then(left_surface.cmp(right_surface)),
         (DshRenderEntryId::Event { .. }, DshRenderEntryId::Partial { .. }) => Ordering::Less,
         (DshRenderEntryId::Partial { .. }, DshRenderEntryId::Event { .. }) => Ordering::Greater,
     }

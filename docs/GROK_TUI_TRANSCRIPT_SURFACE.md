@@ -35,10 +35,10 @@ Grok 的 transcript 不是“三种气泡”。每条历史是一个 `RenderBloc
 - 单行工具摘要：同一公式作用在一行上，看起来就是竖条明暗闪烁。
 - 完成瞬间还有 **400ms 静态闪一下**（`FINISH_FLASH_DURATION_MS`），Read 这种平时没有 rail 的工具也会闪绿。
 
-用户口语里的“右边有这条消息什么时候发生的”，只出现在 **UserPrompt / AgentMessage / Btw** 第一行右侧，默认 `  10:08 PM`。它不是思考耗时，也不是整轮结束时刻：
+用户口语里的“右边有这条消息什么时候发生的”，只出现在 **UserPrompt / AgentMessage / Btw** 第一行右侧，默认 `  10:08 PM`。它不是思考耗时，也不是整轮结束时刻。Grok ACP 和 DSH 的数据来源不同，DSH 适配遵守下面单独的事件契约：
 
-- 用户消息：这条气泡被画进 transcript 的时刻（live 是 drain 成正在跑的 turn 时的本地墙钟；回放是服务器 `turnStartMs`）。
-- Agent 正文：这条 Agent 表面收到**第一个非空文本 delta** 的时刻（live 用该 notification 的 `agentTimestampMs`，没有 meta 才退回 `Local::now()`）。工具把当前 Agent 表面关掉后，下一段正文会再打一个新时钟。
+- 用户消息：DSH `user/message` 被 host 接受并进入转录时的 `SessionEvent.time`。
+- Agent 正文：DSH 每个 Agent surface 收到**第一个非空文本 delta** 的 `assistant/chunk.time`。工具把当前 Agent surface 关闭后，下一段正文会再打一个新时钟。
 
 思考耗时写在标题 `Thought for 0.8s` 里，不占右边。工具自己的 `elapsed_ms` 不画在 scrollback。
 
@@ -253,11 +253,11 @@ period ≈ π / 0.15 ≈ 21 ticks ≈ 0.7s  （30fps）
 
 ### 8.1 画在哪、长什么样
 
-- 开关：`appearance.show_timestamps`，默认 **true**，`/timestamps` 切换。
+- 开关：`appearance.show_timestamps`，默认 **true**；它是本地 UI 状态，不产生 DSH RPC。`/timestamps` 命令保留为后续独立切片。
 - 预留 10 列，正文按 `content_width - 10` 换行，避免和 overlay 撞字。
 - 默认：`created_at.format("  %-I:%M %p")` → `  10:08 PM`，`theme.gray`。
 - 鼠标落在该行最右 10 列：改成 `  %H:%M:%S | %b %d`，例如 `  22:08:13 | Aug 24`。
-- 字段：`ScrollbackEntry.created_at`。`new()` / `running()` 先写成 `Local::now()`；tracker 在特定事件上用服务器毫秒覆盖。
+- DSH 字段：`DshRenderEntry.created_at_ms` / `ScrollbackEntry.created_at_ms`，保存权威事件的 Unix epoch milliseconds。旧 fixture 或明显无效的时间会保持 `None`，不使用恢复会话时刻伪造历史时间。
 
 本次截图打到默认短格式。`09-turn-complete.png` 里同一轮有三个时钟：用户 `10:12 PM`、第一段 Agent `10:12 PM`、工具跑完后的 `done` `10:13 PM`。hover 扩写 Playwright 未稳定命中，扩写格式以源码为准。
 
@@ -275,14 +275,12 @@ Live（本机发出、正在跑的 turn）：
 
 所以用户右侧时钟 ≈ **这条 prompt 真正开跑、乐观气泡画出来的墙钟**。若上一条还在跑、这条还在 queue pane，transcript 上还没有这条消息，也就还没有时钟。Send-now / 插话走 `push_send_now_user_block`，时钟是那次立即 `push_block` 的本地现在。
 
-Replay / 历史恢复：
+DSH replay / 历史恢复：
 
-- `handle_user_message` 新建气泡后立刻：
-  `created_at = utc_ms_to_local(meta.turn_start_ms.or(meta.agent_timestamp_ms))`。
-- 测试 `user_message_uses_server_timestamp` 锁定优先用 `turnStartMs`。
-- `turnStartMs` 由 shell `process_conversation_turn` 开头
-  `record_turn_start(Utc::now().timestamp_millis())` 写入，**整轮不变**。
-- 因此回放里用户时钟是 **服务器记下的 turn 开始时刻**，不是本机打开 `/resume` 的时刻。
+- `SessionEvent.time` 已经持久化在 session history，presentation adapter 在 live 和 replay
+  两条路径上使用同一个值。
+- 因此回放里用户时钟是 **`user/message` 被写入 history 的时刻**，不是本机打开 `/resume`
+  的时刻，也不是 UI 重建 projection 的时刻。
 
 | 不是这个点 | 原因 |
 |---|---|
@@ -295,15 +293,17 @@ Replay / 历史恢复：
 
 时钟标记的是 **这一条 Agent 表面第一次出现非空文本** 的时刻，不是 turn 开始，也不是正文流式结束。
 
-`handle_agent_chunk`（`tracker.rs`）：
+Grok ACP 的 `handle_agent_chunk` 与 DSH adapter 都遵守相同的 surface 不变量：
 
-1. 收到非空文本；若还没有 `current_agent_msg`，调用 `start_streaming_agent()` 新建 running `AgentMessage`（先 `Local::now()`）。
-2. **仅当这是新表面**（`is_new`）且 `meta.agent_timestamp_ms` 有值：覆盖为
-   `utc_ms_to_local(agent_timestamp_ms)`。
-3. 后续 delta 只 `push_chunk`，**不再改** `created_at`。
-4. `handle_tool_call` 会把 `current_agent_msg = None`。工具之后再来的正文会开 **新的** Agent 表面，再打一次时钟。
+1. 收到非空文本；若还没有当前 Agent surface，就新建 running surface。
+2. 第一个非空文本 delta 写入时间；DSH 使用该事件的 `time`，Grok ACP 使用
+   `agentTimestampMs`。
+3. 后续 delta 只追加内容，**不再改** `created_at`。
+4. 工具调用会关闭当前 Agent surface。工具之后再来的正文会开新的 surface，并使用新的稳定 surface ordinal 和时间。
 
-`agentTimestampMs` 是这条 SessionNotification 发出时的 UTC 毫秒（`send_update_full` 默认 `Utc::now()`）。live 上就是 **第一个可见 token 对应那条 notification 的发送墙钟**。没有 meta 时退回 `Local::now()`（测试 `entry_falls_back_to_now_without_server_timestamp`）。回放用落盘的 `agentTimestampMs`，不是打开会话的现在。
+DSH 的 `assistant/chunk.time` 是 Harness 写入事件时的 UTC epoch milliseconds。live 和 replay
+都使用该权威值；事件缺失/无效时 adapter 保持 `None`，避免用本机现在覆盖历史。测试覆盖
+第一个非空文本、后续 delta 不更新以及工具边界的新 surface。
 
 这就是 `09-turn-complete.png` 里两段 Agent 时钟不同的原因：`I'll run the exact command…` 在 sleep 之前打点（`10:12 PM`）；工具结束后的 `done` 是新表面，打在 `10:13 PM`。中间的 `Thought for` 和 `Run Sleep…` 右侧没有时钟。
 
@@ -369,7 +369,7 @@ Btw（`/btw`）与 Agent 正文同类，走同一套 overlay 资格；触发仍�
 5. Execute 运行：`Run {description}` + 单行 `┃` 明暗闪 + TurnStatus 用 description 计时。
 6. Execute 完成：保持用户 fold；双击才出 `$ cmd` 和 stdout 面板。
 7. Agent 正文：无 rail，有时钟；和 UserPrompt 不能共用同一 background。
-8. 时钟只出现在 User/Agent/Btw。用户时钟 = 气泡 drain/push 进 transcript 的墙钟（回放用 `turnStartMs`）；Agent 时钟 = 该表面第一个非空文本 delta 的 `agentTimestampMs`。工具会切断 Agent 表面，下一段正文重新打点。hover 才从 `h:mm AM/PM` 扩到 `HH:mm:ss \| MMM DD`。
+8. 时钟只出现在 User/Agent/Btw。DSH 用户时钟 = 被接受的 `user/message.time`；Agent 时钟 = 该表面第一个非空 `assistant/chunk.time`。工具会切断 Agent surface，下一段正文重新打点。hover 才从 `h:mm AM/PM` 扩到 `HH:mm:ss \| MMM DD`。
 9. 单击选中、双击 fold；权限等待时 rail 冻结而不是继续闪。
 10. 浏览器证据必须截 `.xterm`，不能用 `/cut` 或 PTY 文本代替最终像素。
 

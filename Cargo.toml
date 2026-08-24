@@ -19,6 +19,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 crossterm = "0.28.1"
+chrono = "0.4"
 anstyle-parse = "0.2"
 ratatui = "0.29.0"
 ratatui-core = "0.1"

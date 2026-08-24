@@ -253,6 +253,7 @@ dependencies = [
 name = "dsh-pager-grok-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "crossterm",
  "dsh-grok-inline",
  "dsh-grok-textarea",

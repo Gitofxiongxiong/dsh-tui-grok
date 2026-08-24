@@ -117,7 +117,11 @@ fn partial_stream_and_final_message_keep_one_stable_surface() {
     assert!(updates.iter().any(|update| matches!(
         update,
         DshRenderUpdate::Upsert(DshRenderEntry {
-            id: DshRenderEntryId::Partial { turn: 1, step: 1 },
+            id: DshRenderEntryId::Partial {
+                turn: 1,
+                step: 1,
+                surface: 0,
+            },
             text,
             partial: false,
             finish: dsh_pager::DshRenderFinish::Completed,

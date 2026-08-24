@@ -708,6 +708,7 @@ impl UiState {
             frame,
             &agent_layout,
             &scrollbar_cfg,
+            appearance.show_timestamps,
             &snapshot,
             &mut session.scrollback,
         );
@@ -1090,6 +1091,7 @@ impl UiState {
         frame: &mut Frame<'_>,
         layout: &AgentViewLayout,
         scrollbar_config: &ScrollbarConfig,
+        show_timestamps: bool,
         snapshot: &GrokHostSnapshot,
         scrollback: &mut dsh_pager::scrollback::Scrollback,
     ) {
@@ -1102,10 +1104,12 @@ impl UiState {
             layout.scrollback.height,
         );
         let mut lines = Vec::new();
+        let mut timestamp_overlays = Vec::new();
         let mut total_height = 0;
         let mut scroll_top = 0;
         let render_width = content.width.saturating_sub(1).max(1) as usize;
-        self.scrollback_pane.sync(scrollback, render_width, *theme);
+        self.scrollback_pane
+            .sync_with_options(scrollback, render_width, *theme, show_timestamps);
         if self.scrollback_pane.is_empty() {
             self.scroll = 0;
             self.scroll_anchor = None;
@@ -1135,10 +1139,15 @@ impl UiState {
                 .visible_lines(scrollback, scroll_top, content.height)
             {
                 let text = paint.copy_text.clone();
+                let timestamp = paint.timestamp.clone();
+                let has_timestamp = timestamp.is_some();
                 while lines.len() < paint.screen_y as usize {
                     lines.push(Line::from(""));
                 }
                 lines.push(paint.line);
+                if let Some(timestamp) = timestamp {
+                    timestamp_overlays.push((paint.screen_y, timestamp, paint.background));
+                }
                 if !paint.selectable {
                     continue;
                 }
@@ -1146,7 +1155,9 @@ impl UiState {
                     .x
                     .saturating_add(1)
                     .saturating_add(paint.content_offset);
-                let line_width = render_width.saturating_sub(usize::from(paint.content_offset));
+                let line_width = render_width
+                    .saturating_sub(usize::from(paint.content_offset))
+                    .saturating_sub(usize::from(has_timestamp) * 10);
                 let target = paint.block_index.map_or_else(
                     || HitTarget::TranscriptEntry(paint.entry_id),
                     |block_index| HitTarget::TranscriptBlock {
@@ -1179,6 +1190,27 @@ impl UiState {
                 .scroll((0, 0)),
             content,
         );
+
+        // Timestamp is a right-side overlay, matching Grok's renderer: it is
+        // visible but not part of the selectable/copyable text geometry.
+        if show_timestamps {
+            let buffer = frame.buffer_mut();
+            let timestamp_x = content.x.saturating_add(content.width.saturating_sub(10));
+            for (screen_y, timestamp, background) in timestamp_overlays {
+                let y = content.y.saturating_add(screen_y);
+                let style = Style::default()
+                    .fg(theme.gray)
+                    .bg(background.unwrap_or(theme.bg_base));
+                buffer.set_string(timestamp_x, y, format!("{:>10}", timestamp.short), style);
+                self.hit_map.insert(crate::geometry::HitRegion {
+                    target: HitTarget::Overlay("transcript-timestamp".into()),
+                    rect: Rect::new(timestamp_x, y, 10, 1),
+                    label: timestamp.hover,
+                    link: None,
+                    priority: 12,
+                });
+            }
+        }
 
         if let Some(selection) = self.selection.selection() {
             let buffer = frame.buffer_mut();
@@ -2010,6 +2042,10 @@ impl UiState {
                 self.hover_link = self.hit_map.link_at(mouse.column, mouse.row).cloned();
                 if let Some(link) = &self.hover_link {
                     self.status = Some(format!("Link: {}", link.url));
+                } else if let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row)
+                    && matches!(region.target, HitTarget::Overlay(ref name) if name == "transcript-timestamp")
+                {
+                    self.status = Some(format!("Timestamp: {}", region.label));
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {

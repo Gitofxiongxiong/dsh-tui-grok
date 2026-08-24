@@ -17,8 +17,17 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DshRenderEntryId {
-    Event { seq: i64 },
-    Partial { turn: i64, step: i64 },
+    Event {
+        seq: i64,
+    },
+    Partial {
+        turn: i64,
+        step: i64,
+        /// Ordinal for multiple assistant text surfaces in one step. Older
+        /// serialized ids omit it and deserialize as the first surface.
+        #[serde(default)]
+        surface: u32,
+    },
 }
 
 /// View-time visibility for a canonical transcript entry. Hidden entries are
@@ -437,6 +446,11 @@ pub enum DshRenderRole {
 pub struct DshRenderEntry {
     pub id: DshRenderEntryId,
     pub source_seq: i64,
+    /// Unix epoch milliseconds captured from the authoritative DSH event.
+    /// This is deliberately optional so old fixtures and malformed provider
+    /// timestamps remain readable without inventing replay time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
     pub kind: DshRenderKind,
     pub text: String,
     /// True while the host is still streaming this surface. A final message
@@ -500,6 +514,7 @@ impl DshRenderEntry {
         Self {
             id,
             source_seq,
+            created_at_ms: None,
             kind,
             text: text.clone(),
             partial: false,
@@ -543,6 +558,17 @@ fn default_visibility(kind: DshRenderKind) -> DshRenderVisibility {
         }
         _ => DshRenderVisibility::Visible,
     }
+}
+
+/// Convert a provider event time into a plausible Unix epoch millisecond
+/// value. DeepSeek Harness emits epoch milliseconds, while a number of older
+/// fixtures used sequence-like values (`0`, `1`, `2`). Rejecting those values
+/// here prevents the UI from displaying a misleading 1970 clock while keeping
+/// the raw event available for diagnostics and replay.
+pub fn event_time_epoch_ms(time: f64) -> Option<u64> {
+    const MIN_REALISTIC_EPOCH_MS: f64 = 1_000_000_000_000.0;
+    (time.is_finite() && time >= MIN_REALISTIC_EPOCH_MS && time <= u64::MAX as f64)
+        .then(|| time.round() as u64)
 }
 
 impl DshRenderContent {
@@ -1294,6 +1320,7 @@ impl PendingToolCall {
         DshRenderEntry {
             id: DshRenderEntryId::Event { seq: self.seq },
             source_seq: self.seq,
+            created_at_ms: None,
             kind: DshRenderKind::ToolCall,
             text: content.fallback.clone(),
             partial: finish == DshRenderFinish::Running,
@@ -1317,14 +1344,41 @@ struct OrphanToolResult {
 /// Converts value-backed session history into stable DSH presentation data.
 #[derive(Debug, Default)]
 pub struct DshPresentationAdapter {
-    partials: BTreeMap<(i64, i64), PartialMessage>,
+    partials: BTreeMap<(i64, i64, u32), PartialMessage>,
+    active_surfaces: BTreeMap<(i64, i64), (i64, i64, u32)>,
+    next_surfaces: BTreeMap<(i64, i64), u32>,
     tool_calls: BTreeMap<String, PendingToolCall>,
     orphan_tool_results: BTreeMap<String, OrphanToolResult>,
 }
 
 impl DshPresentationAdapter {
+    fn active_surface_key(&mut self, pair: (i64, i64)) -> (i64, i64, u32) {
+        if let Some(key) = self.active_surfaces.get(&pair).copied() {
+            // A late `assistant/message` is the authoritative final frame for
+            // the same surface even when a finish/turn-end notification
+            // already marked it terminal. Tool boundaries explicitly clear
+            // this map before allocating a new ordinal.
+            return key;
+        }
+        let surface = self.next_surfaces.entry(pair).or_insert(0);
+        let key = (pair.0, pair.1, *surface);
+        *surface = surface.saturating_add(1);
+        self.active_surfaces.insert(pair, key);
+        key
+    }
+
+    fn close_active_surfaces_for_tool(&mut self, seq: i64, updates: &mut Vec<DshRenderUpdate>) {
+        let keys = self.active_surfaces.values().copied().collect::<Vec<_>>();
+        self.active_surfaces.clear();
+        for key in keys {
+            self.finalize_partial(key, seq, DshRenderFinish::Completed, Some("tool"), updates);
+        }
+    }
+
     pub fn reset(&mut self) {
         self.partials.clear();
+        self.active_surfaces.clear();
+        self.next_surfaces.clear();
         self.tool_calls.clear();
         self.orphan_tool_results.clear();
     }
@@ -1343,6 +1397,7 @@ impl DshPresentationAdapter {
         for key in keys {
             self.finalize_partial(key, seq, finish, reason, &mut updates);
         }
+        self.active_surfaces.clear();
         updates
     }
 
@@ -1362,6 +1417,8 @@ impl DshPresentationAdapter {
         let mut updates = Vec::new();
         if let Some((start, end)) = surface_replace(event.surface_op.as_ref()) {
             self.partials.clear();
+            self.active_surfaces.clear();
+            self.next_surfaces.clear();
             self.tool_calls.clear();
             self.orphan_tool_results.clear();
             updates.push(DshRenderUpdate::RemoveSourceRange { start, end });
@@ -1371,13 +1428,27 @@ impl DshPresentationAdapter {
             .clone()
             .unwrap_or_else(|| vec![event.seq]);
         match event.event_type.as_str() {
-            "user/message" => self.adapt_user_message(event.seq, &event.data, &mut updates),
-            "assistant/chunk" => self.adapt_assistant_chunk(event.seq, &event.data, &mut updates),
-            "assistant/message" => {
-                self.adapt_assistant_message(event.seq, &event.data, &mut updates)
-            }
+            "user/message" => self.adapt_user_message(
+                event.seq,
+                event_time_epoch_ms(event.time),
+                &event.data,
+                &mut updates,
+            ),
+            "assistant/chunk" => self.adapt_assistant_chunk(
+                event.seq,
+                event_time_epoch_ms(event.time),
+                &event.data,
+                &mut updates,
+            ),
+            "assistant/message" => self.adapt_assistant_message(
+                event.seq,
+                event_time_epoch_ms(event.time),
+                &event.data,
+                &mut updates,
+            ),
             "tool/call" => self.adapt_tool_call(
                 event.seq,
+                event_time_epoch_ms(event.time),
                 &event.data,
                 entry.view.as_ref(),
                 &lineage,
@@ -1418,7 +1489,13 @@ impl DshPresentationAdapter {
         updates
     }
 
-    fn adapt_user_message(&mut self, seq: i64, data: &Value, updates: &mut Vec<DshRenderUpdate>) {
+    fn adapt_user_message(
+        &mut self,
+        seq: i64,
+        created_at_ms: Option<u64>,
+        data: &Value,
+        updates: &mut Vec<DshRenderUpdate>,
+    ) {
         let content = DshRenderContent::from_message(data);
         if content.blocks.is_empty() {
             return;
@@ -1432,16 +1509,19 @@ impl DshPresentationAdapter {
             DshRenderFinish::Completed,
             group_key,
             selectable,
+            created_at_ms,
         ));
     }
 
     fn adapt_assistant_message(
         &mut self,
         seq: i64,
+        created_at_ms: Option<u64>,
         data: &Value,
         updates: &mut Vec<DshRenderUpdate>,
     ) {
-        let key = integer(data, "turn").zip(integer(data, "step"));
+        let pair = integer(data, "turn").zip(integer(data, "step"));
+        let key = pair.map(|pair| self.active_surface_key(pair));
         let Some(message) = data.get("message") else {
             if let Some(key) = key {
                 self.finalize_partial(key, seq, DshRenderFinish::Completed, None, updates);
@@ -1466,6 +1546,9 @@ impl DshPresentationAdapter {
                 if !content.blocks.is_empty() {
                     partial.replace_with_final(content);
                 }
+                if partial.created_at_ms.is_none() {
+                    partial.created_at_ms = created_at_ms;
+                }
                 partial.finish = DshRenderFinish::Completed;
                 partial.final_content_applied = true;
                 if let Some((kind, content)) = self.partials.get(&key).map(PartialMessage::display)
@@ -1476,16 +1559,27 @@ impl DshPresentationAdapter {
                     )));
                 }
             } else if !content.blocks.is_empty() {
-                updates.push(upsert_event_content(seq, DshRenderKind::Assistant, content));
+                updates.push(upsert_event_content_at(
+                    seq,
+                    DshRenderKind::Assistant,
+                    content,
+                    created_at_ms,
+                ));
             }
         } else if !content.blocks.is_empty() {
-            updates.push(upsert_event_content(seq, DshRenderKind::Assistant, content));
+            updates.push(upsert_event_content_at(
+                seq,
+                DshRenderKind::Assistant,
+                content,
+                created_at_ms,
+            ));
         }
     }
 
     fn adapt_assistant_chunk(
         &mut self,
         seq: i64,
+        created_at_ms: Option<u64>,
         data: &Value,
         updates: &mut Vec<DshRenderUpdate>,
     ) {
@@ -1501,7 +1595,7 @@ impl DshPresentationAdapter {
             ));
             return;
         };
-        let key = (turn, step);
+        let pair = (turn, step);
         let chunk_type = chunk.get("type").and_then(Value::as_str).unwrap_or("");
         if chunk_type == "finish" {
             let finish = finish_from_value(
@@ -1511,7 +1605,9 @@ impl DshPresentationAdapter {
                     .or_else(|| chunk.get("finishReason"))
                     .or_else(|| chunk.get("status")),
             );
-            self.finalize_partial(key, seq, finish, None, updates);
+            if let Some(key) = self.active_surfaces.get(&pair).copied() {
+                self.finalize_partial(key, seq, finish, None, updates);
+            }
             return;
         }
         // Usage is terminal metadata, not a transcript block. Keep the
@@ -1519,6 +1615,7 @@ impl DshPresentationAdapter {
         // still advancing the surface lineage instead of silently dropping
         // the frame.
         if chunk_type == "usage" {
+            let key = self.active_surface_key(pair);
             let partial = self.partials.entry(key).or_default();
             if partial.finish != DshRenderFinish::Running {
                 return;
@@ -1536,6 +1633,7 @@ impl DshPresentationAdapter {
             return;
         }
         let index = chunk.get("index").and_then(Value::as_i64).unwrap_or(0);
+        let key = self.active_surface_key(pair);
         let partial = self.partials.entry(key).or_default();
         if partial.finish != DshRenderFinish::Running {
             return;
@@ -1570,6 +1668,12 @@ impl DshPresentationAdapter {
                 }
                 if let Some(text) = chunk.get("text").and_then(Value::as_str) {
                     block.text.push_str(text);
+                    if chunk_type == "text-delta"
+                        && !text.trim().is_empty()
+                        && partial.created_at_ms.is_none()
+                    {
+                        partial.created_at_ms = created_at_ms;
+                    }
                 }
             }
             "tool-call-delta" => {
@@ -1618,11 +1722,16 @@ impl DshPresentationAdapter {
     fn adapt_tool_call(
         &mut self,
         seq: i64,
+        _created_at_ms: Option<u64>,
         data: &Value,
         view: Option<&Value>,
         lineage: &[i64],
         updates: &mut Vec<DshRenderUpdate>,
     ) {
+        // A tool surface is a hard boundary for Agent text. Keep the prior
+        // surface in scrollback with its stable identity, then allocate a new
+        // ordinal if the provider continues the same `(turn, step)` later.
+        self.close_active_surfaces_for_tool(seq, updates);
         let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
         let arguments = data.get("arguments").and_then(Value::as_str).unwrap_or("");
         let call_id = string_field(data, "callId")
@@ -1791,7 +1900,7 @@ impl DshPresentationAdapter {
             .partials
             .keys()
             .copied()
-            .filter(|(partial_turn, _)| turn.is_none_or(|turn| turn == *partial_turn))
+            .filter(|(partial_turn, _, _)| turn.is_none_or(|turn| turn == *partial_turn))
             .collect::<Vec<_>>();
         for key in keys {
             self.finalize_partial(key, seq, finish, Some(kind), updates);
@@ -1837,7 +1946,7 @@ impl DshPresentationAdapter {
 
     fn finalize_partial(
         &mut self,
-        key: (i64, i64),
+        key: (i64, i64, u32),
         seq: i64,
         finish: DshRenderFinish,
         reason: Option<&str>,
@@ -2044,6 +2153,7 @@ impl PartialBlock {
 #[derive(Debug)]
 struct PartialMessage {
     blocks: BTreeMap<i64, PartialBlock>,
+    created_at_ms: Option<u64>,
     finish: DshRenderFinish,
     terminal_seq: Option<i64>,
     final_content_applied: bool,
@@ -2054,6 +2164,7 @@ impl Default for PartialMessage {
     fn default() -> Self {
         Self {
             blocks: BTreeMap::new(),
+            created_at_ms: None,
             finish: DshRenderFinish::Running,
             terminal_seq: None,
             final_content_applied: false,
@@ -2115,9 +2226,11 @@ fn upsert_event_content(
         DshRenderFinish::Completed,
         None,
         default_selectable_for_kind(kind),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsert_event_content_with_projection(
     seq: i64,
     kind: DshRenderKind,
@@ -2126,10 +2239,12 @@ fn upsert_event_content_with_projection(
     finish: DshRenderFinish,
     group_key: Option<String>,
     selectable: bool,
+    created_at_ms: Option<u64>,
 ) -> DshRenderUpdate {
     DshRenderUpdate::Upsert(DshRenderEntry {
         id: DshRenderEntryId::Event { seq },
         source_seq: seq,
+        created_at_ms,
         kind,
         text: content.fallback.clone(),
         partial: false,
@@ -2142,8 +2257,26 @@ fn upsert_event_content_with_projection(
     })
 }
 
+fn upsert_event_content_at(
+    seq: i64,
+    kind: DshRenderKind,
+    content: DshRenderContent,
+    created_at_ms: Option<u64>,
+) -> DshRenderUpdate {
+    upsert_event_content_with_projection(
+        seq,
+        kind,
+        content,
+        default_visibility(kind),
+        DshRenderFinish::Completed,
+        None,
+        default_selectable_for_kind(kind),
+        created_at_ms,
+    )
+}
+
 fn partial_entry(
-    key: (i64, i64),
+    key: (i64, i64, u32),
     seq: i64,
     kind: DshRenderKind,
     content: DshRenderContent,
@@ -2153,8 +2286,10 @@ fn partial_entry(
         id: DshRenderEntryId::Partial {
             turn: key.0,
             step: key.1,
+            surface: key.2,
         },
         source_seq: seq,
+        created_at_ms: partial.created_at_ms,
         kind,
         text: content.fallback.clone(),
         partial: partial.finish == DshRenderFinish::Running,
@@ -2332,6 +2467,12 @@ mod tests {
         }
     }
 
+    fn entry_at(seq: i64, time: f64, event_type: &str, data: Value) -> HistoryEntry {
+        let mut entry = entry(seq, event_type, data);
+        entry.event.time = time;
+        entry
+    }
+
     fn entry_with_view(seq: i64, event_type: &str, data: Value, view: Value) -> HistoryEntry {
         let mut entry = entry(seq, event_type, data);
         entry.view = Some(view);
@@ -2366,12 +2507,138 @@ mod tests {
         assert!(matches!(
             &updates[1],
             DshRenderUpdate::Upsert(DshRenderEntry {
-                id: DshRenderEntryId::Partial { turn: 1, step: 0 },
+                id: DshRenderEntryId::Partial {
+                    turn: 1,
+                    step: 0,
+                    surface: 0,
+                },
                 kind: DshRenderKind::Assistant,
                 text,
                 ..
             }) if text == "hello"
         ));
+    }
+
+    #[test]
+    fn authoritative_event_times_mark_user_and_first_agent_text_only() {
+        let base = 1_787_500_000_000.0;
+        let mut adapter = DshPresentationAdapter::default();
+        let user = adapter.adapt_event(&entry_at(
+            1,
+            base,
+            "user/message",
+            json!({"content": [{"type": "text", "text": "hello"}]}),
+        ));
+        let [DshRenderUpdate::Upsert(user)] = user.as_slice() else {
+            panic!("expected user entry");
+        };
+        assert_eq!(user.created_at_ms, Some(base as u64));
+
+        let reasoning = adapter.adapt_event(&entry_at(
+            2,
+            base + 10.0,
+            "assistant/chunk",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "chunk": {"type": "reasoning-delta", "index": 0, "text": "thinking"}
+            }),
+        ));
+        let [DshRenderUpdate::Upsert(reasoning)] = reasoning.as_slice() else {
+            panic!("expected reasoning entry");
+        };
+        assert_eq!(reasoning.kind, DshRenderKind::Thinking);
+        assert_eq!(reasoning.created_at_ms, None);
+
+        let answer = adapter.adapt_event(&entry_at(
+            3,
+            base + 20.0,
+            "assistant/chunk",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "chunk": {"type": "text-delta", "index": 1, "text": "answer"}
+            }),
+        ));
+        let [DshRenderUpdate::Upsert(answer)] = answer.as_slice() else {
+            panic!("expected assistant entry");
+        };
+        assert_eq!(answer.kind, DshRenderKind::Assistant);
+        assert_eq!(answer.created_at_ms, Some((base + 20.0) as u64));
+    }
+
+    #[test]
+    fn tool_boundary_allocates_a_new_agent_surface_and_clock() {
+        let base = 1_787_500_000_000.0;
+        let mut adapter = DshPresentationAdapter::default();
+        let first = adapter.adapt_event(&entry_at(
+            1,
+            base,
+            "assistant/chunk",
+            json!({
+                "turn": 2,
+                "step": 0,
+                "chunk": {"type": "text-delta", "index": 0, "text": "before"}
+            }),
+        ));
+        let first_entry = first
+            .iter()
+            .find_map(|update| match update {
+                DshRenderUpdate::Upsert(entry) => Some(entry),
+                _ => None,
+            })
+            .expect("first assistant surface");
+        assert_eq!(
+            first_entry.id,
+            DshRenderEntryId::Partial {
+                turn: 2,
+                step: 0,
+                surface: 0,
+            }
+        );
+
+        let _ = adapter.adapt_event(&entry_at(
+            2,
+            base + 50.0,
+            "tool/call",
+            json!({"name": "bash", "callId": "call-1", "arguments": "pwd"}),
+        ));
+        let second = adapter.adapt_event(&entry_at(
+            3,
+            base + 100.0,
+            "assistant/chunk",
+            json!({
+                "turn": 2,
+                "step": 0,
+                "chunk": {"type": "text-delta", "index": 0, "text": "after"}
+            }),
+        ));
+        let second_entry = second
+            .iter()
+            .find_map(|update| match update {
+                DshRenderUpdate::Upsert(entry) => Some(entry),
+                _ => None,
+            })
+            .expect("second assistant surface");
+        assert_eq!(
+            second_entry.id,
+            DshRenderEntryId::Partial {
+                turn: 2,
+                step: 0,
+                surface: 1,
+            }
+        );
+        assert_eq!(second_entry.created_at_ms, Some((base + 100.0) as u64));
+    }
+
+    #[test]
+    fn event_time_epoch_ms_rejects_sequence_fixture_values() {
+        assert_eq!(event_time_epoch_ms(1.0), None);
+        assert_eq!(event_time_epoch_ms(f64::NAN), None);
+        assert_eq!(
+            event_time_epoch_ms(1_787_500_000_123.4),
+            Some(1_787_500_000_123)
+        );
     }
 
     #[test]
@@ -2449,7 +2716,11 @@ mod tests {
         assert!(matches!(
             updates.first(),
             Some(DshRenderUpdate::Upsert(DshRenderEntry {
-                id: DshRenderEntryId::Partial { turn: 4, step: 0 },
+                id: DshRenderEntryId::Partial {
+                    turn: 4,
+                    step: 0,
+                    surface: 0,
+                },
                 partial: false,
                 finish: DshRenderFinish::Interrupted,
                 text,
@@ -2464,7 +2735,11 @@ mod tests {
         assert!(!repeated.iter().any(|update| matches!(
             update,
             DshRenderUpdate::Upsert(DshRenderEntry {
-                id: DshRenderEntryId::Partial { turn: 4, step: 0 },
+                id: DshRenderEntryId::Partial {
+                    turn: 4,
+                    step: 0,
+                    surface: 0,
+                },
                 ..
             })
         )));
@@ -2490,7 +2765,11 @@ mod tests {
         assert!(matches!(
             updates.first(),
             Some(DshRenderUpdate::Upsert(DshRenderEntry {
-                id: DshRenderEntryId::Partial { turn: 5, step: 1 },
+                id: DshRenderEntryId::Partial {
+                    turn: 5,
+                    step: 1,
+                    surface: 0,
+                },
                 partial: false,
                 finish: DshRenderFinish::Eof,
                 ..
@@ -2542,7 +2821,11 @@ mod tests {
         assert!(matches!(
             updates.first(),
             Some(DshRenderUpdate::Upsert(DshRenderEntry {
-                id: DshRenderEntryId::Partial { turn: 1, step: 0 },
+                id: DshRenderEntryId::Partial {
+                    turn: 1,
+                    step: 0,
+                    surface: 0,
+                },
                 kind: DshRenderKind::Assistant,
                 text,
                 partial: false,
@@ -2550,6 +2833,57 @@ mod tests {
                 ..
             })) if text == "final"
         ));
+    }
+
+    #[test]
+    fn late_final_message_after_finish_does_not_allocate_a_duplicate_surface() {
+        let mut adapter = DshPresentationAdapter::default();
+        adapter.adapt_event(&entry(
+            0,
+            "assistant/chunk",
+            json!({
+                "turn": 7,
+                "step": 0,
+                "chunk": { "type": "text-delta", "index": 0, "text": "draft" }
+            }),
+        ));
+        adapter.adapt_event(&entry(
+            1,
+            "assistant/chunk",
+            json!({
+                "turn": 7,
+                "step": 0,
+                "chunk": { "type": "finish", "reason": "stop" }
+            }),
+        ));
+        let updates = adapter.adapt_event(&entry(
+            2,
+            "assistant/message",
+            json!({
+                "turn": 7,
+                "step": 0,
+                "message": { "content": [{ "type": "text", "text": "final" }] }
+            }),
+        ));
+        assert!(matches!(
+            updates.first(),
+            Some(DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Partial {
+                    turn: 7,
+                    step: 0,
+                    surface: 0,
+                },
+                text,
+                ..
+            })) if text == "final"
+        ));
+        assert!(!updates.iter().any(|update| matches!(
+            update,
+            DshRenderUpdate::Upsert(DshRenderEntry {
+                id: DshRenderEntryId::Partial { surface: 1, .. },
+                ..
+            })
+        )));
     }
 
     #[test]

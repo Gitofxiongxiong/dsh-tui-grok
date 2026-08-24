@@ -113,6 +113,9 @@ pub struct GrokAppearanceSnapshot {
     pub scrollbar_enabled: bool,
     /// Grok's per-turn timeline sidebar is opt-in and replaces the scrollbar.
     pub show_timeline: bool,
+    /// User/assistant transcript clocks are a local renderer preference. They
+    /// never change DSH session state or issue an RPC effect.
+    pub show_timestamps: bool,
 }
 
 impl GrokAppearanceSnapshot {
@@ -139,6 +142,7 @@ impl GrokAppearanceSnapshot {
             prompt_show_accent_line: false,
             scrollbar_enabled: area.width >= 20 && area.height >= 6,
             show_timeline: false,
+            show_timestamps: true,
         }
     }
 }

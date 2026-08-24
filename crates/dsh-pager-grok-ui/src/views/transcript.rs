@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{Local, TimeZone};
 use dsh_pager::scrollback::{Scrollback, compute_paint_window};
 use dsh_pager::{
     DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderFinish,
@@ -47,8 +48,26 @@ pub struct RichPaintLine {
     /// entry, including plain Markdown. Keeping the offset in the paint line
     /// keeps hit-testing aligned with the visible text.
     pub content_offset: u16,
+    /// Timestamp painted as a non-selectable right-side overlay. The
+    /// transcript copy/selection geometry intentionally keeps it separate.
+    pub timestamp: Option<TimestampLabel>,
     pub screen_y: u16,
     pub line: Line<'static>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimestampLabel {
+    pub short: String,
+    pub hover: String,
+}
+
+pub fn timestamp_label(created_at_ms: Option<u64>) -> Option<TimestampLabel> {
+    let millis = i64::try_from(created_at_ms?).ok()?;
+    let local = Local.timestamp_millis_opt(millis).single()?;
+    Some(TimestampLabel {
+        short: local.format("%-I:%M %p").to_string(),
+        hover: local.format("%H:%M:%S | %b %d").to_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +180,7 @@ impl ProjectionInfo {
 #[derive(Debug, Default)]
 pub struct ScrollbackPane {
     width: usize,
+    show_timestamps: bool,
     entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
     expanded_entries: HashSet<DshRenderEntryId>,
     expanded_blocks: HashSet<(DshRenderEntryId, usize)>,
@@ -171,6 +191,7 @@ pub struct ScrollbackPane {
 impl ScrollbackPane {
     pub fn clear(&mut self) {
         self.width = 0;
+        self.show_timestamps = true;
         self.entries.clear();
         self.expanded_entries.clear();
         self.expanded_blocks.clear();
@@ -179,11 +200,22 @@ impl ScrollbackPane {
     }
 
     pub fn sync(&mut self, scrollback: &mut Scrollback, width: usize, theme: Theme) {
+        self.sync_with_options(scrollback, width, theme, true);
+    }
+
+    pub fn sync_with_options(
+        &mut self,
+        scrollback: &mut Scrollback,
+        width: usize,
+        theme: Theme,
+        show_timestamps: bool,
+    ) {
         let width = width.max(1);
-        if self.width != width {
+        if self.width != width || self.show_timestamps != show_timestamps {
             self.entries.clear();
         }
         self.width = width;
+        self.show_timestamps = show_timestamps;
         let entries = scrollback.render_entries();
         self.prune_local_state(&entries);
         self.projections = build_projection(
@@ -205,7 +237,14 @@ impl ScrollbackPane {
             let cached = match cached {
                 Some(cached) if cached.entry == entry && cached.projection == projection => cached,
                 _ => CachedPaneEntry {
-                    lines: semantic_lines(&entry, width, theme, projection, &self.expanded_blocks),
+                    lines: semantic_lines(
+                        &entry,
+                        width,
+                        theme,
+                        projection,
+                        &self.expanded_blocks,
+                        show_timestamps,
+                    ),
                     entry: entry.clone(),
                     projection,
                 },
@@ -407,6 +446,7 @@ fn semantic_lines(
     theme: Theme,
     projection: ProjectionInfo,
     expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
+    show_timestamps: bool,
 ) -> Vec<RichPaintLine> {
     if projection.group_hidden {
         return Vec::new();
@@ -484,6 +524,15 @@ fn semantic_lines(
         }
     }
     let mut lines = Vec::new();
+    let timestamp = if show_timestamps
+        && matches!(entry.kind, DshRenderKind::User | DshRenderKind::Assistant)
+        && !projection.group_header
+    {
+        timestamp_label(entry.created_at_ms)
+    } else {
+        None
+    };
+    let mut timestamp_pending = timestamp;
     let rail_accent = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
         theme.accent_error
     } else if projection.group_running || entry.finish == DshRenderFinish::Running {
@@ -507,7 +556,11 @@ fn semantic_lines(
     let mut markdown_rows = 0usize;
     for semantic_line in semantic {
         let line_rail = projection.rail || semantic_line.rail;
-        let wrap_width = width.saturating_sub(ENTRY_CHROME_WIDTH).max(1);
+        let reserve_timestamp = timestamp_pending.is_some();
+        let wrap_width = width
+            .saturating_sub(ENTRY_CHROME_WIDTH)
+            .saturating_sub(usize::from(reserve_timestamp) * TIMESTAMP_RESERVED_WIDTH)
+            .max(1);
         for wrapped_line in word_wrap_line(&semantic_line.line, wrap_width) {
             let copy_text = wrapped_line
                 .spans
@@ -538,6 +591,7 @@ fn semantic_lines(
                 } else {
                     0
                 },
+                timestamp: timestamp_pending.take(),
                 screen_y: 0,
                 line,
             });
@@ -557,6 +611,7 @@ fn semantic_lines(
                         background: projection.background,
                         copy_text: String::new(),
                         content_offset: 0,
+                        timestamp: None,
                         screen_y: 0,
                         line: decorate_line(
                             Line::from(""),
@@ -594,6 +649,7 @@ fn semantic_lines(
                 background: projection.background,
                 copy_text: String::new(),
                 content_offset: 0,
+                timestamp: None,
                 screen_y: 0,
                 line: blank.clone(),
             },
@@ -609,6 +665,7 @@ fn semantic_lines(
             background: projection.background,
             copy_text: String::new(),
             content_offset: 0,
+            timestamp: None,
             screen_y: 0,
             line: blank,
         });
@@ -630,6 +687,7 @@ struct SemanticLine {
 /// columns. The local pane has its own outer border, so these three columns
 /// are painted as either `│  ` for operational rows or `   ` for plain text.
 const ENTRY_CHROME_WIDTH: usize = 3;
+const TIMESTAMP_RESERVED_WIDTH: usize = 10;
 /// Terminal rows are integral, so the relaxed Markdown rhythm is represented
 /// as five rows for every four rendered Markdown rows. The spacer is inserted
 /// only between content rows and is not selectable or copyable.
@@ -784,7 +842,7 @@ impl RichTranscript {
         let mut start_y = 0usize;
         for entry in entries {
             let projection = ProjectionInfo::plain(entry, width, theme);
-            let lines = semantic_lines(entry, width, theme, projection, &HashSet::new());
+            let lines = semantic_lines(entry, width, theme, projection, &HashSet::new(), true);
             if lines.is_empty() {
                 continue;
             }
@@ -2287,6 +2345,7 @@ mod tests {
     fn row() -> TranscriptRow {
         TranscriptRow {
             id: DshRenderEntryId::Event { seq: 7 },
+            created_at_ms: None,
             label: "Assistant".into(),
             text: "fallback".into(),
             kind: DshRenderKind::Assistant,
@@ -2339,10 +2398,46 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_are_attached_to_first_user_or_agent_line_only() {
+        let theme = *Theme::current();
+        let mut user = DshRenderEntry::plain(
+            DshRenderEntryId::Event { seq: 7 },
+            7,
+            DshRenderKind::User,
+            "fallback",
+        );
+        user.created_at_ms = Some(1_787_500_000_000);
+        let rich = RichTranscript::new(std::slice::from_ref(&user), 80, theme);
+        let lines = rich.visible_lines(0, 20);
+        let timestamp_line = lines
+            .iter()
+            .find(|line| line.timestamp.is_some())
+            .expect("user timestamp");
+        assert!(timestamp_line.copy_text.contains("fallback"));
+        assert!(
+            timestamp_line
+                .timestamp
+                .as_ref()
+                .is_some_and(|timestamp| timestamp.hover.contains("|"))
+        );
+        assert!(lines.iter().filter(|line| line.timestamp.is_some()).count() == 1);
+
+        let tool = DshRenderEntry::plain(
+            DshRenderEntryId::Event { seq: 8 },
+            8,
+            DshRenderKind::ToolCall,
+            "pwd",
+        );
+        let tool_lines = RichTranscript::new(&[tool], 80, theme).visible_lines(0, 20);
+        assert!(tool_lines.iter().all(|line| line.timestamp.is_none()));
+    }
+
+    #[test]
     fn grok_message_chrome_and_markdown_ast_are_visible() {
         let theme = *Theme::current();
         let assistant = TranscriptRow {
             id: DshRenderEntryId::Event { seq: 12 },
+            created_at_ms: None,
             label: "Assistant".into(),
             text: "# Title\n\n**bold** and `code`\n\n```rust\nlet x = 1;\n```".into(),
             kind: DshRenderKind::Assistant,
@@ -2393,8 +2488,13 @@ mod tests {
     #[test]
     fn streaming_assistant_components_fold_independently() {
         let entry = DshRenderEntry {
-            id: DshRenderEntryId::Partial { turn: 4, step: 0 },
+            id: DshRenderEntryId::Partial {
+                turn: 4,
+                step: 0,
+                surface: 0,
+            },
             source_seq: 6,
+            created_at_ms: None,
             kind: DshRenderKind::Assistant,
             text: "hidden thought\n▸ shell\nfinal answer".into(),
             partial: true,
@@ -2522,7 +2622,11 @@ mod tests {
                 view: None,
             });
         }
-        let id = DshRenderEntryId::Partial { turn: 4, step: 0 };
+        let id = DshRenderEntryId::Partial {
+            turn: 4,
+            step: 0,
+            surface: 0,
+        };
         pane.sync(&mut scrollback, 80, theme);
         assert!(pane.toggle_fold_or_group_at(id, Some(0)));
         pane.sync(&mut scrollback, 80, theme);
@@ -2546,6 +2650,7 @@ mod tests {
         let entry = DshRenderEntry {
             id: row.id,
             source_seq: row.source_seq,
+            created_at_ms: row.created_at_ms,
             kind: row.kind,
             text: row.text,
             partial: false,
@@ -2581,6 +2686,7 @@ mod tests {
         let entry = DshRenderEntry {
             id,
             source_seq: 31,
+            created_at_ms: None,
             kind: DshRenderKind::Assistant,
             text: text.into(),
             partial: false,
@@ -2629,6 +2735,7 @@ mod tests {
             &[DshRenderEntry {
                 id: row.id,
                 source_seq: row.source_seq,
+                created_at_ms: row.created_at_ms,
                 kind: row.kind,
                 text: row.text,
                 partial: false,
@@ -2658,6 +2765,7 @@ mod tests {
             DshRenderEntry {
                 id: DshRenderEntryId::Event { seq: 1 },
                 source_seq: 1,
+                created_at_ms: None,
                 kind: DshRenderKind::SystemInstruction,
                 text: "secret system prompt".into(),
                 partial: false,
@@ -2676,6 +2784,7 @@ mod tests {
             DshRenderEntry {
                 id: DshRenderEntryId::Event { seq: 2 },
                 source_seq: 2,
+                created_at_ms: None,
                 kind: DshRenderKind::AgentContext,
                 text: "repository files and hidden instructions".into(),
                 partial: false,
@@ -2703,6 +2812,7 @@ mod tests {
     fn rich_renderer_covers_all_block_fallbacks() {
         let row = TranscriptRow {
             id: DshRenderEntryId::Event { seq: 9 },
+            created_at_ms: None,
             label: "Assistant".into(),
             text: "fallback".into(),
             kind: DshRenderKind::Assistant,
@@ -2777,6 +2887,7 @@ mod tests {
         let render = |block: DshRenderBlock| {
             let row = TranscriptRow {
                 id: DshRenderEntryId::Event { seq: 90 },
+                created_at_ms: None,
                 label: "Tool".into(),
                 text: block.display_text(),
                 kind: DshRenderKind::ToolCall,
@@ -3031,6 +3142,7 @@ mod tests {
             DshRenderEntry {
                 id: DshRenderEntryId::Event { seq: 10 },
                 source_seq: 10,
+                created_at_ms: None,
                 kind: DshRenderKind::User,
                 text: "one\ntwo\nthree\nfour".into(),
                 partial: false,
@@ -3044,6 +3156,7 @@ mod tests {
             DshRenderEntry {
                 id: DshRenderEntryId::Event { seq: 11 },
                 source_seq: 11,
+                created_at_ms: None,
                 kind: DshRenderKind::Assistant,
                 text: "agent body".into(),
                 partial: false,

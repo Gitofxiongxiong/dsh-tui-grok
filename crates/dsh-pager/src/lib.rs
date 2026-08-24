@@ -38,11 +38,12 @@ pub use loader::{
     SessionChoice,
 };
 pub use presentation::{
-    DshEditDetail, DshInteraction, DshPresentationAdapter, DshPresentationModel, DshQueueContent,
-    DshQueueItem, DshReadLine, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
-    DshRenderFinish, DshRenderKind, DshRenderRole, DshRenderUpdate, DshRenderVisibility,
-    DshSearchFile, DshSearchMatch, DshToolCallView, DshToolDiff, DshToolKind, DshToolLocation,
-    DshToolResult, DshToolResultView, DshWebSource,
+    event_time_epoch_ms, DshEditDetail, DshInteraction, DshPresentationAdapter,
+    DshPresentationModel, DshQueueContent, DshQueueItem, DshReadLine, DshRenderBlock,
+    DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderFinish, DshRenderKind,
+    DshRenderRole, DshRenderUpdate, DshRenderVisibility, DshSearchFile, DshSearchMatch,
+    DshToolCallView, DshToolDiff, DshToolKind, DshToolLocation, DshToolResult, DshToolResultView,
+    DshWebSource,
 };
 pub use scrollback::{EntryId, EntryLayout, ScrollAnchor, ScrollbackLayout};
 pub use session::{

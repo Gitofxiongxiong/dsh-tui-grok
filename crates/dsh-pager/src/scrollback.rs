@@ -32,6 +32,7 @@ struct MeasuredHeight {
 pub struct ScrollbackEntry {
     pub id: EntryId,
     pub source_seq: i64,
+    pub created_at_ms: Option<u64>,
     pub kind: EntryKind,
     pub text: String,
     pub partial: bool,
@@ -50,6 +51,7 @@ impl ScrollbackEntry {
         Self {
             id: entry.id,
             source_seq: entry.source_seq,
+            created_at_ms: entry.created_at_ms,
             kind: entry.kind,
             text: entry.text,
             partial: entry.partial,
@@ -66,6 +68,7 @@ impl ScrollbackEntry {
 
     fn set(&mut self, entry: ScrollbackEntry) -> bool {
         if self.source_seq == entry.source_seq
+            && self.created_at_ms == entry.created_at_ms
             && self.kind == entry.kind
             && self.text == entry.text
             && self.partial == entry.partial
@@ -79,6 +82,7 @@ impl ScrollbackEntry {
             return false;
         }
         self.source_seq = entry.source_seq;
+        self.created_at_ms = entry.created_at_ms;
         self.kind = entry.kind;
         self.text = entry.text;
         self.partial = entry.partial;
@@ -415,6 +419,7 @@ impl Scrollback {
             .map(|entry| DshRenderEntry {
                 id: entry.id,
                 source_seq: entry.source_seq,
+                created_at_ms: entry.created_at_ms,
                 kind: entry.kind,
                 text: entry.text.clone(),
                 partial: entry.partial,
@@ -980,7 +985,11 @@ mod tests {
         assert_eq!(scrollback.entries.len(), 1);
         assert_eq!(
             scrollback.entries[0].id,
-            EntryId::Partial { turn: 1, step: 0 }
+            EntryId::Partial {
+                turn: 1,
+                step: 0,
+                surface: 0,
+            }
         );
         assert_eq!(scrollback.entries[0].text, "hello!");
         assert!(!scrollback.entries[0].partial);

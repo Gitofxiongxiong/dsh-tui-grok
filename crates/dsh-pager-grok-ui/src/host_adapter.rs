@@ -8,6 +8,7 @@ use dsh_pager::{
     ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
     DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
     DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, SessionState,
+    event_time_epoch_ms,
 };
 use dsh_pager_protocol::{
     PromptMode, SessionEvent, SessionListValue, SessionSearchValue, SessionSummary,
@@ -20,6 +21,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptRow {
     pub id: DshRenderEntryId,
+    pub created_at_ms: Option<u64>,
     pub label: String,
     pub text: String,
     pub kind: DshRenderKind,
@@ -799,6 +801,7 @@ impl From<DshRenderEntry> for TranscriptRow {
     fn from(entry: DshRenderEntry) -> Self {
         Self {
             id: entry.id,
+            created_at_ms: entry.created_at_ms,
             label: entry.kind.label().to_string(),
             text: entry.text,
             kind: entry.kind,
@@ -1045,7 +1048,7 @@ fn event_time_for_seq(history: &[dsh_pager_protocol::HistoryEntry], seq: i64) ->
 }
 
 fn event_epoch_ms(time: f64) -> Option<u64> {
-    (time.is_finite() && time >= 0.0 && time <= u64::MAX as f64).then(|| time.round() as u64)
+    event_time_epoch_ms(time)
 }
 
 /// Project the optional host-owned file search result. The projection is
@@ -1301,7 +1304,11 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
 fn render_entry_id(id: DshRenderEntryId) -> String {
     match id {
         DshRenderEntryId::Event { seq } => format!("event:{seq}"),
-        DshRenderEntryId::Partial { turn, step } => format!("partial:{turn}:{step}"),
+        DshRenderEntryId::Partial {
+            turn,
+            step,
+            surface,
+        } => format!("partial:{turn}:{step}:{surface}"),
     }
 }
 
