@@ -10,6 +10,7 @@ description = "Grok Build-derived DeepSeek Harness terminal UI and host adapter"
 crossterm = { workspace = true }
 xai-ratatui-textarea = { package = "dsh-grok-textarea", path = "../dsh-grok-textarea" }
 dsh-pager = { path = "../dsh-pager" }
+dsh-pager-primitives = { path = "../dsh-pager-primitives" }
 dsh-pager-protocol = { path = "../dsh-pager-protocol" }
 dsh-pager-render = { path = "../dsh-pager-render" }
 dsh-grok-inline = { path = "../dsh-grok-inline" }

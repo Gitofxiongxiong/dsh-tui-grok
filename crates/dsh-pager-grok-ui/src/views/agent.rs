@@ -10,8 +10,9 @@ use std::borrow::Cow;
 use crossterm::event::KeyCode;
 use dsh_pager_protocol::PromptMode;
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -19,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::AppShell;
 use crate::appearance::{LayoutConfig, ScrollbarConfig};
 use crate::input::key::KeyShortcut;
+use crate::render::scrollbar::render_scrollbar_styled;
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
 
@@ -28,6 +30,83 @@ pub const SHORT_TERMINAL_ROWS: u16 = 16;
 pub const SCROLLBACK_MIN_ROWS: u16 = 5;
 /// Compact spacing is forced on terminals at or below this height.
 pub const AUTO_COMPACT_MAX_ROWS: u16 = 20;
+
+/// Scroll geometry produced by the DSH scrollback adapter and consumed by
+/// Grok's AgentView scrollbar renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollInfo {
+    pub total_height: usize,
+    pub viewport_height: u16,
+    pub scroll_offset: usize,
+}
+
+/// Render the AgentView scrollbar with Grok Build's theme, scaling and
+/// follow-mode rules.
+pub fn render_scrollbar(
+    buf: &mut Buffer,
+    scrollback_area: Rect,
+    scrollbar_x: u16,
+    scrollbar_cfg: &ScrollbarConfig,
+    scroll_info: Option<ScrollInfo>,
+    is_following: bool,
+    theme: &Theme,
+) {
+    if !scrollbar_cfg.enabled {
+        return;
+    }
+    let Some(scroll_info) = scroll_info else {
+        return;
+    };
+    let scrollbar_area = Rect {
+        x: scrollbar_x,
+        y: scrollback_area.y,
+        width: 1,
+        height: scrollback_area.height,
+    };
+    let scrollbar_bg = scrollbar_cfg.scrollbar_bg.unwrap_or(theme.scrollbar_bg);
+    let scrollbar_fg = scrollbar_cfg.scrollbar_fg.unwrap_or(theme.scrollbar_fg);
+    let thumb_fg = if is_following {
+        blend_color(scrollbar_bg, scrollbar_fg, 0.4).unwrap_or(scrollbar_fg)
+    } else {
+        scrollbar_fg
+    };
+    let track_style = Style::default().bg(scrollbar_bg);
+    let thumb_style = Style::default().fg(thumb_fg).bg(scrollbar_bg);
+    let scale = if scroll_info.total_height > u16::MAX as usize {
+        (scroll_info.total_height / u16::MAX as usize) + 1
+    } else {
+        1
+    };
+    let scaled_total = (scroll_info.total_height / scale) as u16;
+    let scaled_offset = (scroll_info.scroll_offset / scale) as u16;
+    render_scrollbar_styled(
+        buf,
+        Some(scrollbar_area),
+        scaled_total,
+        scroll_info.viewport_height,
+        scaled_offset,
+        track_style,
+        thumb_style,
+    );
+}
+
+fn blend_color(base: Color, foreground: Color, opacity: f32) -> Option<Color> {
+    let Color::Rgb(base_r, base_g, base_b) = base else {
+        return None;
+    };
+    let Color::Rgb(fg_r, fg_g, fg_b) = foreground else {
+        return None;
+    };
+    let opacity = opacity.clamp(0.0, 1.0);
+    let channel = |base: u8, foreground: u8| {
+        (base as f32 + (foreground as f32 - base as f32) * opacity).round() as u8
+    };
+    Some(Color::Rgb(
+        channel(base_r, fg_r),
+        channel(base_g, fg_g),
+        channel(base_b, fg_b),
+    ))
+}
 
 pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {
     user_compact || (terminal_rows > 0 && terminal_rows <= AUTO_COMPACT_MAX_ROWS)
@@ -716,5 +795,83 @@ mod tests {
         assert_eq!(areas.hit_test(3, 4), Some(ActivePane::Catalog));
         assert_eq!(areas.hit_test(3, 26), Some(ActivePane::Queue));
         assert_eq!(areas.hit_test(3, 29), Some(ActivePane::Prompt));
+    }
+
+    #[test]
+    fn grok_scrollbar_uses_full_block_and_tracks_top_to_bottom() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 12, 10);
+        let track = Rect::new(10, 0, 1, 10);
+        let info = |offset| ScrollInfo {
+            total_height: 100,
+            viewport_height: 10,
+            scroll_offset: offset,
+        };
+
+        let mut top = Buffer::empty(area);
+        render_scrollbar(
+            &mut top,
+            track,
+            track.x,
+            &ScrollbarConfig::default(),
+            Some(info(0)),
+            false,
+            &theme,
+        );
+        assert_eq!(top[(track.x, track.y)].symbol(), "█");
+        assert_eq!(top[(track.x, track.y)].bg, theme.scrollbar_fg);
+
+        let mut bottom = Buffer::empty(area);
+        render_scrollbar(
+            &mut bottom,
+            track,
+            track.x,
+            &ScrollbarConfig::default(),
+            Some(info(90)),
+            false,
+            &theme,
+        );
+        assert_eq!(bottom[(track.x, track.bottom() - 1)].symbol(), "█");
+    }
+
+    #[test]
+    fn grok_scrollbar_dims_follow_mode_and_skips_content_that_fits() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 12, 10);
+        let track = Rect::new(10, 0, 1, 10);
+        let mut following = Buffer::empty(area);
+        render_scrollbar(
+            &mut following,
+            track,
+            track.x,
+            &ScrollbarConfig::default(),
+            Some(ScrollInfo {
+                total_height: 100,
+                viewport_height: 10,
+                scroll_offset: 90,
+            }),
+            true,
+            &theme,
+        );
+        assert_ne!(
+            following[(track.x, track.bottom() - 1)].bg,
+            theme.scrollbar_fg
+        );
+
+        let mut fitting = Buffer::empty(area);
+        render_scrollbar(
+            &mut fitting,
+            track,
+            track.x,
+            &ScrollbarConfig::default(),
+            Some(ScrollInfo {
+                total_height: 10,
+                viewport_height: 10,
+                scroll_offset: 0,
+            }),
+            true,
+            &theme,
+        );
+        assert!((track.top()..track.bottom()).all(|row| fitting[(track.x, row)].symbol() == " "));
     }
 }

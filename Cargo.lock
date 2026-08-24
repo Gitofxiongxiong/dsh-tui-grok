@@ -257,6 +257,7 @@ dependencies = [
  "dsh-grok-inline",
  "dsh-grok-textarea",
  "dsh-pager",
+ "dsh-pager-primitives",
  "dsh-pager-protocol",
  "dsh-pager-render",
  "pretty_assertions",

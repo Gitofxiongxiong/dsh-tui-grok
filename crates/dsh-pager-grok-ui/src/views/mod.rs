@@ -6,6 +6,10 @@ pub mod file_search {
 }
 pub mod agent;
 pub mod agent_panes;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/agent_status.rs"]
+pub mod agent_status;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/context_bar.rs"]
+pub mod context_bar;
 pub mod dashboard;
 #[path = "../../vendor/grok/xai-grok-pager/src/scrollback/blocks/tool/execute.rs"]
 pub mod execute_tool;
@@ -14,6 +18,8 @@ pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]
 #[allow(dead_code)]
 pub mod modal_window;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/progress_bar.rs"]
+pub mod progress_bar;
 pub mod prompt_contract;
 pub mod prompt_widget;
 pub mod queue;

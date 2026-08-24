@@ -225,6 +225,16 @@ pub struct AgentSnapshot {
     pub subagents: Vec<SubagentRow>,
 }
 
+/// Authoritative context pressure published by Harness's token-meter
+/// projection. `used_tokens` is replay-aware projected occupancy when
+/// available; no transcript-side estimate is stored here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsageSnapshot {
+    pub used_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHeader {
     pub id: DshSessionId,
@@ -313,6 +323,8 @@ pub struct GrokHostSnapshot {
     pub workspace: WorkspaceSnapshot,
     #[serde(default)]
     pub agent: AgentSnapshot,
+    #[serde(default)]
+    pub context_usage: ContextUsageSnapshot,
     pub capabilities: CapabilityMatrix,
 }
 
@@ -421,6 +433,7 @@ impl GrokHostSnapshot {
             .map(DiagnosticView::from)
             .collect();
         let capabilities = CapabilityMatrix::from_session(session);
+        let context_usage = context_usage_snapshot(session);
         let interaction = presentation.interaction.clone();
         let queue = presentation.queue.clone();
         let queue_revision = presentation.queue_revision;
@@ -496,6 +509,7 @@ impl GrokHostSnapshot {
             media,
             workspace,
             agent,
+            context_usage,
             capabilities,
         }
     }
@@ -562,6 +576,7 @@ impl GrokHostSnapshot {
             media: MediaSnapshot::default(),
             workspace: WorkspaceSnapshot::default(),
             agent: AgentSnapshot::default(),
+            context_usage: ContextUsageSnapshot::default(),
             capabilities: CapabilityMatrix::default(),
         }
     }
@@ -658,6 +673,27 @@ fn feature_status(enabled: bool) -> FeatureStatus {
         FeatureStatus::Available
     } else {
         FeatureStatus::Unsupported
+    }
+}
+
+fn context_usage_snapshot(session: &SessionState) -> ContextUsageSnapshot {
+    let Some(object) = session
+        .projection("contextPressure")
+        .and_then(Value::as_object)
+    else {
+        return ContextUsageSnapshot::default();
+    };
+    let used_tokens = object
+        .get("projectedTokens")
+        .and_then(Value::as_u64)
+        .or_else(|| object.get("pressureTokens").and_then(Value::as_u64));
+    let total_tokens = object
+        .get("contextWindow")
+        .and_then(Value::as_u64)
+        .filter(|total| *total > 0);
+    ContextUsageSnapshot {
+        used_tokens,
+        total_tokens,
     }
 }
 
@@ -905,6 +941,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         media: MediaSnapshot::default(),
         workspace: WorkspaceSnapshot::default(),
         agent: AgentSnapshot::default(),
+        context_usage: ContextUsageSnapshot::default(),
         capabilities: CapabilityMatrix::default(),
     }
 }
@@ -1006,6 +1043,42 @@ mod tests {
         assert_eq!(first.suggestions.status, FeatureStatus::Available);
         assert_eq!(first.workspace.status, FeatureStatus::Pending);
         assert_eq!(first.agent.status, FeatureStatus::Unsupported);
+        assert_eq!(first.context_usage, ContextUsageSnapshot::default());
+    }
+
+    #[test]
+    fn context_pressure_prefers_replay_aware_projection() {
+        let mut state = state();
+        assert!(state.set_projection(
+            "contextPressure",
+            10,
+            json!({
+                "contextWindow": 1_000_000,
+                "pressureTokens": 80_000,
+                "projectedTokens": 85_500
+            })
+        ));
+        let snapshot = GrokHostSnapshot::from_session(&state);
+        assert_eq!(
+            snapshot.context_usage,
+            ContextUsageSnapshot {
+                used_tokens: Some(85_500),
+                total_tokens: Some(1_000_000),
+            }
+        );
+    }
+
+    #[test]
+    fn context_pressure_falls_back_to_sample_and_rejects_zero_window() {
+        let mut state = state();
+        assert!(state.set_projection(
+            "contextPressure",
+            10,
+            json!({"contextWindow": 0, "pressureTokens": 42_000})
+        ));
+        let snapshot = GrokHostSnapshot::from_session(&state);
+        assert_eq!(snapshot.context_usage.used_tokens, Some(42_000));
+        assert_eq!(snapshot.context_usage.total_tokens, None);
     }
 
     #[test]

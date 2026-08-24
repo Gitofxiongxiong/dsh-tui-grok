@@ -54,8 +54,13 @@ use crate::scheduler::SchedulerStats;
 use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
-    agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact},
+    agent::{
+        AgentView, AgentViewLayout, AgentViewLayoutParams, ScrollInfo, effective_compact,
+        render_scrollbar,
+    },
     agent_panes::{AgentPaneController, render_agent_tasks_content, render_inline_agent_panes},
+    agent_status::AgentStatusBar,
+    context_bar::context_bar_line,
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
     file_search::{controller::FileSearchController, line_viewer::render_file_search_content},
     interaction::{render_interaction_content, response_for},
@@ -291,6 +296,7 @@ struct UiState {
     selected_transcript: Option<HitTarget>,
     last_transcript_click: Option<(Instant, dsh_pager::DshRenderEntryId, Option<usize>)>,
     hover_link: Option<LinkTarget>,
+    context_hovered: bool,
     frame_links: Vec<dsh_grok_inline::LinkSpan>,
     pending_copy: Option<String>,
     scheduler_stats: SchedulerStats,
@@ -538,12 +544,7 @@ impl UiState {
             if snapshot.running { "running" } else { "idle" }
         );
         let compact_header = compact || header.width < 70;
-        let header_right = if compact_header {
-            if snapshot.running { "running" } else { "idle" }.to_string()
-        } else {
-            format!(" · {connection}")
-        };
-        let status_bar = StatusBar::new(&snapshot.session_title).right(&header_right);
+        let status_bar = StatusBar::new(&snapshot.session_title);
         // The upstream status row is left/right aligned. Keep the compact
         // branding chip only where it cannot collide with the right status.
         if compact_header {
@@ -552,15 +553,49 @@ impl UiState {
             frame.render_widget(status_bar, header);
         }
 
+        // Grok composes the right side as named status items so context usage
+        // can retain a stable hover rectangle while its contents change.
+        let mut agent_status = AgentStatusBar::new(theme);
+        if !compact_header {
+            agent_status.push(
+                "session-state",
+                Line::from(Span::styled(
+                    connection,
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                )),
+            );
+        }
+        if let Some(context_line) = context_bar_line(
+            snapshot.context_usage.used_tokens,
+            snapshot.context_usage.total_tokens,
+            self.context_hovered,
+            theme,
+        ) {
+            agent_status.push("context", context_line);
+        } else if compact_header {
+            agent_status.push(
+                "session-state",
+                Line::from(Span::styled(
+                    if snapshot.running { "running" } else { "idle" },
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                )),
+            );
+        }
+        let status_areas = agent_status.render(frame.buffer_mut(), header);
+        if let Some(context_rect) = status_areas.get("context").copied() {
+            self.hit_map.insert(crate::geometry::HitRegion {
+                target: HitTarget::Overlay("context-usage".into()),
+                rect: context_rect,
+                label: "context usage".into(),
+                link: None,
+                priority: 20,
+            });
+        }
+
         self.render_transcript(
             frame,
-            agent_layout.scrollback_content,
-            Rect::new(
-                agent_layout.timeline_x,
-                agent_layout.scrollback.y,
-                agent_layout.timeline_width,
-                agent_layout.scrollback.height,
-            ),
+            &agent_layout,
+            &scrollbar_cfg,
             &snapshot,
             &mut session.scrollback,
         );
@@ -857,13 +892,22 @@ impl UiState {
     fn render_transcript(
         &mut self,
         frame: &mut Frame<'_>,
-        content: Rect,
-        rail: Rect,
+        layout: &AgentViewLayout,
+        scrollbar_config: &ScrollbarConfig,
         snapshot: &GrokHostSnapshot,
         scrollback: &mut dsh_pager::scrollback::Scrollback,
     ) {
         let theme = Theme::current();
+        let content = layout.scrollback_content;
+        let rail = Rect::new(
+            layout.timeline_x,
+            layout.scrollback.y,
+            layout.timeline_width,
+            layout.scrollback.height,
+        );
         let mut lines = Vec::new();
+        let mut total_height = 0;
+        let mut scroll_top = 0;
         let render_width = content.width.saturating_sub(1).max(1) as usize;
         self.scrollback_pane.sync(scrollback, render_width, *theme);
         if self.scrollback_pane.is_empty() {
@@ -874,10 +918,10 @@ impl UiState {
                 Style::default().fg(theme.gray),
             )));
         } else {
-            let total_height = self.scrollback_pane.total_height(scrollback);
+            total_height = self.scrollback_pane.total_height(scrollback);
             let mut max_scroll = total_height.saturating_sub(content.height as usize);
             self.scroll = self.scroll.min(max_scroll);
-            let mut scroll_top = max_scroll.saturating_sub(self.scroll);
+            scroll_top = max_scroll.saturating_sub(self.scroll);
             if self.transcript_width != Some(content.width) {
                 if let Some(anchor) = self.scroll_anchor.take()
                     && let Some(restored) =
@@ -985,7 +1029,7 @@ impl UiState {
         }
 
         let turn_count = snapshot.transcript.len();
-        if let Some(rail_geometry) = compute_rail(
+        let rail_geometry = compute_rail(
             rail,
             rail.x,
             turn_count,
@@ -995,9 +1039,24 @@ impl UiState {
                 down_target: None,
                 at_bottom: self.scroll == 0,
             },
-        ) {
+        );
+        if let Some(rail_geometry) = rail_geometry {
             let buf = frame.buffer_mut();
             render_rail(buf, &rail_geometry, None, theme);
+        } else {
+            render_scrollbar(
+                frame.buffer_mut(),
+                layout.scrollback,
+                layout.scrollbar_x,
+                scrollbar_config,
+                Some(ScrollInfo {
+                    total_height,
+                    viewport_height: content.height,
+                    scroll_offset: scroll_top,
+                }),
+                self.scroll == 0,
+                theme,
+            );
         }
     }
 
@@ -1288,6 +1347,18 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<bool> {
+        if let ShellEvent::Mouse(mouse) = &event {
+            self.context_hovered = self.shell.overlay() == Overlay::None
+                && self
+                    .hit_map
+                    .hit_test(mouse.column, mouse.row)
+                    .is_some_and(|region| {
+                        matches!(
+                            &region.target,
+                            HitTarget::Overlay(name) if name == "context-usage"
+                        )
+                    });
+        }
         if self.shell.overlay() == Overlay::None
             && let ShellEvent::Mouse(mouse) = &event
         {
@@ -3036,9 +3107,9 @@ mod tests {
     };
     use crate::views::picker::{PickerState, render_picker_in_modal};
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use dsh_pager::{DshRenderEntryId, scrollback::Scrollback};
-    use dsh_pager_protocol::{HistoryEntry, SessionEvent};
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use dsh_pager::{ControlPlaneStore, DshRenderEntryId, SessionState, scrollback::Scrollback};
+    use dsh_pager_protocol::{HistoryEntry, SessionEvent, SessionHistoryValue};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
     use serde_json::json;
 
     #[test]
@@ -3046,6 +3117,104 @@ mod tests {
         let snapshot = GrokHostSnapshot::demo();
         assert_eq!(snapshot.model, "deepseek-reasoner");
         assert_eq!(snapshot.picker_entries().len(), 3);
+    }
+
+    fn session_with_long_messages(count: usize) -> SessionState {
+        let events = (0..count)
+            .map(|index| HistoryEntry {
+                event: SessionEvent {
+                    event_type: "assistant/message".into(),
+                    seq: index as i64 + 1,
+                    time: index as f64,
+                    data: json!({
+                        "message": {
+                            "content": [{
+                                "type": "text",
+                                "text": (0..240)
+                                    .map(|line| format!("message {index} line {line}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            }]
+                        }
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            })
+            .collect();
+        let mut session = SessionState::new("context-session".into(), 1);
+        session
+            .install_initial(SessionHistoryValue {
+                events,
+                has_more: false,
+                projections: None,
+            })
+            .expect("valid session fixture");
+        session
+    }
+
+    fn buffer_text(buffer: &Buffer, width: u16, height: u16) -> String {
+        (0..height)
+            .flat_map(|row| (0..width).map(move |column| buffer[(column, row)].symbol()))
+            .collect()
+    }
+
+    #[test]
+    fn production_render_shows_context_and_smooth_scrollbar() {
+        let mut session = session_with_long_messages(1);
+        assert!(session.set_projection(
+            "contextPressure",
+            2,
+            json!({
+                "contextWindow": 128_000,
+                "pressureTokens": 40_000,
+                "projectedTokens": 42_000
+            })
+        ));
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render frame");
+        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        let transcript_height = ui.scrollback_pane.total_height(&mut session.scrollback);
+        assert!(screen.contains("42K / 128K"));
+        assert!(
+            screen.contains('█'),
+            "overflow renders Grok's full-block thumb (height={transcript_height})"
+        );
+        assert!(ui.hit_map.regions().iter().any(|region| {
+            matches!(&region.target, HitTarget::Overlay(name) if name == "context-usage")
+        }));
+
+        ui.context_hovered = true;
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("hover render frame");
+        let hovered = buffer_text(terminal.backend().buffer(), 100, 30);
+        assert!(hovered.contains("32.8%"));
+    }
+
+    #[test]
+    fn production_render_hides_scrollbar_when_timeline_owns_gutter() {
+        let mut session = session_with_long_messages(2);
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render frame");
+        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        assert!(
+            !screen.contains('█'),
+            "timeline rail replaces the scrollbar"
+        );
+        assert!(ui.hit_map.regions().iter().any(|region| {
+            matches!(&region.target, HitTarget::Overlay(name) if name == "timeline")
+        }));
     }
 
     #[test]
