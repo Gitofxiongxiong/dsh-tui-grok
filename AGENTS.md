@@ -155,6 +155,56 @@ UI 变更还应覆盖 semantic buffer、geometry、focus、wrap、scroll、mouse
 paste、resize、terminal restore 和必要的 mock/real Harness 场景。不要只用
 最终文字或 ANSI 字节声称视觉 parity。
 
+### 浏览器终端截图对比（用户可见 TUI 变更强制）
+
+完成任何用户可见的 TUI 功能后，必须使用 `ttyd + xterm.js + Playwright`
+在真实浏览器渲染链路中，把 DSH TUI 与本机 Grok TUI 驱动到相同语义状态并
+进行截图对比。布局、颜色、字体属性、间距、边框、glyph、wrap、scroll、
+focus、hover、selection、overlay、modal、picker、queue、prompt、status、
+timeline、mouse、paste 或 resize 有变化时都适用；未完成此步骤不能声明功能
+完成或视觉 parity。
+
+标准链路如下：
+
+1. 分别通过 `ttyd` 启动 `target/debug/dsh-pager` 和 Grok 基准
+   `/home/leo/.grok/bin/grok`。`ttyd` 负责 PTY/WebSocket，浏览器使用其内置
+   xterm.js 前端；禁止使用应用内 `/cut`、重绘 terminal buffer 或桌面截图
+   代替浏览器最终像素。
+2. 双方固定相同的 viewport、`deviceScaleFactor`、终端行列、字体、字号、
+   theme、`TERM=xterm-256color`、locale 和相关工具版本。推荐基线为
+   `1200x800`、DPR 1、`DejaVu Sans Mono` 16px；偏离时必须记录原因。
+3. DSH 优先使用确定性的 mock backend/fixture；Grok 使用能够表达同一 UI
+   状态的命令和输入序列。禁止拿无关业务数据做逐像素结论。无法构造相同数据
+   时，仍须比较 geometry 和视觉角色，并把仅由数据造成的差异单独列出。
+4. Playwright 必须聚焦 `.xterm-helper-textarea`，通过真实 keyboard、mouse、
+   paste 和 viewport resize 驱动交互，并截取 `.xterm` 元素，而不是应用内部
+   的抽象视图。可启用 `screenReaderMode=true` 并读取 accessibility tree 等待
+   状态，但语义文本不能替代像素证据。
+5. 截图前必须等待稳定帧。光标闪烁、动画或增量 overlay 存在时，使用
+   Playwright screenshot stabilization，或确认连续两帧一致后再保存和比较。
+6. 对双方截图进行并排或像素 diff 检查。每个差异都要分类为预期差异、数据
+   差异、环境差异或缺陷；未解释的可见差异不得静默接受。
+
+可复用的 `ttyd` 启动参数骨架：
+
+~~~bash
+~/.local/bin/ttyd -i 127.0.0.1 -p <port> -W -o -T xterm-256color \
+  -t fontSize=16 \
+  -t 'fontFamily=DejaVu Sans Mono' \
+  -t screenReaderMode=true \
+  -t 'theme={"background":"#0a0a0a","foreground":"#e1e1e1"}' \
+  <command> [args...]
+~~~
+
+进度记录必须写明双方启动命令和状态、fixture/输入序列、viewport/DPR、字体、
+主题、截图或 diff 产物路径、观察到的差异及其处置。临时截图默认放在工作区外，
+除非 golden/fixture 已在预先进度记录中列入范围，否则不得提交；任何截图都不得
+包含真实凭据、私有会话或其他用户数据。若 Grok 基准无法启动、浏览器无法渲染
+或截图无法取得，只能把任务记为部分完成/阻塞并说明证据，不能跳过门禁。
+
+semantic buffer、PTY、ANSI、geometry 和 Harness 测试仍然需要执行，但它们是
+浏览器像素对比的互补证据，不能替代上述截图验证。
+
 当前已知基线问题：
 
 - fast clippy 会报告未修改 vendor 测试的 needless_borrow；
@@ -187,6 +237,8 @@ paste、resize、terminal restore 和必要的 mock/real Harness 场景。不要
 1. 预先进度记录存在且范围匹配；
 2. Grok source/reuse 决策和 DSH contract delta 可追溯；
 3. 相关测试、semantic/PTY 验证和失败结果已记录；
-4. 无未登记的平行 UI、真源或 vendor 漂移；
-5. 若有 Git 根，暂存区审计通过并创建带 Progress-Record trailer 的对应 commit；
-6. 未解决问题、fallback 删除条件和下一步已写回记录。
+4. 用户可见 TUI 变更已完成 DSH/Grok 浏览器终端截图对比，环境、操作、产物
+   和全部可见差异已记录；
+5. 无未登记的平行 UI、真源或 vendor 漂移；
+6. 若有 Git 根，暂存区审计通过并创建带 Progress-Record trailer 的对应 commit；
+7. 未解决问题、fallback 删除条件和下一步已写回记录。
