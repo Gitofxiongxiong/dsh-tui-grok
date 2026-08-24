@@ -111,6 +111,8 @@ pub struct GrokAppearanceSnapshot {
     pub prompt_show_borders: bool,
     pub prompt_show_accent_line: bool,
     pub scrollbar_enabled: bool,
+    /// Grok's per-turn timeline sidebar is opt-in and replaces the scrollbar.
+    pub show_timeline: bool,
 }
 
 impl GrokAppearanceSnapshot {
@@ -136,6 +138,7 @@ impl GrokAppearanceSnapshot {
             prompt_show_borders: true,
             prompt_show_accent_line: false,
             scrollbar_enabled: area.width >= 20 && area.height >= 6,
+            show_timeline: false,
         }
     }
 }
@@ -181,6 +184,7 @@ mod tests {
         assert_eq!(desktop.outer_vpad, 1);
         assert!(desktop.prompt_show_borders);
         assert!(desktop.scrollbar_enabled);
+        assert!(!desktop.show_timeline, "Grok timeline is opt-in by default");
     }
 
     #[test]

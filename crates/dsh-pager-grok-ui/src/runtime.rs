@@ -500,8 +500,12 @@ impl UiState {
         } else {
             (snapshot.queue.len() as u16).clamp(1, 3)
         };
-        let timeline_width =
-            crate::views::timeline::rail_width(true, false, area.width, snapshot.transcript.len());
+        let timeline_width = crate::views::timeline::rail_width(
+            appearance.show_timeline,
+            false,
+            area.width,
+            snapshot.transcript.len(),
+        );
         let short = area.height <= crate::views::agent::SHORT_TERMINAL_ROWS;
         let mut layout_params = AgentViewLayoutParams {
             area,
@@ -536,13 +540,6 @@ impl UiState {
         let agent_layout = AgentView::layout(&mut self.shell, layout_params);
         let header = agent_layout.status_bar;
         let input = agent_layout.prompt;
-        let connection = format!(
-            "{} · {} · q{} · {}",
-            snapshot.connection,
-            snapshot.model,
-            snapshot.queue_revision,
-            if snapshot.running { "running" } else { "idle" }
-        );
         let compact_header = compact || header.width < 70;
         let status_bar = StatusBar::new(&snapshot.session_title);
         // The upstream status row is left/right aligned. Keep the compact
@@ -556,15 +553,6 @@ impl UiState {
         // Grok composes the right side as named status items so context usage
         // can retain a stable hover rectangle while its contents change.
         let mut agent_status = AgentStatusBar::new(theme);
-        if !compact_header {
-            agent_status.push(
-                "session-state",
-                Line::from(Span::styled(
-                    connection,
-                    Style::default().fg(theme.gray).bg(theme.bg_base),
-                )),
-            );
-        }
         if let Some(context_line) = context_bar_line(
             snapshot.context_usage.used_tokens,
             snapshot.context_usage.total_tokens,
@@ -572,14 +560,6 @@ impl UiState {
             theme,
         ) {
             agent_status.push("context", context_line);
-        } else if compact_header {
-            agent_status.push(
-                "session-state",
-                Line::from(Span::styled(
-                    if snapshot.running { "running" } else { "idle" },
-                    Style::default().fg(theme.gray).bg(theme.bg_base),
-                )),
-            );
         }
         let status_areas = agent_status.render(frame.buffer_mut(), header);
         if let Some(context_rect) = status_areas.get("context").copied() {
@@ -1029,17 +1009,21 @@ impl UiState {
         }
 
         let turn_count = snapshot.transcript.len();
-        let rail_geometry = compute_rail(
-            rail,
-            rail.x,
-            turn_count,
-            RailViewport {
-                active: turn_count.checked_sub(1),
-                up_target: turn_count.checked_sub(2),
-                down_target: None,
-                at_bottom: self.scroll == 0,
-            },
-        );
+        let rail_geometry = if layout.timeline_width > 0 {
+            compute_rail(
+                rail,
+                rail.x,
+                turn_count,
+                RailViewport {
+                    active: turn_count.checked_sub(1),
+                    up_target: turn_count.checked_sub(2),
+                    down_target: None,
+                    at_bottom: self.scroll == 0,
+                },
+            )
+        } else {
+            None
+        };
         if let Some(rail_geometry) = rail_geometry {
             let buf = frame.buffer_mut();
             render_rail(buf, &rail_geometry, None, theme);
@@ -3161,6 +3145,12 @@ mod tests {
             .collect()
     }
 
+    fn buffer_row_text(buffer: &Buffer, width: u16, row: u16) -> String {
+        (0..width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect()
+    }
+
     #[test]
     fn production_render_shows_context_and_smooth_scrollbar() {
         let mut session = session_with_long_messages(1);
@@ -3186,9 +3176,20 @@ mod tests {
             screen.contains('█'),
             "overflow renders Grok's full-block thumb (height={transcript_height})"
         );
-        assert!(ui.hit_map.regions().iter().any(|region| {
-            matches!(&region.target, HitTarget::Overlay(name) if name == "context-usage")
-        }));
+        let context_rect = ui
+            .hit_map
+            .regions()
+            .iter()
+            .find_map(|region| {
+                matches!(&region.target, HitTarget::Overlay(name) if name == "context-usage")
+                    .then_some(region.rect)
+            })
+            .expect("context hit area");
+        let header_text = buffer_row_text(terminal.backend().buffer(), 100, context_rect.y);
+        assert!(!header_text.contains("connected"));
+        assert!(!header_text.contains("deepseek"));
+        assert!(!header_text.contains(" q0 "));
+        assert!(!header_text.contains("idle"));
 
         ui.context_hovered = true;
         terminal
@@ -3199,7 +3200,7 @@ mod tests {
     }
 
     #[test]
-    fn production_render_hides_scrollbar_when_timeline_owns_gutter() {
+    fn production_render_keeps_scrollbar_when_default_timeline_is_off() {
         let mut session = session_with_long_messages(2);
         let control_plane = ControlPlaneStore::default();
         let mut ui = UiState::default();
@@ -3209,10 +3210,10 @@ mod tests {
             .expect("render frame");
         let screen = buffer_text(terminal.backend().buffer(), 100, 30);
         assert!(
-            !screen.contains('█'),
-            "timeline rail replaces the scrollbar"
+            screen.contains('█'),
+            "multi-turn overflow keeps the scrollbar"
         );
-        assert!(ui.hit_map.regions().iter().any(|region| {
+        assert!(!ui.hit_map.regions().iter().any(|region| {
             matches!(&region.target, HitTarget::Overlay(name) if name == "timeline")
         }));
     }
