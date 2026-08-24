@@ -3023,7 +3023,7 @@ mod tests {
         MediaPreviewBuffer, UiState, render_agent_tasks_content, render_image_preview_content,
     };
     use crate::effects::UiEffectStatus;
-    use crate::geometry::{GeometryLine, HitTarget};
+    use crate::geometry::{GeometryLine, HitMap, HitRegion, HitTarget};
     use crate::host_adapter::{
         AgentSnapshot, CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot,
         MediaSnapshot, SuggestionSnapshot,
@@ -3035,7 +3035,9 @@ mod tests {
         ModalSizing, ModalWindowConfig, Shortcut, render_modal_window,
     };
     use crate::views::picker::{PickerState, render_picker_in_modal};
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use dsh_pager::{DshRenderEntryId, scrollback::Scrollback};
+    use dsh_pager_protocol::{HistoryEntry, SessionEvent};
     use ratatui::{buffer::Buffer, layout::Rect};
     use serde_json::json;
 
@@ -3079,6 +3081,126 @@ mod tests {
         assert_eq!(buffer.cell((0, 4)).expect("bottom corner").symbol(), "└");
         assert_eq!(buffer.cell((19, 1)).expect("top corner").symbol(), "┐");
         assert_eq!(buffer.cell((19, 4)).expect("bottom corner").symbol(), "┘");
+    }
+
+    #[test]
+    fn transcript_execute_double_click_expands_command_output_and_status() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "tool/call".into(),
+                seq: 70,
+                time: 1.0,
+                data: json!({
+                    "name": "bash",
+                    "callId": "call-70",
+                    "arguments": "{\"command\":\"pwd\"}"
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: Some(json!({
+                "for": "call",
+                "view": {
+                    "card": "terminal",
+                    "title": "pwd",
+                    "description": "Query the current workspace",
+                    "cwd": "/work"
+                }
+            })),
+        });
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "tool/result".into(),
+                seq: 71,
+                time: 2.0,
+                data: json!({
+                    "message": {
+                        "source": { "callId": "call-70" },
+                        "content": [{ "type": "text", "text": "/work" }]
+                    }
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: Some(json!({
+                "for": "result",
+                "view": {
+                    "card": "terminal",
+                    "output": "/work\n",
+                    "exitCode": 0
+                }
+            })),
+        });
+
+        let id = DshRenderEntryId::Event { seq: 70 };
+        let mut ui = UiState {
+            hit_map: HitMap::new(Rect::new(0, 0, 80, 8)),
+            ..UiState::default()
+        };
+        ui.scrollback_pane
+            .sync(&mut scrollback, 80, *Theme::current());
+        let theme = *Theme::current();
+        let collapsed = ui.scrollback_pane.visible_lines(&mut scrollback, 0, 20);
+        let summary = collapsed
+            .iter()
+            .find(|line| line.entry_id == id && line.selectable)
+            .expect("collapsed completed execute summary");
+        assert_eq!(summary.copy_text, "› Run Query the current workspace");
+        assert!(summary.line.to_string().starts_with("❙  › Run "));
+        assert!(summary.line.spans.iter().any(|span| {
+            span.content == "❙  " && span.style.fg == Some(theme.accent_success)
+        }));
+        assert!(
+            summary.line.spans.iter().any(|span| {
+                span.content == "› " && span.style.fg == Some(theme.accent_success)
+            })
+        );
+        let target = HitTarget::TranscriptEntry(id);
+        let rect = Rect::new(3, 2, 60, 1);
+        ui.hit_map.insert(HitRegion {
+            target: target.clone(),
+            rect,
+            label: "› Run Query the current workspace".into(),
+            link: None,
+            priority: 10,
+        });
+        ui.geometry_lines.push(GeometryLine {
+            target,
+            line_index: 0,
+            text: "› Run Query the current workspace".into(),
+            rect,
+        });
+        let click = || MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        ui.handle_transcript_mouse(click());
+        assert_eq!(ui.status.as_deref(), Some("Selecting transcript"));
+        ui.handle_transcript_mouse(click());
+        assert_eq!(ui.status.as_deref(), Some("Toggled transcript fold"));
+        assert!(ui.last_transcript_click.is_none());
+        assert!(ui.selected_transcript.is_none());
+        assert_eq!(ui.transcript_width, None);
+
+        ui.scrollback_pane
+            .sync(&mut scrollback, 80, *Theme::current());
+        let expanded = ui
+            .scrollback_pane
+            .visible_lines(&mut scrollback, 0, 20)
+            .into_iter()
+            .map(|line| line.copy_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("⌄ Run Query the current workspace"));
+        assert!(expanded.contains("/work"));
+        assert!(expanded.contains("$ pwd"));
+        assert!(expanded.contains("exit 0"));
     }
 
     #[test]

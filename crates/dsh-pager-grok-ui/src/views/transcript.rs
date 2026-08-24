@@ -461,10 +461,15 @@ fn semantic_lines(
         theme.accent_error
     } else if projection.group_running || entry.finish == DshRenderFinish::Running {
         theme.accent_running
+    } else if !projection.group_header
+        && let Some(tool) = tool_block(entry)
+    {
+        tool_accent(tool, entry.finish, theme)
     } else {
         theme.accent_tool
     };
-    let collapsed_rail = projection.group_header && !projection.group_expanded;
+    let collapsed_rail = (projection.group_header && !projection.group_expanded)
+        || (entry.kind == DshRenderKind::ToolCall && projection.mode == DisplayMode::Collapsed);
     let markdown_total = semantic
         .iter()
         .filter(|line| line.markdown)
@@ -636,16 +641,13 @@ fn collapsed_block_line(
                 .fg(theme.fuzzy_accent)
                 .add_modifier(Modifier::BOLD),
         )),
-        DshRenderBlock::ToolCall { .. } => Line::from(Span::styled(
-            format!(
-                "{} {}",
-                crate::glyphs::diamond_filled(),
-                tool_header_text(block)
-            ),
-            Style::default()
-                .fg(tool_accent(block, entry.finish, theme))
-                .add_modifier(Modifier::BOLD),
-        )),
+        DshRenderBlock::ToolCall { .. } => tool_summary_line(
+            "",
+            "›",
+            &tool_header_text(block),
+            tool_accent(block, entry.finish, theme),
+            theme,
+        ),
         DshRenderBlock::ToolResult { is_error, .. } => Line::from(Span::styled(
             if *is_error {
                 "✗ result"
@@ -838,7 +840,12 @@ pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: The
             .fg(color_for_kind(kind, theme))
             .add_modifier(Modifier::BOLD);
     }
-    let color = if text.starts_with("▸ ") || text.starts_with("◆ ") || text.starts_with('✓') {
+    let color = if text.starts_with("▸ ")
+        || text.starts_with("› ")
+        || text.starts_with("⌄ ")
+        || text.starts_with("◆ ")
+        || text.starts_with('✓')
+    {
         theme.gray_bright
     } else if text.starts_with('✗') || text.starts_with("[unsupported") {
         theme.accent_user
@@ -862,11 +869,16 @@ pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
         match row.finish {
             DshRenderFinish::Running => theme.accent_running,
             DshRenderFinish::Failed => theme.accent_error,
-            _ => theme.gray_bright,
+            _ => theme.accent_success,
         }
     } else {
         color_for_kind(row.kind, theme)
     };
+    if row.kind == DshRenderKind::ToolCall && row.content.blocks.is_empty() && row.text.is_empty() {
+        let header = row.label.strip_prefix("› ").unwrap_or(&row.label);
+        return vec![tool_summary_line("", "›", header, color, theme)];
+    }
+
     let mut lines = if matches!(row.kind, DshRenderKind::User | DshRenderKind::Assistant) {
         Vec::new()
     } else {
@@ -932,11 +944,7 @@ fn projected_row(entry: &DshRenderEntry, mode: DisplayMode, width: usize) -> Opt
             .iter()
             .find(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
         {
-            row.label = format!(
-                "{} {}",
-                crate::glyphs::diamond_filled(),
-                tool_header_text(tool)
-            );
+            row.label = format!("› {}", tool_header_text(tool));
             row.text.clear();
             row.content = DshRenderContent::default();
             return Some(row);
@@ -1300,6 +1308,32 @@ fn diffstat(diffs: &[DshToolDiff]) -> (usize, usize) {
     })
 }
 
+fn normalized_run_description(description: &str) -> Option<String> {
+    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if description.is_empty() {
+        return None;
+    }
+    let description = description
+        .split_once(char::is_whitespace)
+        .filter(|(verb, rest)| {
+            (verb.eq_ignore_ascii_case("run") || verb.eq_ignore_ascii_case("running"))
+                && !rest.trim().is_empty()
+        })
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or(&description);
+    Some(description.to_string())
+}
+
+fn execute_content_description(content: &[DshRenderBlock]) -> Option<(usize, String)> {
+    content.iter().enumerate().find_map(|(index, block)| {
+        let text = match block {
+            DshRenderBlock::Markdown { text } | DshRenderBlock::Plain { text } => text,
+            _ => return None,
+        };
+        normalized_run_description(text).map(|description| (index, description))
+    })
+}
+
 fn tool_header_text(block: &DshRenderBlock) -> String {
     let DshRenderBlock::ToolCall {
         name, view, result, ..
@@ -1315,22 +1349,16 @@ fn tool_header_text(block: &DshRenderBlock) -> String {
         .or_else(|| view.as_ref().map(DshToolCallView::title))
         .unwrap_or(name);
     let mut label = match view {
-        Some(DshToolCallView::Terminal {
-            description: Some(description),
-            ..
-        }) if !description.trim().is_empty() => {
-            let description = description.trim();
-            let description = description
-                .split_once(char::is_whitespace)
-                .filter(|(verb, rest)| {
-                    (verb.eq_ignore_ascii_case("run") || verb.eq_ignore_ascii_case("running"))
-                        && !rest.trim().is_empty()
-                })
-                .map(|(_, rest)| rest.trim())
-                .unwrap_or(description);
-            format!("Run {description}")
+        Some(DshToolCallView::Terminal { description, .. }) => description
+            .as_deref()
+            .and_then(normalized_run_description)
+            .map(|description| format!("Run {description}"))
+            .unwrap_or_else(|| format!("$ {title}")),
+        Some(DshToolCallView::Generic { kind, content, .. }) if *kind == DshToolKind::Execute => {
+            execute_content_description(content)
+                .map(|(_, description)| format!("Run {description}"))
+                .unwrap_or_else(|| format!("$ {title}"))
         }
-        Some(DshToolCallView::Terminal { .. }) => format!("$ {title}"),
         _ => title.to_string(),
     };
     if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
@@ -1353,9 +1381,60 @@ fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) ->
         theme.accent_error
     } else if finish == DshRenderFinish::Running {
         theme.accent_running
+    } else if matches!(
+        block,
+        DshRenderBlock::ToolCall {
+            view: Some(view),
+            ..
+        } if view.kind() == DshToolKind::Execute
+    ) {
+        theme.accent_success
     } else {
         theme.gray_bright
     }
+}
+
+fn tool_summary_line(
+    prefix: &str,
+    marker: &str,
+    header: &str,
+    accent: Color,
+    theme: Theme,
+) -> Line<'static> {
+    let mut spans = Vec::with_capacity(4);
+    if !prefix.is_empty() {
+        spans.push(Span::raw(prefix.to_string()));
+    }
+    spans.push(Span::styled(
+        format!("{marker} "),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(description) = header.strip_prefix("Run ") {
+        spans.push(Span::styled(
+            "Run ",
+            Style::default()
+                .fg(theme.gray_bright)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            description.to_string(),
+            Style::default().fg(theme.text_primary),
+        ));
+    } else if let Some(command) = header.strip_prefix("$ ") {
+        spans.push(Span::styled("$ ", Style::default().fg(theme.gray_dim)));
+        spans.push(Span::styled(
+            command.to_string(),
+            Style::default().fg(theme.command),
+        ));
+    } else {
+        spans.push(Span::styled(
+            header.to_string(),
+            Style::default()
+                .fg(theme.gray_bright)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn push_panel_lines(
@@ -1406,16 +1485,13 @@ fn render_tool_call(
         Some(_) => DshRenderFinish::Completed,
         None => DshRenderFinish::Running,
     };
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{prefix}{} {}",
-            crate::glyphs::diamond_filled(),
-            tool_header_text(block)
-        ),
-        Style::default()
-            .fg(tool_accent(block, finish, theme))
-            .add_modifier(Modifier::BOLD),
-    )));
+    lines.push(tool_summary_line(
+        &prefix,
+        "⌄",
+        &tool_header_text(block),
+        tool_accent(block, finish, theme),
+        theme,
+    ));
 
     match view {
         Some(DshToolCallView::Terminal {
@@ -1490,22 +1566,40 @@ fn render_tool_call(
             }
         }
         Some(DshToolCallView::Generic {
-            raw_input, content, ..
+            kind,
+            raw_input,
+            content,
+            ..
         }) => {
+            let description_block = (*kind == DshToolKind::Execute)
+                .then(|| execute_content_description(content).map(|(index, _)| index))
+                .flatten();
             if let Some(raw_input) = raw_input {
-                let raw = raw_input.as_str().map(str::to_string).unwrap_or_else(|| {
+                let raw_is_command = *kind == DshToolKind::Execute && raw_input.as_str().is_some();
+                let mut raw = raw_input.as_str().map(str::to_string).unwrap_or_else(|| {
                     serde_json::to_string_pretty(raw_input)
                         .unwrap_or_else(|_| raw_input.to_string())
                 });
+                if raw_is_command {
+                    raw.insert_str(0, "$ ");
+                }
                 push_panel_lines(
                     lines,
                     &raw,
                     &format!("{prefix}  "),
-                    theme.text_secondary,
+                    if raw_is_command {
+                        theme.command
+                    } else {
+                        theme.text_secondary
+                    },
                     theme,
                 );
             }
-            render_tool_children(lines, content, theme, indent + 1);
+            for (index, child) in content.iter().enumerate() {
+                if Some(index) != description_block {
+                    render_block(lines, child, theme, indent + 1);
+                }
+            }
             match result.as_ref().and_then(|result| result.view.as_ref()) {
                 Some(DshToolResultView::Generic { content, .. }) => {
                     render_tool_children(lines, content, theme, indent + 1)
@@ -2193,7 +2287,7 @@ mod tests {
         let rich = RichTranscript::new(std::slice::from_ref(&entry), 80, theme);
         let initial = rich.visible_lines(0, 20);
         assert!(initial.iter().any(|line| line.copy_text == "◆ Thinking…"));
-        assert!(initial.iter().any(|line| line.copy_text == "◆ shell"));
+        assert!(initial.iter().any(|line| line.copy_text == "› shell"));
         assert!(initial.iter().any(|line| line.copy_text == "final answer"));
         assert!(
             !initial
@@ -2206,7 +2300,7 @@ mod tests {
                 .iter()
                 .filter(|line| line.block_index.is_some())
                 .filter(|line| {
-                    line.copy_text == "◆ Thinking…" || line.copy_text == "◆ shell"
+                    line.copy_text == "◆ Thinking…" || line.copy_text == "› shell"
                 })
                 .all(|line| line.rail)
         );
@@ -2520,7 +2614,7 @@ mod tests {
         for expected in [
             "markdown",
             "thinking",
-            "◆ shell",
+            "⌄ shell",
             "✗ result",
             "output",
             "[image: image/png]",
@@ -2583,7 +2677,7 @@ mod tests {
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(terminal_text.contains("◆ Run show workspace"));
+        assert!(terminal_text.contains("⌄ Run show workspace"));
         assert!(terminal_text.contains("$ pwd"));
         assert!(terminal_text.contains("/work"));
         assert!(terminal_text.contains("exit 0"));
@@ -2971,6 +3065,85 @@ mod tests {
                 .entries
                 .iter()
                 .all(|entry| entry.height > 0)
+        );
+    }
+
+    #[test]
+    fn generic_execute_uses_description_until_the_card_is_expanded() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "tool/call".into(),
+                seq: 50,
+                time: 1.0,
+                data: json!({
+                    "name": "bash",
+                    "callId": "call-50",
+                    "arguments": "{\"command\":\"node worker.js\"}"
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: Some(json!({
+                "for": "call",
+                "view": {
+                    "card": "generic",
+                    "title": "node worker.js",
+                    "kind": "execute",
+                    "rawInput": "node worker.js",
+                    "content": [{
+                        "type": "text",
+                        "text": "Run retry jobs and inspect recent worker logs"
+                    }]
+                }
+            })),
+        });
+
+        let theme = *Theme::current();
+        let id = DshRenderEntryId::Event { seq: 50 };
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, theme);
+        let collapsed = pane.visible_lines(&mut scrollback, 0, 20);
+        let summary = collapsed
+            .iter()
+            .find(|line| line.entry_id == id && line.selectable)
+            .expect("collapsed execute summary");
+        assert_eq!(
+            summary.copy_text,
+            "› Run retry jobs and inspect recent worker logs"
+        );
+        assert!(!summary.copy_text.contains("node worker.js"));
+        assert!(summary.line.to_string().starts_with("❙  › Run "));
+        assert!(
+            summary.line.spans.iter().any(|span| {
+                span.content == "› " && span.style.fg == Some(theme.accent_running)
+            })
+        );
+        assert!(summary.line.spans.iter().any(|span| {
+            span.content == "Run " && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(summary.line.spans.iter().any(|span| {
+            span.content == "retry jobs and inspect recent worker logs"
+                && !span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+
+        assert!(pane.toggle_fold_or_group(id));
+        pane.sync(&mut scrollback, 80, theme);
+        let expanded = pane.visible_lines(&mut scrollback, 0, 20);
+        let expanded_text = expanded
+            .iter()
+            .map(|line| line.copy_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded_text.contains("⌄ Run retry jobs and inspect recent worker logs"));
+        assert!(expanded_text.contains("$ node worker.js"));
+        assert_eq!(
+            expanded_text
+                .matches("retry jobs and inspect recent worker logs")
+                .count(),
+            1,
+            "the generic call description is promoted into the header, not repeated"
         );
     }
 

@@ -82,6 +82,8 @@ Grok 的核心枚举在 `crates/codegen/xai-grok-pager/src/scrollback/block.rs:3
 
 `ToolCallBlock`（`blocks/tool/mod.rs:210-274`）把折叠、运行态、完成态和分组委托给具体工具变体。Read/Edit/Search/Execute/Web 等使用不同组件绘制参数、diff、stdout、引用和错误；它们可以在 collapsed 状态下形成密集工具组。工具结果不是普通 assistant 文本，应该保持 tool result 语义，以便错误颜色、复制和后续折叠都正确。
 
+Execute 还必须保留 `tool/execute.rs` 的两层信息结构：Harness 提供 `description` 时，collapsed 行只显示 `› Run {description}`，不把命令正文当作摘要；expanded 行使用 `⌄` 并追加 `$ command`、cwd、stdout/stderr 与退出状态。前台 bash 的说明来自 terminal card `description`，后台 bash 的说明来自 generic execute card 的 call content；两者都由同一个 DSH-neutral 工具卡片渲染 seam 消费。单击只选择该行，双击相同 hit target 才切换这两层展示。
+
 #### System 与 ContextInfo
 
 `SystemMessageBlock`（`blocks/system.rs:25-94`）和 `ContextInfoBlock`（`blocks/context_info.rs:596-663`）都具有以下特征：
@@ -431,7 +433,7 @@ PTY 场景至少跑 80x24 和窄屏；记录事件 seq、turn/step、surface id�
 - 没有 terminal finalize，任何 streaming snapshot 都可能停在 `partial=true`；
 - 没有 stable surface id，final replacement 会造成 transcript 重排，后续 sticky/group/selection 都不可靠。
 
-当前实现已完成 Phase 0 的 DTO/fixture 基线、Phase 1 的 stable surface/finalize seam、Phase 2 的默认 Hidden/Collapsed 单条 entry context projection，并已把 Phase 3 的工具 vertical slice 接入默认生产路径：UserPrompt/AgentMessage 使用不同的 view wrapper；同一 `callId` 的 `tool/call` 与 `tool/result` 原位更新同一个 running/completed/failed surface；Harness 的 `terminal/diff/read/search/web/generic` presentation view 会投影为分类型工具卡片；Read/Search/Web 等非破坏性工具使用 Grok 风格的 tense-aware semantic verb header、零高度折叠成员和状态色 rail，Execute/Edit 保持独立并打断 verb run；缺少 view 或关联 ID 时仍保留可复制的原始回退。回放顺序反转、结构化 view、卡片渲染和分组边界已有单测。special-tool viewer、完整 ContextGroup/ThoughtMember 交互、运行波纹动画、语法高亮/上下文 diff、三击语义、geometry golden，以及 P19-A/P19-B/P20 的真实 DeepSeek Harness 采样仍未执行，因此不能宣称完整 renderer parity 或真实 backend 验收已经完成。
+当前实现已完成 Phase 0 的 DTO/fixture 基线、Phase 1 的 stable surface/finalize seam、Phase 2 的默认 Hidden/Collapsed 单条 entry context projection，并已把 Phase 3 的工具 vertical slice 接入默认生产路径：UserPrompt/AgentMessage 使用不同的 view wrapper；同一 `callId` 的 `tool/call` 与 `tool/result` 原位更新同一个 running/completed/failed surface；Harness 的 `terminal/diff/read/search/web/generic` presentation view 会投影为分类型工具卡片；Read/Search/Web 等非破坏性工具使用 Grok 风格的 tense-aware semantic verb header、零高度折叠成员和状态色 rail，Execute/Edit 保持独立并打断 verb run；Execute 已支持前台 terminal 与后台 generic 两种说明来源，折叠态显示 `› Run {description}`，双击后显示 `⌄`、命令、cwd、输出和退出状态，且运行时鼠标测试覆盖单击选择/双击切换；缺少 view 或关联 ID 时仍保留可复制的原始回退。回放顺序反转、结构化 view、卡片渲染、分组边界和 Execute 双击详情已有单测。special-tool viewer、完整 ContextGroup/ThoughtMember 交互、运行波纹动画、语法高亮/上下文 diff、三击语义、geometry golden，以及 P19-A/P19-B/P20 的真实 DeepSeek Harness 采样仍未执行，因此不能宣称完整 renderer parity 或真实 backend 验收已经完成。
 
 本次真实 Grok 调研补齐了原方案此前不够硬的三类验收：
 
