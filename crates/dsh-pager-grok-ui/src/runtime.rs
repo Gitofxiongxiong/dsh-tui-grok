@@ -3084,7 +3084,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_execute_double_click_expands_command_output_and_status() {
+    fn transcript_execute_double_click_uses_grok_component_for_command_and_output() {
         let mut scrollback = Scrollback::default();
         scrollback.apply_event(&HistoryEntry {
             event: SessionEvent {
@@ -3200,7 +3200,7 @@ mod tests {
         assert!(expanded.contains("⌄ Run Query the current workspace"));
         assert!(expanded.contains("/work"));
         assert!(expanded.contains("$ pwd"));
-        assert!(expanded.contains("exit 0"));
+        assert!(!expanded.contains("exit 0"));
     }
 
     #[test]

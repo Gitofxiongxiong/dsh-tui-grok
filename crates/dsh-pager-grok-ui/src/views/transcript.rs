@@ -18,6 +18,10 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::views::execute_tool::{
+    DisplayMode as ExecuteDisplayMode, ExecuteBlockContext, ExecuteBlockLine,
+};
+use crate::views::execute_tool_adapter::project_execute_tool;
 use crate::{host_adapter::TranscriptRow, render::wrapping::word_wrap_line, theme::Theme};
 
 /// A rich line after semantic block rendering and terminal-width wrapping.
@@ -410,7 +414,26 @@ fn semantic_lines(
     let Some(row) = projected_row(entry, projection.mode, width) else {
         return Vec::new();
     };
-    let semantic = render_semantic_lines(entry, &row, theme, expanded_blocks);
+    let semantic = if projection.mode == DisplayMode::Collapsed
+        && entry.kind == DshRenderKind::ToolCall
+        && let Some(tool) = tool_block(entry)
+        && let Some(line) = execute_summary_line(
+            tool,
+            entry.finish,
+            theme,
+            width.saturating_sub(ENTRY_CHROME_WIDTH),
+        ) {
+        vec![SemanticLine {
+            line,
+            block_index: None,
+            rail: true,
+            header: true,
+            selectable: true,
+            markdown: false,
+        }]
+    } else {
+        render_semantic_lines(entry, &row, theme, width, expanded_blocks)
+    };
     let mut semantic = semantic;
     if projection.group_header {
         let label = group_header_label(
@@ -641,13 +664,16 @@ fn collapsed_block_line(
                 .fg(theme.fuzzy_accent)
                 .add_modifier(Modifier::BOLD),
         )),
-        DshRenderBlock::ToolCall { .. } => tool_summary_line(
-            "",
-            "›",
-            &tool_header_text(block),
-            tool_accent(block, entry.finish, theme),
-            theme,
-        ),
+        DshRenderBlock::ToolCall { .. } => execute_summary_line(block, entry.finish, theme, 120)
+            .unwrap_or_else(|| {
+                tool_summary_line(
+                    "",
+                    "›",
+                    &tool_header_text(block),
+                    tool_accent(block, entry.finish, theme),
+                    theme,
+                )
+            }),
         DshRenderBlock::ToolResult { is_error, .. } => Line::from(Span::styled(
             if *is_error {
                 "✗ result"
@@ -672,13 +698,14 @@ fn render_semantic_lines(
     entry: &DshRenderEntry,
     row: &TranscriptRow,
     theme: Theme,
+    width: usize,
     expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
 ) -> Vec<SemanticLine> {
     let has_foldable_blocks = row.kind == DshRenderKind::Assistant
         && (entry.group_key.is_some() || row.content.blocks.len() > 1)
         && row.content.blocks.iter().any(is_local_foldable_block);
     if !has_foldable_blocks {
-        return render_row(row, theme)
+        return render_row_at_width(row, theme, width.saturating_sub(ENTRY_CHROME_WIDTH))
             .into_iter()
             .enumerate()
             .map(|(index, line)| SemanticLine {
@@ -722,7 +749,13 @@ fn render_semantic_lines(
             vec![collapsed_block_line(block, entry, theme)]
         } else {
             let mut rendered = Vec::new();
-            render_block(&mut rendered, block, theme, 0);
+            render_block(
+                &mut rendered,
+                block,
+                theme,
+                0,
+                width.saturating_sub(ENTRY_CHROME_WIDTH),
+            );
             rendered
         };
         let rail = is_operational_block(block);
@@ -865,6 +898,10 @@ pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: The
 /// Grok block widgets. User and assistant messages render their content
 /// directly; operational rows retain a stable semantic header.
 pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
+    render_row_at_width(row, theme, 120)
+}
+
+fn render_row_at_width(row: &TranscriptRow, theme: Theme, width: usize) -> Vec<Line<'static>> {
     let color = if row.kind == DshRenderKind::ToolCall {
         match row.finish {
             DshRenderFinish::Running => theme.accent_running,
@@ -913,7 +950,7 @@ pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
         push_plain_lines(&mut lines, &row.text, Style::default().fg(color), "");
     } else {
         for block in &row.content.blocks {
-            render_block(&mut lines, block, theme, 0);
+            render_block(&mut lines, block, theme, 0, width);
         }
     }
     lines
@@ -1308,33 +1345,22 @@ fn diffstat(diffs: &[DshToolDiff]) -> (usize, usize) {
     })
 }
 
-fn normalized_run_description(description: &str) -> Option<String> {
-    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
-    if description.is_empty() {
-        return None;
-    }
-    let description = description
-        .split_once(char::is_whitespace)
-        .filter(|(verb, rest)| {
-            (verb.eq_ignore_ascii_case("run") || verb.eq_ignore_ascii_case("running"))
-                && !rest.trim().is_empty()
-        })
-        .map(|(_, rest)| rest.trim())
-        .unwrap_or(&description);
-    Some(description.to_string())
-}
-
-fn execute_content_description(content: &[DshRenderBlock]) -> Option<(usize, String)> {
-    content.iter().enumerate().find_map(|(index, block)| {
-        let text = match block {
-            DshRenderBlock::Markdown { text } | DshRenderBlock::Plain { text } => text,
-            _ => return None,
-        };
-        normalized_run_description(text).map(|description| (index, description))
-    })
-}
-
 fn tool_header_text(block: &DshRenderBlock) -> String {
+    if let Some(execute) = project_execute_tool(block) {
+        let theme = Theme::current();
+        let is_running = matches!(block, DshRenderBlock::ToolCall { result: None, .. });
+        let output = execute.output(&ExecuteBlockContext::new(
+            ExecuteDisplayMode::Collapsed,
+            is_running,
+            4096,
+            theme,
+        ));
+        return output
+            .lines
+            .first()
+            .map(|line| line.content.to_string())
+            .unwrap_or_else(|| "Run …".to_string());
+    }
     let DshRenderBlock::ToolCall {
         name, view, result, ..
     } = block
@@ -1348,19 +1374,7 @@ fn tool_header_text(block: &DshRenderBlock) -> String {
     let title = completed_title
         .or_else(|| view.as_ref().map(DshToolCallView::title))
         .unwrap_or(name);
-    let mut label = match view {
-        Some(DshToolCallView::Terminal { description, .. }) => description
-            .as_deref()
-            .and_then(normalized_run_description)
-            .map(|description| format!("Run {description}"))
-            .unwrap_or_else(|| format!("$ {title}")),
-        Some(DshToolCallView::Generic { kind, content, .. }) if *kind == DshToolKind::Execute => {
-            execute_content_description(content)
-                .map(|(_, description)| format!("Run {description}"))
-                .unwrap_or_else(|| format!("$ {title}"))
-        }
-        _ => title.to_string(),
-    };
+    let mut label = title.to_string();
     if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
         let (added, removed) = diffstat(diffs);
         if added > 0 || removed > 0 {
@@ -1371,6 +1385,15 @@ fn tool_header_text(block: &DshRenderBlock) -> String {
 }
 
 fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) -> Color {
+    if let Some(execute) = project_execute_tool(block) {
+        let context = ExecuteBlockContext::new(
+            ExecuteDisplayMode::Collapsed,
+            finish == DshRenderFinish::Running,
+            80,
+            &theme,
+        );
+        return execute.accent(&context);
+    }
     let failed = match block {
         DshRenderBlock::ToolCall { result, .. } => {
             result.as_deref().is_some_and(|result| result.is_error)
@@ -1392,6 +1415,31 @@ fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) ->
     } else {
         theme.gray_bright
     }
+}
+
+fn execute_summary_line(
+    block: &DshRenderBlock,
+    finish: DshRenderFinish,
+    theme: Theme,
+    width: usize,
+) -> Option<Line<'static>> {
+    let execute = project_execute_tool(block)?;
+    let context = ExecuteBlockContext::new(
+        ExecuteDisplayMode::Collapsed,
+        finish == DshRenderFinish::Running,
+        width.saturating_sub(2).max(1),
+        &theme,
+    );
+    let accent = execute.accent(&context);
+    let mut line = execute.output(&context).lines.into_iter().next()?.content;
+    line.spans.insert(
+        0,
+        Span::styled(
+            "› ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+    );
+    Some(line)
 }
 
 fn tool_summary_line(
@@ -1457,10 +1505,97 @@ fn render_tool_children(
     blocks: &[DshRenderBlock],
     theme: Theme,
     indent: usize,
+    width: usize,
 ) {
     for child in blocks {
-        render_block(lines, child, theme, indent);
+        render_block(lines, child, theme, indent, width);
     }
+}
+
+fn paint_execute_component_line(
+    mut component_line: ExecuteBlockLine,
+    prefix: &str,
+    first: bool,
+    accent: Color,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    let mut spans = Vec::with_capacity(component_line.content.spans.len() + 3);
+    if !prefix.is_empty() {
+        spans.push(Span::raw(prefix.to_string()));
+    }
+    if first {
+        spans.push(Span::styled(
+            "⌄ ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(background) = component_line.panel_background {
+        spans.push(Span::styled("  ", Style::default().bg(background)));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+    if let Some(background) = component_line.panel_background {
+        for span in &mut component_line.content.spans {
+            span.style = span.style.bg(background);
+        }
+    }
+    spans.extend(component_line.content.spans);
+    let mut line = Line::from(spans);
+    if let Some(background) = component_line.panel_background {
+        let used = line.width();
+        if used < width {
+            line.spans.push(Span::styled(
+                " ".repeat(width - used),
+                Style::default().bg(background),
+            ));
+        }
+    } else if !first && line.spans.len() == usize::from(!prefix.is_empty()) + 1 {
+        line.spans
+            .push(Span::styled("", Style::default().fg(theme.text_primary)));
+    }
+    line
+}
+
+fn render_execute_tool_call(
+    lines: &mut Vec<Line<'static>>,
+    block: &DshRenderBlock,
+    theme: Theme,
+    indent: usize,
+    width: usize,
+) -> bool {
+    let Some(execute) = project_execute_tool(block) else {
+        return false;
+    };
+    let finish = match block {
+        DshRenderBlock::ToolCall {
+            result: Some(result),
+            ..
+        } if result.is_error => DshRenderFinish::Failed,
+        DshRenderBlock::ToolCall {
+            result: Some(_), ..
+        } => DshRenderFinish::Completed,
+        _ => DshRenderFinish::Running,
+    };
+    let prefix = " ".repeat(indent.saturating_mul(2));
+    let component_width = width.saturating_sub(prefix.len()).saturating_sub(2).max(1);
+    let context = ExecuteBlockContext::new(
+        ExecuteDisplayMode::Expanded,
+        finish == DshRenderFinish::Running,
+        component_width,
+        &theme,
+    );
+    let accent = execute.accent(&context);
+    for (index, component_line) in execute.output(&context).lines.into_iter().enumerate() {
+        lines.push(paint_execute_component_line(
+            component_line,
+            &prefix,
+            index == 0,
+            accent,
+            width,
+            theme,
+        ));
+    }
+    true
 }
 
 fn render_tool_call(
@@ -1468,7 +1603,11 @@ fn render_tool_call(
     block: &DshRenderBlock,
     theme: Theme,
     indent: usize,
+    width: usize,
 ) {
+    if render_execute_tool_call(lines, block, theme, indent, width) {
+        return;
+    }
     let DshRenderBlock::ToolCall {
         arguments,
         edit,
@@ -1494,63 +1633,11 @@ fn render_tool_call(
     ));
 
     match view {
-        Some(DshToolCallView::Terminal {
-            title,
-            description,
-            cwd,
-        }) => {
-            if let Some(cwd) = cwd {
-                lines.push(Line::from(Span::styled(
-                    format!("{prefix}  {cwd}"),
-                    Style::default().fg(theme.gray_dim),
-                )));
-            }
-            if description
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                push_panel_lines(
-                    lines,
-                    &format!("$ {title}"),
-                    &format!("{prefix}  "),
-                    theme.command,
-                    theme,
-                );
-            }
-            if let Some(DshToolResultView::Terminal {
-                output,
-                exit_code,
-                signal,
-                ..
-            }) = result.as_ref().and_then(|result| result.view.as_ref())
-            {
-                if let Some(output) = output {
-                    push_panel_lines(
-                        lines,
-                        output,
-                        &format!("{prefix}  "),
-                        theme.text_secondary,
-                        theme,
-                    );
-                }
-                if let Some(status) = signal
-                    .as_deref()
-                    .map(|signal| format!("signal {signal}"))
-                    .or_else(|| exit_code.map(|code| format!("exit {code}")))
-                {
-                    lines.push(Line::from(Span::styled(
-                        format!("{prefix}  {status}"),
-                        Style::default().fg(if result.as_ref().is_some_and(|r| r.is_error) {
-                            theme.accent_error
-                        } else {
-                            theme.accent_success
-                        }),
-                    )));
-                }
-            } else if let Some(result) = result {
-                render_tool_children(lines, &result.blocks, theme, indent + 1);
-            }
-        }
+        // Terminal cards are always projected into ExecuteToolCallBlock by
+        // `render_execute_tool_call` above. Keeping this arm data-only makes a
+        // future enum extension exhaustive without reintroducing a second
+        // terminal renderer here.
+        Some(DshToolCallView::Terminal { .. }) => {}
         Some(DshToolCallView::Diff { .. }) => {
             if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
                 for diff in diffs {
@@ -1566,43 +1653,25 @@ fn render_tool_call(
             }
         }
         Some(DshToolCallView::Generic {
-            kind,
-            raw_input,
-            content,
-            ..
+            raw_input, content, ..
         }) => {
-            let description_block = (*kind == DshToolKind::Execute)
-                .then(|| execute_content_description(content).map(|(index, _)| index))
-                .flatten();
             if let Some(raw_input) = raw_input {
-                let raw_is_command = *kind == DshToolKind::Execute && raw_input.as_str().is_some();
-                let mut raw = raw_input.as_str().map(str::to_string).unwrap_or_else(|| {
+                let raw = raw_input.as_str().map(str::to_string).unwrap_or_else(|| {
                     serde_json::to_string_pretty(raw_input)
                         .unwrap_or_else(|_| raw_input.to_string())
                 });
-                if raw_is_command {
-                    raw.insert_str(0, "$ ");
-                }
                 push_panel_lines(
                     lines,
                     &raw,
                     &format!("{prefix}  "),
-                    if raw_is_command {
-                        theme.command
-                    } else {
-                        theme.text_secondary
-                    },
+                    theme.text_secondary,
                     theme,
                 );
             }
-            for (index, child) in content.iter().enumerate() {
-                if Some(index) != description_block {
-                    render_block(lines, child, theme, indent + 1);
-                }
-            }
+            render_tool_children(lines, content, theme, indent + 1, width);
             match result.as_ref().and_then(|result| result.view.as_ref()) {
                 Some(DshToolResultView::Generic { content, .. }) => {
-                    render_tool_children(lines, content, theme, indent + 1)
+                    render_tool_children(lines, content, theme, indent + 1, width)
                 }
                 Some(DshToolResultView::Read {
                     path,
@@ -1738,7 +1807,7 @@ fn render_tool_call(
                         ),
                     ]));
                     if let Some(result) = result {
-                        render_tool_children(lines, &result.blocks, theme, indent + 1);
+                        render_tool_children(lines, &result.blocks, theme, indent + 1, width);
                     }
                 }
                 Some(DshToolResultView::Diff { diffs, .. }) => {
@@ -1756,7 +1825,7 @@ fn render_tool_call(
                 Some(DshToolResultView::Terminal { .. }) => {}
                 None => {
                     if let Some(result) = result {
-                        render_tool_children(lines, &result.blocks, theme, indent + 1);
+                        render_tool_children(lines, &result.blocks, theme, indent + 1, width);
                     }
                 }
             }
@@ -1776,7 +1845,7 @@ fn render_tool_call(
                 );
             }
             if let Some(result) = result {
-                render_tool_children(lines, &result.blocks, theme, indent + 1);
+                render_tool_children(lines, &result.blocks, theme, indent + 1, width);
             }
         }
     }
@@ -1787,6 +1856,7 @@ fn render_block(
     block: &DshRenderBlock,
     theme: Theme,
     indent: usize,
+    width: usize,
 ) {
     let prefix = " ".repeat(indent.saturating_mul(2));
     match block {
@@ -1825,7 +1895,7 @@ fn render_block(
                 Style::default().fg(theme.accent_assistant),
             )));
         }
-        DshRenderBlock::ToolCall { .. } => render_tool_call(lines, block, theme, indent),
+        DshRenderBlock::ToolCall { .. } => render_tool_call(lines, block, theme, indent, width),
         DshRenderBlock::ToolResult {
             blocks, is_error, ..
         } => {
@@ -1845,7 +1915,7 @@ fn render_block(
                 }),
             )));
             for child in blocks {
-                render_block(lines, child, theme, indent + 1);
+                render_block(lines, child, theme, indent + 1, width);
             }
         }
         DshRenderBlock::Diff {
@@ -2680,7 +2750,7 @@ mod tests {
         assert!(terminal_text.contains("⌄ Run show workspace"));
         assert!(terminal_text.contains("$ pwd"));
         assert!(terminal_text.contains("/work"));
-        assert!(terminal_text.contains("exit 0"));
+        assert!(!terminal_text.contains("exit 0"));
         assert!(
             terminal
                 .iter()

@@ -7,6 +7,9 @@ pub mod file_search {
 pub mod agent;
 pub mod agent_panes;
 pub mod dashboard;
+#[path = "../../vendor/grok/xai-grok-pager/src/scrollback/blocks/tool/execute.rs"]
+pub mod execute_tool;
+pub mod execute_tool_adapter;
 pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]
 #[allow(dead_code)]
