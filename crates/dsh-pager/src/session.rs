@@ -83,6 +83,8 @@ pub struct PendingInteraction {
     #[serde(default)]
     pub approval_id: Option<String>,
     #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
     pub tool_name: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
@@ -94,6 +96,7 @@ impl PendingInteraction {
     pub fn approval(
         request_id: String,
         approval_id: String,
+        call_id: Option<String>,
         tool_name: Option<String>,
         reason: Option<String>,
     ) -> Self {
@@ -101,6 +104,7 @@ impl PendingInteraction {
             request_id,
             kind: InteractionKind::Approval,
             approval_id: Some(approval_id),
+            call_id,
             tool_name,
             reason,
             questions: Vec::new(),
@@ -112,6 +116,7 @@ impl PendingInteraction {
             request_id,
             kind: InteractionKind::Question,
             approval_id: None,
+            call_id: None,
             tool_name: None,
             reason: None,
             questions,
@@ -390,6 +395,7 @@ impl SessionState {
                         .approval_id
                         .clone()
                         .unwrap_or_else(|| "unknown-approval".into()),
+                    call_id: pending.call_id.clone(),
                     tool_name: pending.tool_name.clone(),
                     reason: pending.reason.clone(),
                 },
@@ -647,6 +653,7 @@ impl SessionState {
                 let DshInteraction::Approval {
                     request_id,
                     approval_id,
+                    call_id,
                     tool_name,
                     reason,
                 } = interaction
@@ -657,6 +664,7 @@ impl SessionState {
                 let changed = self.upsert_interaction(PendingInteraction::approval(
                     request_id,
                     approval_id,
+                    call_id,
                     Some(tool.clone()),
                     reason,
                 ));
@@ -1279,6 +1287,7 @@ mod tests {
                     "sessionId": "s",
                     "requestId": "rpc-1",
                     "approvalId": "approval-1",
+                    "callId": "call-approval",
                     "toolName": "bash"
                 })),
             })
@@ -1295,7 +1304,11 @@ mod tests {
         assert_eq!(model.queue_revision, 1);
         assert!(matches!(
             model.interaction,
-            Some(DshInteraction::Approval { ref request_id, .. }) if request_id == "rpc-1"
+            Some(DshInteraction::Approval {
+                ref request_id,
+                call_id: Some(ref call_id),
+                ..
+            }) if request_id == "rpc-1" && call_id == "call-approval"
         ));
         assert!(state.presentation_controls().entries.is_empty());
         assert_eq!(state.presentation_controls().queue[0].id, "q1");

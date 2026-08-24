@@ -508,7 +508,7 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 | M4 scrollback/blocks | ◐ 部分完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 Grok scrollback/block renderer、reference golden、selection/link map 和 50k 性能门禁 | 完成 M4.1-M4.8 rich renderer/reference/selection/perf |
 | M5 prompt | ◐ 部分完成（completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；完整 Grok prompt widget、外部进程真实 terminal handoff 与 mouse-selection golden 仍缺 | 完成 M5 prompt widget/state/effect parity |
 | M6 picker/dashboard | ◐ 部分完成（completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；真实双 session race、完整 Grok picker/list pane 和 reference golden 仍缺 | 完成 M6.1-M6.8 multi-session/reference parity |
-| M7 queue/interactions | ◐ 部分完成（completion slice） | queue/interaction effect RPC errors 已映射 conflict/stale/timeout/unsupported/failed receipt；status 文案、Dashboard jobs/status 和基础 queue/approval 行为测试已接入；完整 reorder drag、复杂 question 表单、完整 Grok pane 和 reference matrix 仍缺 | 完成 M7.1-M7.8 queue/interaction/status parity |
+| M7 queue/interactions | ◐ 部分完成（completion slice） | queue/interaction effect RPC errors 已映射 conflict/stale/timeout/unsupported/failed receipt；approval 已使用 Grok-derived composer blocking card、callId tool 关联、radio/Tab/数字/鼠标和 Esc park-focus；status、Dashboard jobs/status 已接入；完整 reorder drag、复杂 question 表单、always-approve host contract 和 reference matrix 仍缺 | 完成 M7.1-M7.8 queue/interaction/status parity |
 | M8 mouse/media | ◐ 部分完成（completion slice） | `HitMap` 在 render-time 统一产出 entry/block/prompt 命中矩形；selection 使用 grapheme/display column，resize 清空旧 map；OSC52/system clipboard、OSC8 link、image placeholder 和 mouse fallback 有 typed capability 路径；完整 Grok mouse/selection/media golden 和旧 fallback 删除仍缺 | 完成 M8.1-M8.8 Grok geometry/capability parity |
 | M9 lifecycle/performance | ◐ 部分完成（completion slice） | runtime notification drain 每帧受 256 条预算约束并记录 scheduler stats；`BoundedScheduler`、`GenerationGuard`、指数退避/上限 reconnect policy、late-result 拒绝和 reader/terminal restore 有单测与 mock lifecycle 证据；真实长时 soak、双 session race 和生产性能指标仍缺 | 完成 M9.1-M9.8 real soak/performance/restore parity |
 | M10 parity/release | ◐ 部分完成（semantic/reference gate） | `ReferenceRunner` 固定 40×12 至 160×50 六档尺寸、12 状态、9 输入（648 cases），manifest 与 Rust/Python 校验器、mock PTY full path、source/protocol checks 已接入 `scripts/e2e.sh`；真实 Harness hello/load/PTY 和 Flash prompt smoke 已通过，但尚未完成真实 Grok reference 对照、完整 stream/queue/interaction/reconnect/detach 矩阵 | 完成 M10.1-M10.8 reference、real matrix 和差异清单 |
@@ -823,6 +823,13 @@ control plane，处理异步切换的身份安全。
 
 **出口**：所有主要异步交互都有 Grok UI 状态机和 DSH authoritative effect，
 而不是散落在 runtime 的布尔值和临时字符串中。
+
+**本批次证据（2026-08-24）**：Harness `approval/requested.callId` 已保留到
+`DshInteraction` 并关联已呈现的 tool call；默认 approval 路径使用 Grok-derived
+permission card 接管 composer，覆盖高度上限、accent rail、radio rows、Tab/数字键、
+鼠标 hit rows、pending 防重复提交和 Esc park-to-scrollback。DSH 的审批 vocabulary
+仍只有 `allowed-once`/`rejected`，因此未伪造 Grok always-approve/grant persistence；
+完整 Grok question view 和 reference runner 对照仍未闭合。
 
 ### M8：鼠标、选择、复制、链接、媒体和高级终端能力
 

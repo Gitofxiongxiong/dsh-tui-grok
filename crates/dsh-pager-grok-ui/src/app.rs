@@ -26,6 +26,7 @@ pub enum Overlay {
     None,
     Picker,
     Queue,
+    Permission,
     Interaction,
     FileSearch,
     ImagePreview,
@@ -57,6 +58,7 @@ impl Overlay {
             Self::None => KeyOwner::Transcript,
             Self::Picker => KeyOwner::Picker,
             Self::Queue => KeyOwner::Queue,
+            Self::Permission => KeyOwner::Interaction,
             Self::Interaction => KeyOwner::Interaction,
             Self::FileSearch => KeyOwner::FileSearch,
             Self::ImagePreview => KeyOwner::ImagePreview,
@@ -249,7 +251,7 @@ impl AppShell {
         ShellSnapshot {
             owner: self.owner,
             overlay: self.overlay,
-            dim_layer: self.overlay != Overlay::None,
+            dim_layer: !matches!(self.overlay, Overlay::None | Overlay::Permission),
             z_order: if self.overlay == Overlay::None {
                 Vec::new()
             } else {
@@ -294,6 +296,26 @@ impl AppShell {
         self.previous_owner = self.owner;
         self.overlay = Overlay::Interaction;
         self.owner = KeyOwner::Interaction;
+    }
+
+    pub fn open_permission(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::Permission;
+        self.owner = KeyOwner::Interaction;
+    }
+
+    /// Match Grok's permission-card Esc rung: keep the blocking card visible
+    /// while handing keyboard ownership to scrollback.
+    pub fn park_permission(&mut self) {
+        if self.overlay == Overlay::Permission {
+            self.owner = KeyOwner::Transcript;
+        }
+    }
+
+    pub fn focus_permission(&mut self) {
+        if self.overlay == Overlay::Permission {
+            self.owner = KeyOwner::Interaction;
+        }
     }
 
     pub fn open_file_search(&mut self) {
@@ -346,6 +368,9 @@ impl AppShell {
                 if self.overlay == Overlay::Interaction {
                     return ShellAction::InteractionMouse(mouse);
                 }
+                if self.overlay == Overlay::Permission {
+                    return ShellAction::InteractionMouse(mouse);
+                }
                 if self.overlay == Overlay::FileSearch {
                     return ShellAction::FileSearchMouse(mouse);
                 }
@@ -380,6 +405,22 @@ impl AppShell {
             }
             if self.overlay == Overlay::Interaction {
                 return ShellAction::InteractionKey(key);
+            }
+            if self.overlay == Overlay::Permission {
+                if self.owner == KeyOwner::Interaction {
+                    return ShellAction::InteractionKey(key);
+                }
+                return match key.code {
+                    KeyCode::Char('i') | KeyCode::Enter | KeyCode::Tab => {
+                        self.focus_permission();
+                        ShellAction::OpenInteraction
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => ShellAction::ScrollUp(1),
+                    KeyCode::Down | KeyCode::Char('j') => ShellAction::ScrollDown(1),
+                    KeyCode::PageUp => ShellAction::ScrollUp(8),
+                    KeyCode::PageDown => ShellAction::ScrollDown(8),
+                    _ => ShellAction::None,
+                };
             }
             if self.overlay == Overlay::FileSearch {
                 return ShellAction::FileSearchKey(key);
@@ -616,6 +657,29 @@ mod tests {
         assert_eq!(overlay.z_order, vec![Overlay::Picker]);
         assert_eq!(overlay.cursor_owner, KeyOwner::Picker);
         assert!(KeyOwner::Interaction.priority() < KeyOwner::Prompt.priority());
+    }
+
+    #[test]
+    fn permission_card_parks_focus_without_closing_or_dimming() {
+        let mut shell = AppShell::default();
+        shell.open_permission();
+        let focused = shell.snapshot();
+        assert_eq!(focused.overlay, Overlay::Permission);
+        assert_eq!(focused.cursor_owner, KeyOwner::Interaction);
+        assert!(!focused.dim_layer);
+
+        shell.park_permission();
+        assert_eq!(shell.overlay(), Overlay::Permission);
+        assert_eq!(shell.owner(), KeyOwner::Transcript);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Down)), true),
+            ShellAction::ScrollDown(1)
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Enter)), true),
+            ShellAction::OpenInteraction
+        );
+        assert_eq!(shell.owner(), KeyOwner::Interaction);
     }
 
     #[test]

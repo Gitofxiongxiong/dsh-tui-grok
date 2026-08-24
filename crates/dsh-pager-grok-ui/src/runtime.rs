@@ -44,7 +44,7 @@ use crate::host_adapter::{
     AgentSnapshot, FeatureStatus, FileSearchRow, FileSearchSnapshot, GrokHostSnapshot,
     MediaSnapshot,
 };
-use crate::input::{PromptEditor, line_editor::LineEditOutcome};
+use crate::input::{PromptEditor, key::KeyShortcut, line_editor::LineEditOutcome};
 use crate::media::{
     MediaPreviewBuffer, MediaPreviewController, MediaPreviewDecision, render_image_preview_content,
 };
@@ -63,10 +63,13 @@ use crate::views::{
     context_bar::context_bar_line,
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
     file_search::{controller::FileSearchController, line_viewer::render_file_search_content},
-    interaction::{render_interaction_content, response_for},
+    interaction::{approval_outcome, permission_state, render_question_content, response_for},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
         render_modal_window,
+    },
+    permission_view::{
+        PermissionChoice, PermissionViewState, permission_view_height, render_permission_view,
     },
     picker::{
         PickerConfig, PickerEntry, PickerMode, PickerOutcome, PickerState, handle_picker_input,
@@ -77,6 +80,7 @@ use crate::views::{
     },
     prompt_widget::GrokPromptRenderer,
     queue::{QueueRenderState, moved_selection, render_queue_content},
+    shortcuts_bar::{HintItem, ShortcutsBar},
     status_bar::StatusBar,
     suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
@@ -89,6 +93,10 @@ use xai_ratatui_textarea::MouseAction;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NOTIFICATION_BUDGET: usize = 256;
 const TRANSCRIPT_DOUBLE_CLICK: Duration = Duration::from_millis(450);
+
+fn contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+}
 
 #[derive(Debug, Clone)]
 struct PendingQueueMutation {
@@ -265,6 +273,11 @@ struct UiState {
     interaction_request_id: Option<DshRequestId>,
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
+    interaction_args_expanded: bool,
+    permission_area: Rect,
+    permission_option_rows: Vec<Rect>,
+    hovered_permission_item: Option<usize>,
+    last_permission_click: Option<(Instant, usize)>,
     file_search_editor: PromptEditor,
     file_search: FileSearchController,
     suggestions: SuggestionController,
@@ -384,7 +397,10 @@ impl UiState {
             });
         }
         if matches!(completion.effect, UiEffect::RespondInteraction { .. })
-            && completion.receipt.status == UiEffectStatus::Accepted
+            && !matches!(
+                completion.receipt.status,
+                UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+            )
         {
             self.interaction_pending = None;
         }
@@ -432,9 +448,6 @@ impl UiState {
         snapshot.agent.subagents = self.agent_subagents.clone();
         self.agent_pane.sync(&snapshot.agent);
         self.reconcile_snapshot(&snapshot);
-        let suggestion_rows = self
-            .suggestion_items(&snapshot)
-            .map_or(0, |items| items.len().clamp(1, 3) as u16);
         let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
@@ -443,6 +456,23 @@ impl UiState {
         let scrollbar_cfg = ScrollbarConfig::default();
         let inner_width = AgentViewLayout::inner_width(area, &layout_cfg, compact);
         let prompt_outer_width = inner_width;
+        let mut permission = snapshot.interaction.as_ref().and_then(|interaction| {
+            permission_state(
+                interaction,
+                &snapshot.transcript,
+                self.interaction_selected,
+                self.interaction_pending.is_some(),
+            )
+        });
+        if let Some(permission) = permission.as_mut() {
+            permission.args_expanded = self.interaction_args_expanded;
+        }
+        let suggestion_rows = if permission.is_some() {
+            0
+        } else {
+            self.suggestion_items(&snapshot)
+                .map_or(0, |items| items.len().clamp(1, 3) as u16)
+        };
         let prompt_style = PromptStyleContract {
             focused,
             compact,
@@ -472,12 +502,23 @@ impl UiState {
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
         };
-        let prompt_height = GrokPromptRenderer::desired_height(
-            self.prompt.textarea(),
-            prompt_outer_width,
-            &prompt_style,
-            Some(&prompt_info),
-            prompt_cap,
+        let prompt_height = permission.as_ref().map_or_else(
+            || {
+                GrokPromptRenderer::desired_height(
+                    self.prompt.textarea(),
+                    prompt_outer_width,
+                    &prompt_style,
+                    Some(&prompt_info),
+                    prompt_cap,
+                )
+            },
+            |permission| {
+                permission_view_height(
+                    permission,
+                    area.height,
+                    prompt_outer_width.saturating_sub(5) as usize,
+                )
+            },
         );
         let tasks_height = if snapshot.tasks.is_empty() {
             0
@@ -579,22 +620,46 @@ impl UiState {
             &snapshot,
             &mut session.scrollback,
         );
-        let prompt_result = self.prompt_renderer.draw(
-            frame.buffer_mut(),
-            input,
-            self.prompt.textarea_mut(),
-            &prompt_style,
-            Some(&prompt_info),
-            theme,
-        );
-        if let Some((x, y)) = prompt_result.cursor_pos {
-            frame.set_cursor_position((x, y));
+        if let Some(permission) = permission.as_ref() {
+            self.permission_area = input;
+            let result = render_permission_view(
+                frame.buffer_mut(),
+                input,
+                permission,
+                self.hovered_permission_item,
+                theme,
+                self.shell.owner() == KeyOwner::Interaction,
+            );
+            self.permission_option_rows = result.option_rows;
+        } else {
+            self.permission_area = Rect::default();
+            self.permission_option_rows.clear();
+            self.hovered_permission_item = None;
+            let prompt_result = self.prompt_renderer.draw(
+                frame.buffer_mut(),
+                input,
+                self.prompt.textarea_mut(),
+                &prompt_style,
+                Some(&prompt_info),
+                theme,
+            );
+            if let Some((x, y)) = prompt_result.cursor_pos {
+                frame.set_cursor_position((x, y));
+            }
         }
         self.render_suggestions(frame, agent_layout.banner, &snapshot);
         self.hit_map.insert(crate::geometry::HitRegion {
-            target: HitTarget::Prompt,
+            target: if permission.is_some() {
+                HitTarget::Overlay("permission".into())
+            } else {
+                HitTarget::Prompt
+            },
             rect: input,
-            label: "prompt".into(),
+            label: if permission.is_some() {
+                "permission".into()
+            } else {
+                "prompt".into()
+            },
             link: None,
             priority: 15,
         });
@@ -656,7 +721,11 @@ impl UiState {
         let task_status = task_status_line(&snapshot);
         let footer_text = self.status_line(&snapshot, capability_notice, &task_status);
         AgentView::render_status_line(frame, agent_layout.status_line, &footer_text, theme);
-        AgentView::render_shortcuts(frame, agent_layout.shortcuts, compact);
+        if let Some(permission) = permission.as_ref() {
+            self.render_permission_shortcuts(frame, agent_layout.shortcuts, permission, compact);
+        } else {
+            AgentView::render_shortcuts(frame, agent_layout.shortcuts, compact);
+        }
 
         self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
 
@@ -760,15 +829,36 @@ impl UiState {
                 self.interaction_editor.reset();
                 self.interaction_selected = 0;
                 self.interaction_pending = None;
+                self.interaction_args_expanded = false;
+                self.hovered_permission_item = None;
+                self.last_permission_click = None;
             }
-            if self.shell.overlay() != Overlay::Interaction {
-                self.shell.open_interaction();
+            let approval = matches!(interaction, DshInteraction::Approval { .. });
+            let target = if approval {
+                Overlay::Permission
+            } else {
+                Overlay::Interaction
+            };
+            if self.shell.overlay() != target {
+                if approval {
+                    self.shell.open_permission();
+                } else {
+                    self.shell.open_interaction();
+                }
             }
-        } else if self.shell.overlay() == Overlay::Interaction {
+        } else if matches!(
+            self.shell.overlay(),
+            Overlay::Permission | Overlay::Interaction
+        ) {
             self.shell.close_overlay();
             self.interaction_request_id = None;
             self.interaction_generation = None;
             self.interaction_pending = None;
+            self.interaction_args_expanded = false;
+            self.permission_area = Rect::default();
+            self.permission_option_rows.clear();
+            self.hovered_permission_item = None;
+            self.last_permission_click = None;
             self.interaction_editor.reset();
             self.status = Some("Interaction resolved".into());
         }
@@ -1142,7 +1232,8 @@ impl UiState {
         area: Rect,
         snapshot: &GrokHostSnapshot,
     ) {
-        let Some(interaction) = snapshot.interaction.as_ref() else {
+        let Some(interaction @ DshInteraction::Question { .. }) = snapshot.interaction.as_ref()
+        else {
             return;
         };
         let theme = Theme::current();
@@ -1167,7 +1258,7 @@ impl UiState {
         };
         let buf = frame.buffer_mut();
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
-            render_interaction_content(
+            render_question_content(
                 buf,
                 content.content,
                 interaction,
@@ -1177,6 +1268,60 @@ impl UiState {
                 theme,
             );
         }
+    }
+
+    fn render_permission_shortcuts(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        permission: &PermissionViewState,
+        compact: bool,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let focused = self.shell.owner() == KeyOwner::Interaction;
+        let hints = if focused {
+            let mut hints = Vec::new();
+            if !permission.pending {
+                let last = char::from(b'0' + permission.options.len().clamp(1, 9) as u8);
+                hints.push(HintItem::paired(
+                    KeyShortcut::key(KeyCode::Char('1')),
+                    KeyShortcut::key(KeyCode::Char(last)),
+                    "select",
+                ));
+                if permission.options.len() > 1 {
+                    hints.push(HintItem::new(KeyShortcut::key(KeyCode::Tab), "next option"));
+                }
+                if permission.has_collapsible_display(area.width.saturating_sub(5) as usize) {
+                    hints.push(HintItem::new(
+                        KeyShortcut::ctrl(KeyCode::Char('f')),
+                        if permission.args_expanded {
+                            "collapse"
+                        } else {
+                            "expand"
+                        },
+                    ));
+                }
+            }
+            hints.push(HintItem::new(KeyShortcut::key(KeyCode::Esc), "scrollback"));
+            hints
+        } else {
+            vec![
+                HintItem::new(KeyShortcut::key(KeyCode::Enter), "permission"),
+                HintItem::paired(
+                    KeyShortcut::key(KeyCode::Up),
+                    KeyShortcut::key(KeyCode::Down),
+                    "scroll",
+                ),
+            ]
+        };
+        let widget = if compact {
+            ShortcutsBar::new(&hints).compact(2, None)
+        } else {
+            ShortcutsBar::new(&hints)
+        };
+        frame.render_widget(widget, area);
     }
 
     fn render_file_search(
@@ -1615,7 +1760,10 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::InteractionPaste(text) => {
-                if !text.is_empty() && self.interaction_pending.is_none() {
+                if self.shell.overlay() == Overlay::Interaction
+                    && !text.is_empty()
+                    && self.interaction_pending.is_none()
+                {
                     let _ = self.interaction_editor.insert_paste(&text);
                 }
                 Ok(false)
@@ -2620,13 +2768,6 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<()> {
-        if self.interaction_pending.is_some() {
-            if key.code == KeyCode::Esc {
-                self.shell.close_overlay();
-                self.status = Some("Interaction response pending".into());
-            }
-            return Ok(());
-        }
         let snapshot = GrokHostSnapshot::from_session_with_control_plane(
             session,
             Some(transport.control_plane()),
@@ -2636,20 +2777,20 @@ impl UiState {
             self.status = Some("Interaction is no longer pending".into());
             return Ok(());
         };
+        if matches!(interaction, DshInteraction::Approval { .. }) {
+            return self.handle_approval_key(key, transport, session, interaction, &snapshot);
+        }
+        if self.interaction_pending.is_some() {
+            if key.code == KeyCode::Esc {
+                self.shell.close_overlay();
+                self.status = Some("Interaction response pending".into());
+            }
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc => {
                 self.shell.close_overlay();
                 self.status = Some("Interaction deferred".into());
-            }
-            KeyCode::Char('y') | KeyCode::Char('a') => {
-                if matches!(interaction, DshInteraction::Approval { .. }) {
-                    self.submit_approval(transport, session, interaction, "allowed-once")?;
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('d') => {
-                if matches!(interaction, DshInteraction::Approval { .. }) {
-                    self.submit_approval(transport, session, interaction, "denied")?;
-                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.interaction_selected = self.interaction_selected.saturating_sub(1);
@@ -2679,6 +2820,96 @@ impl UiState {
         Ok(())
     }
 
+    fn handle_approval_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        interaction: &DshInteraction,
+        snapshot: &GrokHostSnapshot,
+    ) -> PagerResult<()> {
+        if key.code == KeyCode::Esc {
+            self.shell.park_permission();
+            self.status = Some(if self.interaction_pending.is_some() {
+                "Approval response pending; focus moved to scrollback".into()
+            } else {
+                "Approval parked; press Enter or i to return".into()
+            });
+            return Ok(());
+        }
+        if self.interaction_pending.is_some() {
+            return Ok(());
+        }
+        let Some(mut permission) = permission_state(
+            interaction,
+            &snapshot.transcript,
+            self.interaction_selected,
+            false,
+        ) else {
+            return Ok(());
+        };
+        permission.args_expanded = self.interaction_args_expanded;
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
+            if permission
+                .has_collapsible_display(self.permission_area.width.saturating_sub(5) as usize)
+            {
+                self.interaction_args_expanded = !self.interaction_args_expanded;
+            }
+            return Ok(());
+        }
+        let count = permission.options.len();
+        if count == 0 {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Tab => {
+                self.interaction_selected = (self.interaction_selected + 1) % count;
+            }
+            KeyCode::BackTab => {
+                self.interaction_selected = if self.interaction_selected == 0 {
+                    count - 1
+                } else {
+                    self.interaction_selected - 1
+                };
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.interaction_selected = self.interaction_selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.interaction_selected = self
+                    .interaction_selected
+                    .saturating_add(1)
+                    .min(count.saturating_sub(1));
+            }
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit.to_digit(10).unwrap_or(1) as usize - 1;
+                if let Some(choice) = permission.options.get(index).map(|option| option.choice) {
+                    self.interaction_selected = index;
+                    self.submit_approval(
+                        transport,
+                        session,
+                        interaction,
+                        approval_outcome(choice),
+                    )?;
+                }
+            }
+            KeyCode::Enter => {
+                permission.active_idx = self.interaction_selected;
+                permission.clamp_selection();
+                if let Some(choice) = permission.selected() {
+                    self.submit_approval(
+                        transport,
+                        session,
+                        interaction,
+                        approval_outcome(choice),
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_interaction_mouse(
         &mut self,
         mouse: crossterm::event::MouseEvent,
@@ -2696,6 +2927,9 @@ impl UiState {
             self.shell.close_overlay();
             return Ok(());
         };
+        if matches!(interaction, DshInteraction::Approval { .. }) {
+            return self.handle_approval_mouse(mouse, transport, session, interaction);
+        }
         match handle_modal_mouse(&mut self.modal, mouse.kind, mouse.column, mouse.row) {
             ModalWindowOutcome::CloseRequested | ModalWindowOutcome::ShortcutActivated(2) => {
                 self.shell.close_overlay();
@@ -2710,6 +2944,68 @@ impl UiState {
                     self.submit_interaction(transport, session, interaction, response)?;
                 } else {
                     self.status = Some("Answer is empty".into());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_approval_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        interaction: &DshInteraction,
+    ) -> PagerResult<()> {
+        let item = self
+            .permission_option_rows
+            .iter()
+            .position(|row| contains(*row, mouse.column, mouse.row));
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                self.hovered_permission_item = item;
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.handle_transcript_mouse(mouse);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = item {
+                    self.shell.focus_permission();
+                    self.interaction_selected = index;
+                    if self.interaction_pending.is_some() {
+                        return Ok(());
+                    }
+                    let now = Instant::now();
+                    let double_click =
+                        self.last_permission_click
+                            .is_some_and(|(previous, previous_index)| {
+                                previous_index == index
+                                    && now.duration_since(previous) <= TRANSCRIPT_DOUBLE_CLICK
+                            });
+                    if double_click {
+                        self.last_permission_click = None;
+                        let choice = if index == 0 {
+                            PermissionChoice::AllowOnce
+                        } else {
+                            PermissionChoice::Reject
+                        };
+                        self.submit_approval(
+                            transport,
+                            session,
+                            interaction,
+                            approval_outcome(choice),
+                        )?;
+                    } else {
+                        self.last_permission_click = Some((now, index));
+                    }
+                } else if contains(self.permission_area, mouse.column, mouse.row) {
+                    self.shell.focus_permission();
+                    self.last_permission_click = None;
+                } else {
+                    self.shell.park_permission();
+                    self.last_permission_click = None;
+                    self.handle_transcript_mouse(mouse);
                 }
             }
             _ => {}
@@ -3092,7 +3388,9 @@ mod tests {
     use crate::views::picker::{PickerState, render_picker_in_modal};
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use dsh_pager::{ControlPlaneStore, DshRenderEntryId, SessionState, scrollback::Scrollback};
-    use dsh_pager_protocol::{HistoryEntry, SessionEvent, SessionHistoryValue};
+    use dsh_pager_protocol::{
+        HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
+    };
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
     use serde_json::json;
 
@@ -3216,6 +3514,73 @@ mod tests {
         assert!(!ui.hit_map.regions().iter().any(|region| {
             matches!(&region.target, HitTarget::Overlay(name) if name == "timeline")
         }));
+    }
+
+    #[test]
+    fn approval_replaces_composer_with_call_linked_grok_permission_card() {
+        let mut session = SessionState::new("approval-session".into(), 3);
+        session
+            .install_initial(SessionHistoryValue {
+                events: vec![HistoryEntry {
+                    event: SessionEvent {
+                        event_type: "tool/call".into(),
+                        seq: 1,
+                        time: 1.0,
+                        data: json!({
+                            "name": "bash",
+                            "callId": "call-approval",
+                            "arguments": "{\"command\":\"find /work -maxdepth 3\"}"
+                        }),
+                        source_event_seqs: None,
+                        surface_op: None,
+                        ignorable: None,
+                    },
+                    view: Some(json!({
+                        "for": "call",
+                        "view": {
+                            "card": "terminal",
+                            "title": "find /work -maxdepth 3",
+                            "description": "List project files",
+                            "cwd": "/work"
+                        }
+                    })),
+                }],
+                has_more: false,
+                projections: None,
+            })
+            .expect("tool fixture");
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "type": "approval/requested",
+                    "sessionId": "approval-session",
+                    "requestId": "rpc-approval",
+                    "approvalId": "approval-1",
+                    "callId": "call-approval",
+                    "toolName": "bash",
+                    "reason": "sandbox escalation"
+                })),
+            })
+            .expect("approval fixture");
+
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render approval");
+        let screen = buffer_text(terminal.backend().buffer(), 80, 24);
+
+        assert_eq!(ui.shell.overlay(), crate::app::Overlay::Permission);
+        assert_eq!(ui.shell.owner(), crate::app::KeyOwner::Interaction);
+        assert_eq!(ui.permission_option_rows.len(), 2);
+        assert!(screen.contains("List project files"));
+        assert!(screen.contains("find /work -maxdepth 3"));
+        assert!(screen.contains("1 (●) Yes, proceed"));
+        assert!(screen.contains("2 (○) No, reject"));
+        assert!(!screen.contains("Interaction · host request"));
     }
 
     #[test]

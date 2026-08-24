@@ -3,7 +3,7 @@
   "sessionId": "interaction-session",
   "generation": 5,
   "interactions": [
-    { "kind": "approval", "requestId": "rpc-approval", "approvalId": "approval-1", "toolName": "bash" },
+    { "kind": "approval", "requestId": "rpc-approval", "approvalId": "approval-1", "callId": "call-bash", "toolName": "bash" },
     { "kind": "question", "requestId": "rpc-question", "questions": [{ "id": "q1", "text": "continue?" }] }
   ],
   "expected": { "stableRequestIds": ["rpc-approval", "rpc-question"], "escLadder": "interaction-modal-pane" }

@@ -1182,6 +1182,8 @@ pub enum DshInteraction {
         request_id: String,
         approval_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -1202,6 +1204,7 @@ impl DshInteraction {
             approval_id: string_field(frame, "approvalId")
                 .unwrap_or("unknown-approval")
                 .to_string(),
+            call_id: string_field(frame, "callId").map(str::to_string),
             tool_name: string_field(frame, "toolName").map(str::to_string),
             reason: string_field(frame, "reason").map(str::to_string),
         }
@@ -2562,10 +2565,17 @@ mod tests {
         let interaction = DshInteraction::approval_from_frame(&json!({
             "requestId": "rpc-1",
             "approvalId": "approval-1",
+            "callId": "call-1",
             "toolName": "bash"
         }));
         assert_eq!(interaction.request_id(), "rpc-1");
-        assert!(matches!(interaction, DshInteraction::Approval { .. }));
+        assert!(matches!(
+            interaction,
+            DshInteraction::Approval {
+                call_id: Some(ref call_id),
+                ..
+            } if call_id == "call-1"
+        ));
     }
 
     #[test]

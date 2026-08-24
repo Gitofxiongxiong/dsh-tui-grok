@@ -1446,6 +1446,10 @@ fn interaction_from_frame(frame: &Value) -> PagerResult<PendingInteraction> {
                 .unwrap_or_default()
                 .to_string(),
             frame
+                .get("callId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            frame
                 .get("toolName")
                 .and_then(Value::as_str)
                 .map(str::to_string),
