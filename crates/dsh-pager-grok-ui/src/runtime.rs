@@ -19,7 +19,7 @@ use dsh_pager::{
     DshGeneration, DshInteraction, DshQueueItemId, DshRequestId, PagerError, PagerResult,
     RpcTransport, SessionState, SessionUpdate, load_session_id, peek_session_tail, repair_tail,
 };
-use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
+use dsh_pager_protocol::{PromptMode, QueueAction, SessionModeId, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
@@ -321,7 +321,7 @@ struct UiState {
     modal: ModalWindowState,
     prompt: PromptEditor,
     prompt_renderer: GrokPromptRenderer,
-    prompt_mode: Option<PromptMode>,
+    pending_session_mode: Option<SessionModeId>,
     queue_selected_id: Option<String>,
     queue_editing: bool,
     queue_editor: PromptEditor,
@@ -471,6 +471,7 @@ impl UiState {
             UiEffect::ReorderSession { .. } => "Reorder session",
             UiEffect::InterruptSubagent { .. } => "Subagent interrupt",
             UiEffect::AttachSession { .. } => "Attach session",
+            UiEffect::SetSessionMode { .. } => "Session mode",
         };
         if completion.receipt.operation.session_id.as_str() != session.session_id()
             || completion.receipt.operation.generation != DshGeneration::new(session.generation())
@@ -592,6 +593,18 @@ impl UiState {
             self.suggestions.reset();
             self.status = Some(prompt_admission_message(&completion.receipt.status));
         }
+        if let UiEffect::SetSessionMode { mode_id, .. } = &completion.effect {
+            if matches!(
+                completion.receipt.status,
+                UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+            ) {
+                let mode = mode_id.unwrap_or(SessionModeId::Normal);
+                self.pending_session_mode = Some(mode);
+                self.status = Some(format!("Mode → {mode}"));
+            } else {
+                self.pending_session_mode = None;
+            }
+        }
         if completion.receipt.status != UiEffectStatus::Accepted
             || matches!(
                 completion.effect,
@@ -626,7 +639,8 @@ impl UiState {
         snapshot.agent.subagents = self.agent_subagents.clone();
         self.agent_pane.sync(&snapshot.agent);
         self.reconcile_snapshot(&snapshot);
-        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
+        self.reconcile_session_mode(&snapshot);
+        let session_mode = self.effective_session_mode(&snapshot);
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
         let appearance = GrokAppearanceSnapshot::for_area(area, compact);
@@ -643,6 +657,7 @@ impl UiState {
                 &snapshot.transcript,
                 self.interaction_selected,
                 self.interaction_pending.is_some(),
+                session_mode,
             )
         });
         if let Some(permission) = permission.as_mut() {
@@ -675,11 +690,7 @@ impl UiState {
             .desired_height(prompt_geometry.textarea.width.max(1));
         let prompt_info = PromptInfoContract {
             model_name: snapshot.model.clone(),
-            flags: vec![PromptFlagContract {
-                text: AgentView::mode_label(mode).into(),
-                color: None,
-                bold: false,
-            }],
+            flags: session_mode_flags(session_mode, theme),
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
         };
@@ -1012,12 +1023,8 @@ impl UiState {
             .or(snapshot.status.as_deref())
             .or(capability_notice)
             .unwrap_or("");
-        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
-        let mut details = format!(
-            "mode {} · queue r{}",
-            AgentView::mode_label(mode),
-            snapshot.queue_revision
-        );
+        let mode = self.effective_session_mode(snapshot);
+        let mut details = format!("mode {mode} · queue r{}", snapshot.queue_revision);
         if let Some(pending) = &self.queue_pending {
             details.push_str(&format!(
                 " · pending {} ({})",
@@ -1975,22 +1982,8 @@ impl UiState {
                 self.status = Some("Draft cleared".into());
                 Ok(false)
             }
-            ShellAction::TogglePromptMode => {
-                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-                    session,
-                    Some(transport.control_plane()),
-                );
-                let current = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
-                let next = match current {
-                    PromptMode::Queue => PromptMode::Steer,
-                    PromptMode::Steer => PromptMode::Queue,
-                };
-                if next == PromptMode::Steer && !steer_capability_available(session, &snapshot) {
-                    self.status = Some("Steer mode unavailable".into());
-                } else {
-                    self.prompt_mode = Some(next);
-                    self.status = Some(format!("Prompt mode: {}", AgentView::mode_label(next)));
-                }
+            ShellAction::CycleSessionMode => {
+                self.cycle_session_mode(transport, session)?;
                 Ok(false)
             }
             ShellAction::ScrollUp(amount) => {
@@ -2656,21 +2649,12 @@ impl UiState {
             self.status = Some("Prompt is empty".into());
             return Ok(());
         }
-        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-            session,
-            Some(transport.control_plane()),
-        );
-        let mode = self.prompt_mode.unwrap_or(snapshot.prompt.default_mode);
-        if mode == PromptMode::Steer && !steer_capability_available(session, &snapshot) {
-            self.status = Some("Steer mode unavailable".into());
-            return Ok(());
-        }
         let context = UiContext::from_session(session);
         let receipt = self.submit_effect(
             transport,
             UiIntent::SubmitPrompt {
                 text: text.clone(),
-                mode,
+                mode: PromptMode::Steer,
             },
             &context,
         )?;
@@ -3328,6 +3312,7 @@ impl UiState {
             &snapshot.transcript,
             self.interaction_selected,
             false,
+            self.effective_session_mode(snapshot),
         ) else {
             return Ok(());
         };
@@ -3368,24 +3353,14 @@ impl UiState {
                 let index = digit.to_digit(10).unwrap_or(1) as usize - 1;
                 if let Some(choice) = permission.options.get(index).map(|option| option.choice) {
                     self.interaction_selected = index;
-                    self.submit_approval(
-                        transport,
-                        session,
-                        interaction,
-                        approval_outcome(choice),
-                    )?;
+                    self.submit_approval(transport, session, interaction, choice)?;
                 }
             }
             KeyCode::Enter => {
                 permission.active_idx = self.interaction_selected;
                 permission.clamp_selection();
                 if let Some(choice) = permission.selected() {
-                    self.submit_approval(
-                        transport,
-                        session,
-                        interaction,
-                        approval_outcome(choice),
-                    )?;
+                    self.submit_approval(transport, session, interaction, choice)?;
                 }
             }
             _ => {}
@@ -3468,17 +3443,24 @@ impl UiState {
                             });
                     if double_click {
                         self.last_permission_click = None;
-                        let choice = if index == 0 {
-                            PermissionChoice::AllowOnce
-                        } else {
-                            PermissionChoice::Reject
-                        };
-                        self.submit_approval(
-                            transport,
+                        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                             session,
+                            Some(transport.control_plane()),
+                        );
+                        let Some(permission) = permission_state(
                             interaction,
-                            approval_outcome(choice),
-                        )?;
+                            &snapshot.transcript,
+                            index,
+                            false,
+                            self.effective_session_mode(&snapshot),
+                        ) else {
+                            return Ok(());
+                        };
+                        if let Some(choice) =
+                            permission.options.get(index).map(|option| option.choice)
+                        {
+                            self.submit_approval(transport, session, interaction, choice)?;
+                        }
                     } else {
                         self.last_permission_click = Some((now, index));
                     }
@@ -3501,7 +3483,7 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
         interaction: &DshInteraction,
-        outcome: &str,
+        choice: PermissionChoice,
     ) -> PagerResult<()> {
         let DshInteraction::Approval { approval_id, .. } = interaction else {
             return Ok(());
@@ -3512,9 +3494,65 @@ impl UiState {
             interaction,
             TuiInteractionResponse::Approval {
                 approval_id: approval_id.clone(),
-                outcome: outcome.into(),
+                outcome: approval_outcome(choice).into(),
             },
-        )
+        )?;
+        if choice == PermissionChoice::DontAskAgain {
+            self.submit_session_mode(transport, session, Some(SessionModeId::DangerFullAccess))?;
+        }
+        Ok(())
+    }
+
+    fn cycle_session_mode(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<()> {
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        let next = self.effective_session_mode(&snapshot).next();
+        self.submit_session_mode(transport, session, Some(next))
+    }
+
+    fn submit_session_mode(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        mode_id: Option<SessionModeId>,
+    ) -> PagerResult<()> {
+        if let Some(mode) = mode_id {
+            self.pending_session_mode = Some(mode);
+            self.status = Some(format!("Mode → {mode}"));
+        }
+        let receipt = self.submit_effect(
+            transport,
+            UiIntent::SetSessionMode { mode_id },
+            &UiContext::from_session(session),
+        )?;
+        match receipt.status {
+            UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending => {
+                if let Some(mode) = mode_id {
+                    self.status = Some(format!("Mode → {mode}"));
+                }
+            }
+            _ => {
+                self.pending_session_mode = None;
+                self.status = Some(receipt_status_message(&receipt, "Session mode"));
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_session_mode(&mut self, snapshot: &GrokHostSnapshot) {
+        if self.pending_session_mode == Some(snapshot.session_mode) {
+            self.pending_session_mode = None;
+        }
+    }
+
+    fn effective_session_mode(&self, snapshot: &GrokHostSnapshot) -> SessionModeId {
+        self.pending_session_mode.unwrap_or(snapshot.session_mode)
     }
 
     fn submit_interaction(
@@ -3805,6 +3843,23 @@ fn agent_status_message_with_subagents(snapshot: &AgentSnapshot, subagents: usiz
     }
 }
 
+fn session_mode_flags(mode: SessionModeId, theme: &Theme) -> Vec<PromptFlagContract> {
+    match mode {
+        SessionModeId::Normal => Vec::new(),
+        SessionModeId::Plan => vec![PromptFlagContract {
+            text: SessionModeId::Plan.as_str().into(),
+            color: Some(theme.accent_plan),
+            bold: true,
+        }],
+        SessionModeId::DangerFullAccess => vec![PromptFlagContract {
+            text: SessionModeId::DangerFullAccess.as_str().into(),
+            color: Some(theme.warning),
+            bold: true,
+        }],
+    }
+}
+
+#[cfg(test)]
 fn steer_capability_available(session: &SessionState, snapshot: &GrokHostSnapshot) -> bool {
     if !snapshot.capabilities.queue_steer {
         return false;
@@ -4120,11 +4175,12 @@ mod tests {
 
         assert_eq!(ui.shell.overlay(), crate::app::Overlay::Permission);
         assert_eq!(ui.shell.owner(), crate::app::KeyOwner::Interaction);
-        assert_eq!(ui.permission_option_rows.len(), 2);
+        assert_eq!(ui.permission_option_rows.len(), 3);
         assert!(screen.contains("List project files"));
         assert!(screen.contains("find /work -maxdepth 3"));
         assert!(screen.contains("1 (●) Yes, proceed"));
-        assert!(screen.contains("2 (○) No, reject"));
+        assert!(screen.contains("2 (○) Yes, don't ask again this conversation"));
+        assert!(screen.contains("3 (○) No, reject"));
         assert!(screen.contains('◆'));
         assert!(screen.contains("List project files…"));
         assert!(ui.hit_map.regions().iter().any(|region| {

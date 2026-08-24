@@ -28,6 +28,7 @@ pub mod parity;
 pub mod runtime;
 pub mod scheduler;
 pub mod selection;
+pub mod session_mode;
 
 pub use app::{
     AppShell, KeyOwner, Overlay, REPLACEMENT_MAP, ReplacementEntry, ShellAction, ShellEvent,

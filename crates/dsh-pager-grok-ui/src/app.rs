@@ -108,7 +108,7 @@ pub enum ShellAction {
     ScrollDown(u16),
     SubmitPrompt,
     PromptNewline,
-    TogglePromptMode,
+    CycleSessionMode,
     OpenQueue,
     OpenInteraction,
     OpenFileSearch,
@@ -482,7 +482,7 @@ impl AppShell {
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
         {
             self.owner = KeyOwner::Prompt;
-            return ShellAction::TogglePromptMode;
+            return ShellAction::CycleSessionMode;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
@@ -492,10 +492,6 @@ impl AppShell {
         {
             self.owner = KeyOwner::Prompt;
             return ShellAction::PromptKey(key);
-        }
-        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::ALT) {
-            self.owner = KeyOwner::Prompt;
-            return ShellAction::TogglePromptMode;
         }
         if prompt_empty {
             match key.code {
@@ -661,30 +657,16 @@ mod tests {
     }
 
     #[test]
-    fn alt_s_toggles_prompt_mode_without_stealing_plain_s() {
-        let mut shell = AppShell::default();
-        let alt_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
-        assert_eq!(
-            shell.dispatch(ShellEvent::Key(alt_s), true),
-            ShellAction::TogglePromptMode
-        );
-        assert_eq!(
-            shell.dispatch(ShellEvent::Key(key(KeyCode::Char('s'))), true),
-            ShellAction::PromptKey(key(KeyCode::Char('s')))
-        );
-    }
-
-    #[test]
     fn grok_mode_and_newline_chords_reach_the_same_actions() {
         let mut shell = AppShell::default();
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::BackTab)), true),
-            ShellAction::TogglePromptMode
+            ShellAction::CycleSessionMode
         );
         let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
         assert_eq!(
             shell.dispatch(ShellEvent::Key(shift_tab), true),
-            ShellAction::TogglePromptMode
+            ShellAction::CycleSessionMode
         );
         let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
         assert_eq!(

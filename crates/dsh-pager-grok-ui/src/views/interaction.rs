@@ -4,6 +4,7 @@
 //! in the runtime/effect boundary so a late response cannot answer a new modal.
 
 use dsh_pager::{DshInteraction, DshRenderBlock};
+use dsh_pager_protocol::SessionModeId;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -111,6 +112,7 @@ pub fn permission_state(
     transcript: &[TranscriptRow],
     selected: usize,
     pending: bool,
+    session_mode: SessionModeId,
 ) -> Option<PermissionViewState> {
     let DshInteraction::Approval {
         call_id,
@@ -159,16 +161,23 @@ pub fn permission_state(
         title,
         command,
         description,
-        options: vec![
-            PermissionOption {
+        options: {
+            let mut options = vec![PermissionOption {
                 choice: PermissionChoice::AllowOnce,
                 label: "Yes, proceed".into(),
-            },
-            PermissionOption {
+            }];
+            if session_mode == SessionModeId::Normal {
+                options.push(PermissionOption {
+                    choice: PermissionChoice::DontAskAgain,
+                    label: "Yes, don't ask again this conversation".into(),
+                });
+            }
+            options.push(PermissionOption {
                 choice: PermissionChoice::Reject,
                 label: "No, reject".into(),
-            },
-        ],
+            });
+            options
+        },
         active_idx: selected,
         args_expanded: false,
         pending,
@@ -179,7 +188,7 @@ pub fn permission_state(
 
 pub const fn approval_outcome(choice: PermissionChoice) -> &'static str {
     match choice {
-        PermissionChoice::AllowOnce => "allowed-once",
+        PermissionChoice::AllowOnce | PermissionChoice::DontAskAgain => "allowed-once",
         PermissionChoice::Reject => "rejected",
     }
 }
@@ -292,6 +301,10 @@ mod tests {
             approval_outcome(PermissionChoice::AllowOnce),
             "allowed-once"
         );
+        assert_eq!(
+            approval_outcome(PermissionChoice::DontAskAgain),
+            "allowed-once"
+        );
         assert_eq!(approval_outcome(PermissionChoice::Reject), "rejected");
     }
 
@@ -338,10 +351,20 @@ mod tests {
             tool_name: Some("bash".into()),
             reason: Some("sandbox escalation".into()),
         };
-        let state = permission_state(&interaction, &transcript, 9, false).unwrap();
+        let state =
+            permission_state(&interaction, &transcript, 9, false, SessionModeId::Normal).unwrap();
         assert_eq!(state.title, "List project files");
         assert_eq!(state.command.as_deref(), Some("find /work -maxdepth 3"));
-        assert_eq!(state.active_idx, 1);
-        assert_eq!(state.options.len(), 2);
+        assert_eq!(state.active_idx, 2);
+        assert_eq!(state.options.len(), 3);
+        assert_eq!(state.options[1].choice, PermissionChoice::DontAskAgain);
+        let plan =
+            permission_state(&interaction, &transcript, 0, false, SessionModeId::Plan).unwrap();
+        assert_eq!(plan.options.len(), 2);
+        assert!(
+            plan.options
+                .iter()
+                .all(|option| option.choice != PermissionChoice::DontAskAgain)
+        );
     }
 }

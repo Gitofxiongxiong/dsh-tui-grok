@@ -6,6 +6,53 @@ import { createInterface } from 'node:readline'
 
 const sessionId = 'session-mock'
 let sessionTitle = 'Mock session'
+const SESSION_MODES = [
+  { id: 'normal', label: 'normal', plan: false, sandbox: 'workspace-write', approval: 'ask' },
+  { id: 'plan', label: 'plan', plan: true, sandbox: 'read-only', approval: 'ask' },
+  { id: 'danger-full-access', label: 'danger-full-access', plan: false, sandbox: 'danger-full-access', approval: 'never' },
+]
+let currentMode = SESSION_MODES[0]
+let modeSeq = 20
+
+function modeProjections() {
+  const currentValue = currentMode.id === 'danger-full-access'
+    ? 'danger-full-access'
+    : currentMode.id === 'plan'
+      ? 'custom'
+      : 'workspace-write'
+  return {
+    plan: { active: currentMode.plan, pending: false },
+    permissions: {
+      currentValue,
+      options: [
+        { value: 'workspace-write', name: 'workspace-write' },
+        { value: 'danger-full-access', name: 'danger-full-access' },
+      ],
+    },
+  }
+}
+
+function emitModeProjections() {
+  const values = modeProjections()
+  modeSeq += 1
+  write({
+    jsonrpc: '2.0',
+    method: 'events.mux',
+    params: { type: 'session/projection', sessionId, key: 'plan', seq: modeSeq, value: values.plan },
+  })
+  modeSeq += 1
+  write({
+    jsonrpc: '2.0',
+    method: 'events.mux',
+    params: {
+      type: 'session/projection',
+      sessionId,
+      key: 'permissions',
+      seq: modeSeq,
+      value: values.permissions,
+    },
+  })
+}
 const events = [
   { seq: 0, time: 1, type: 'turn/start', data: { turn: 1 } },
   {
@@ -304,7 +351,7 @@ rl.on('line', (line) => {
     success(message.id, {
       events: events.slice(0, 3).map(entry),
       hasMore: false,
-      projections: { asOfSeq: 2, values: {} },
+      projections: { asOfSeq: 2, values: modeProjections() },
     })
     return
   }
@@ -402,6 +449,18 @@ rl.on('line', (line) => {
       },
     })
     success(message.id, { accepted: true })
+    return
+  }
+  if (message?.method === 'tui.setSessionMode') {
+    const modeId = message.params?.modeId
+    if (typeof modeId === 'string') {
+      currentMode = SESSION_MODES.find((mode) => mode.id === modeId) ?? currentMode
+    } else {
+      const index = SESSION_MODES.findIndex((mode) => mode.id === currentMode.id)
+      currentMode = SESSION_MODES[(index + 1) % SESSION_MODES.length]
+    }
+    emitModeProjections()
+    success(message.id, { accepted: true, mode: currentMode })
     return
   }
   if (message?.method === 'tui.respond') {

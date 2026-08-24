@@ -421,7 +421,7 @@ pub fn render_semantic(
         role: "prompt".into(),
         text: format!(
             "{} · {}",
-            AgentView::mode_label(snapshot.prompt.default_mode),
+            snapshot.session_mode,
             if snapshot.prompt.authoritative {
                 "Prompt"
             } else {
@@ -592,11 +592,14 @@ pub fn render_semantic(
     };
     let prompt_info = PromptInfoContract {
         model_name: snapshot.model.clone(),
-        flags: vec![PromptFlagContract {
-            text: AgentView::mode_label(snapshot.prompt.default_mode).into(),
-            color: None,
-            bold: false,
-        }],
+        flags: match snapshot.session_mode {
+            dsh_pager_protocol::SessionModeId::Normal => Vec::new(),
+            mode => vec![PromptFlagContract {
+                text: mode.as_str().into(),
+                color: None,
+                bold: true,
+            }],
+        },
         ..PromptInfoContract::default()
     };
     let prompt_result = GrokPromptRenderer::default().draw(

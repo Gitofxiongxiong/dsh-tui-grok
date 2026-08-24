@@ -17,6 +17,7 @@ import {
   decodeDetachParams,
   decodeHelloParams,
   decodeRespondParams,
+  decodeSetSessionModeParams,
   decodeSubscribeParams,
   TuiClientId,
   type ConnectionGeneration,
@@ -27,6 +28,12 @@ import {
 import { ControlPlaneRouter } from './control-plane.js'
 import { dispatchRespond, dispatchUnary, type TuiDispatchExtensions } from './dispatch.js'
 import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
+import {
+  applySessionMode,
+  nextSessionMode,
+  sessionModeById,
+  type ModeEvent,
+} from './session-mode.js'
 
 /** Outbound notification sink. */
 export interface TuiNotifyPeer {
@@ -121,6 +128,8 @@ export class TuiGateway {
         return this.subscribe(params)
       case 'tui.respond':
         return this.respond(params)
+      case 'tui.setSessionMode':
+        return await this.setSessionMode(params)
       default:
         throw new TuiMethodNotFoundError(method)
     }
@@ -281,6 +290,49 @@ export class TuiGateway {
       this.respondedRequests.delete(first)
     }
     return result
+  }
+
+  private async setSessionMode(params: unknown): Promise<unknown> {
+    const decoded = decodeSetSessionModeParams(params)
+    if (!decoded.ok) throw new TuiRpcError('not-attached', `invalid tui.setSessionMode: ${decoded.reason}`)
+    this.requireGeneration(decoded.value.generation)
+    const services = this.extensions.sessionMode
+    if (services === undefined) {
+      throw new TuiRpcError('capability-denied', 'session mode switching is unavailable', {
+        sessionId: decoded.value.sessionId,
+        generation: decoded.value.generation,
+      })
+    }
+    const resolved = await services.resolveAgent(decoded.value.sessionId)
+    if ('error' in resolved) {
+      const kind = resolved.error.code === 'session-not-found' ? 'unknown-session' : 'capability-denied'
+      throw new TuiRpcError(kind, resolved.error.message, {
+        sessionId: decoded.value.sessionId,
+        generation: decoded.value.generation,
+      })
+    }
+    const spec = decoded.value.modeId === undefined
+      ? nextSessionMode(resolved.agent.session.events as readonly ModeEvent[])
+      : sessionModeById(decoded.value.modeId)
+    if (spec === undefined) {
+      throw new TuiRpcError('not-attached', 'unknown session mode', {
+        sessionId: decoded.value.sessionId,
+        generation: decoded.value.generation,
+      })
+    }
+    try {
+      await applySessionMode(resolved.agent, spec, services)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new TuiRpcError(
+        message === 'plan-unavailable' ? 'capability-denied' : 'not-attached',
+        message === 'plan-unavailable'
+          ? 'plan mode is unavailable for this session'
+          : `session mode switch failed: ${message}`,
+        { sessionId: decoded.value.sessionId, generation: decoded.value.generation },
+      )
+    }
+    return { accepted: true, mode: spec }
   }
 
   private flushHistoryBuffer(params: unknown): void {

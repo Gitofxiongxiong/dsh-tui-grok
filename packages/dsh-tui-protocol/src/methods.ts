@@ -81,6 +81,7 @@ const TUI_REQUEST_METHODS: Record<TuiRequestMethod, true> = {
   'tui.detach': true,
   'tui.subscribe': true,
   'tui.respond': true,
+  'tui.setSessionMode': true,
 }
 
 const TUI_NOTIFICATION_METHODS: Record<TuiNotificationMethod, true> = {

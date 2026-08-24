@@ -20,6 +20,7 @@ use crate::theme::Theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionChoice {
     AllowOnce,
+    DontAskAgain,
     Reject,
 }
 

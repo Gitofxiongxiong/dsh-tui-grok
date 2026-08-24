@@ -262,6 +262,51 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
+  it('cycles tui.setSessionMode through the in-process session log', async () => {
+    const events: { type: string; data?: unknown }[] = []
+    const agent = {
+      session: {
+        events,
+        append(type: string, data: Record<string, unknown>) {
+          events.push({ type, data })
+        },
+      },
+    } as unknown as Agent
+    const gateway = new TuiGateway(fakeApi(), new Notifications(), {
+      sessionMode: {
+        resolveAgent: async () => ({ agent }),
+      },
+    })
+    const { generation } = await hello(gateway)
+    const first = await gateway.handleRequest('tui.setSessionMode', {
+      sessionId,
+      generation,
+    }, '2') as { accepted: boolean; mode: { id: string } }
+    expect(first).toMatchObject({ accepted: true, mode: { id: 'plan' } })
+    expect(events).toEqual([
+      { type: 'plan/mode', data: { active: true } },
+      { type: 'sandbox/mode', data: { mode: 'read-only' } },
+      { type: 'approval/policy', data: { policy: 'ask' } },
+    ])
+    const second = await gateway.handleRequest('tui.setSessionMode', {
+      sessionId,
+      generation,
+      modeId: 'danger-full-access',
+    }, '3') as { mode: { id: string } }
+    expect(second.mode.id).toBe('danger-full-access')
+    gateway.dispose()
+  })
+
+  it('rejects tui.setSessionMode when the host cannot switch modes', async () => {
+    const gateway = new TuiGateway(fakeApi(), new Notifications())
+    const { generation } = await hello(gateway)
+    await expect(gateway.handleRequest('tui.setSessionMode', {
+      sessionId,
+      generation,
+    }, '2')).rejects.toMatchObject({ kind: 'capability-denied' })
+    gateway.dispose()
+  })
+
   it('rejects reusing an interaction request id with a different answer', async () => {
     const gateway = new TuiGateway(fakeApi(), new Notifications())
     const { generation } = await hello(gateway)

@@ -193,6 +193,31 @@ export interface TuiRespondParams {
   interaction: TuiInteractionResponse
 }
 
+/** Shift+Tab session-mode identifiers owned by the external TUI. */
+export type TuiSessionModeId = 'normal' | 'plan' | 'danger-full-access'
+
+/** One resolved session-mode bundle (plan + sandbox + approval). */
+export interface TuiSessionMode {
+  id: TuiSessionModeId
+  label: string
+  plan: boolean
+  sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
+  approval: 'ask' | 'never'
+}
+
+/** `tui.setSessionMode` parameters. Omit `modeId` to cycle to the next mode. */
+export interface TuiSetSessionModeParams {
+  sessionId: SessionId
+  generation: ConnectionGeneration
+  modeId?: TuiSessionModeId
+}
+
+/** Receipt returned after applying a session-mode switch. */
+export interface TuiSetSessionModeResult {
+  accepted: true
+  mode: TuiSessionMode
+}
+
 /** Receipt returned after forwarding an interaction answer. */
 export interface TuiRespondResult {
   accepted: boolean
@@ -210,6 +235,7 @@ export interface TuiRequestMap {
   'tui.detach': { params: TuiDetachParams; result: Record<string, never> }
   'tui.subscribe': { params: TuiSubscribeParams; result: TuiSubscribeResult }
   'tui.respond': { params: TuiRespondParams; result: TuiRespondResult }
+  'tui.setSessionMode': { params: TuiSetSessionModeParams; result: TuiSetSessionModeResult }
 }
 
 export type TuiRequestMethod = keyof TuiRequestMap

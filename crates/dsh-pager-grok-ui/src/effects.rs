@@ -6,7 +6,9 @@ use dsh_pager::{
     DshGeneration, DshQueueItemId, DshRequestId, DshSeq, DshSessionId, PagerError, PagerResult,
     RpcTransport, SessionState,
 };
-use dsh_pager_protocol::{PromptMode, QueueAction, SubagentAddress, TuiInteractionResponse};
+use dsh_pager_protocol::{
+    PromptMode, QueueAction, SessionModeId, SubagentAddress, TuiInteractionResponse,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -61,6 +63,9 @@ pub enum UiIntent {
     },
     InterruptSubagent {
         address: SubagentAddress,
+    },
+    SetSessionMode {
+        mode_id: Option<SessionModeId>,
     },
 }
 
@@ -224,6 +229,10 @@ pub enum UiEffect {
         operation: OperationKey,
         address: SubagentAddress,
     },
+    SetSessionMode {
+        operation: OperationKey,
+        mode_id: Option<SessionModeId>,
+    },
 }
 
 /// Boundary a non-DSH host (for example Codex CLI) can implement later.
@@ -358,6 +367,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::PreviewMedia { .. } => "media-preview",
         UiIntent::ReorderSession { .. } => "reorder-session",
         UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
+        UiIntent::SetSessionMode { .. } => "set-session-mode",
     };
     let dedupe_key = match &intent {
         UiIntent::CancelSession => action_name.to_string(),
@@ -396,6 +406,12 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
             format!(
                 "{action_name}:{}:{}",
                 address.child_session_id, address.mode as u8
+            )
+        }
+        UiIntent::SetSessionMode { mode_id } => {
+            format!(
+                "{action_name}:{}",
+                mode_id.map(SessionModeId::as_str).unwrap_or("cycle")
             )
         }
     };
@@ -484,6 +500,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::InterruptSubagent { address } => {
             UiEffect::InterruptSubagent { operation, address }
         }
+        UiIntent::SetSessionMode { mode_id } => UiEffect::SetSessionMode { operation, mode_id },
     }
 }
 
@@ -701,6 +718,19 @@ impl DshEffectSink<'_, '_> {
                 let result = dsh_pager::interrupt_subagent(self.transport, &address);
                 (operation, result.map(|value| value.accepted))
             }
+            UiEffect::SetSessionMode {
+                mut operation,
+                mode_id,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let session =
+                    SessionState::new(operation.session_id.to_string(), operation.generation.get());
+                let result = dsh_pager::set_session_mode(self.transport, &session, mode_id);
+                (operation, result.map(|value| value.accepted))
+            }
         };
         match result {
             Ok(true) => {
@@ -827,7 +857,8 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
         | UiEffect::FileSearchQuery { operation, .. }
         | UiEffect::PreviewMedia { operation, .. }
         | UiEffect::ReorderSession { operation, .. }
-        | UiEffect::InterruptSubagent { operation, .. } => operation,
+        | UiEffect::InterruptSubagent { operation, .. }
+        | UiEffect::SetSessionMode { operation, .. } => operation,
     }
 }
 
@@ -872,6 +903,9 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
             operation: target, ..
         }
         | UiEffect::InterruptSubagent {
+            operation: target, ..
+        }
+        | UiEffect::SetSessionMode {
             operation: target, ..
         } => *target = operation,
     }
@@ -965,6 +999,16 @@ fn encode_async_request(
                 "mode": address.mode,
             }),
         )),
+        UiEffect::SetSessionMode { mode_id, .. } => {
+            let mut params = json!({
+                "sessionId": operation.session_id,
+                "generation": operation.generation,
+            });
+            if let Some(mode_id) = mode_id {
+                params["modeId"] = json!(mode_id);
+            }
+            Some(("tui.setSessionMode", params))
+        }
         UiEffect::AttachSession { .. } => None,
     };
     Ok(request)
@@ -978,9 +1022,28 @@ struct DecodedAsyncResult {
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
 }
 
+fn decode_tui_result<T: serde::de::DeserializeOwned>(raw: Value) -> PagerResult<T> {
+    let payload = if raw.get("ok").and_then(Value::as_bool) == Some(true) {
+        raw.get("value").cloned().unwrap_or(raw)
+    } else {
+        raw
+    };
+    Ok(serde_json::from_value(payload)?)
+}
+
 fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyncResult> {
     if matches!(effect, UiEffect::RespondInteraction { .. }) {
-        let value: dsh_pager_protocol::TuiRespondResult = serde_json::from_value(raw)?;
+        let value: dsh_pager_protocol::TuiRespondResult = decode_tui_result(raw)?;
+        return Ok(DecodedAsyncResult {
+            accepted: value.accepted,
+            session_list: None,
+            session_search: None,
+            file_references: None,
+            attachment_preview: None,
+        });
+    }
+    if matches!(effect, UiEffect::SetSessionMode { .. }) {
+        let value: dsh_pager_protocol::TuiSetSessionModeResult = decode_tui_result(raw)?;
         return Ok(DecodedAsyncResult {
             accepted: value.accepted,
             session_list: None,
@@ -1181,7 +1244,7 @@ fn prompt_digest(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsh_pager_protocol::PromptMode;
+    use dsh_pager_protocol::{PromptMode, SessionModeId};
     use serde_json::json;
 
     #[test]
@@ -1251,6 +1314,34 @@ mod tests {
         assert_eq!(operation.session_id.as_str(), "parent");
         assert_eq!(address.parent_session_id, "parent");
         assert_eq!(address.child_session_id, "child");
+    }
+
+    #[test]
+    fn set_session_mode_effect_cycles_or_sets_explicit_id() {
+        let session = SessionState::new("s".into(), 3);
+        let effect = compile_intent(
+            UiIntent::SetSessionMode {
+                mode_id: Some(SessionModeId::Plan),
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::SetSessionMode { operation, mode_id } = effect else {
+            panic!("expected set-session-mode effect");
+        };
+        assert_eq!(operation.action, "set-session-mode");
+        assert_eq!(mode_id, Some(SessionModeId::Plan));
+        let (method, params) = encode_async_request(
+            &UiEffect::SetSessionMode {
+                operation: operation.clone(),
+                mode_id: Some(SessionModeId::Plan),
+            },
+            &operation,
+        )
+        .expect("encode")
+        .expect("supported");
+        assert_eq!(method, "tui.setSessionMode");
+        assert_eq!(params["sessionId"], "s");
+        assert_eq!(params["modeId"], "plan");
     }
 
     #[test]

@@ -355,7 +355,7 @@ fn run_interaction_smoke(
         transport,
         &session,
         "trigger interaction smoke".into(),
-        PromptMode::Queue,
+        PromptMode::Steer,
     )?;
     if !prompt.accepted {
         return Err("mock rejected smoke prompt".into());

@@ -11,7 +11,7 @@ use dsh_pager::{
     event_time_epoch_ms,
 };
 use dsh_pager_protocol::{
-    PromptMode, SessionEvent, SessionListValue, SessionSearchValue, SessionSummary,
+    PromptMode, SessionEvent, SessionListValue, SessionModeId, SessionSearchValue, SessionSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -417,6 +417,8 @@ pub struct GrokHostSnapshot {
     pub context_usage: ContextUsageSnapshot,
     #[serde(default)]
     pub turn_status: TurnStatusSnapshot,
+    #[serde(default)]
+    pub session_mode: SessionModeId,
     pub capabilities: CapabilityMatrix,
 }
 
@@ -684,7 +686,7 @@ impl GrokHostSnapshot {
             session_header,
             agent_view,
             prompt: PromptSnapshot {
-                default_mode: PromptMode::Queue,
+                default_mode: PromptMode::Steer,
                 supports_multiline: true,
                 authoritative: false,
                 history,
@@ -702,6 +704,7 @@ impl GrokHostSnapshot {
             agent,
             context_usage,
             turn_status,
+            session_mode: crate::session_mode::derive_session_mode(session),
             capabilities,
         }
     }
@@ -752,7 +755,7 @@ impl GrokHostSnapshot {
                 diagnostics: Vec::new(),
             },
             prompt: PromptSnapshot {
-                default_mode: PromptMode::Queue,
+                default_mode: PromptMode::Steer,
                 supports_multiline: true,
                 authoritative: false,
                 history: Vec::new(),
@@ -775,6 +778,7 @@ impl GrokHostSnapshot {
                 total_tokens: Some(12_000),
                 ..TurnStatusSnapshot::default()
             },
+            session_mode: SessionModeId::Normal,
             capabilities: CapabilityMatrix::default(),
         }
     }
@@ -1332,7 +1336,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
             diagnostics: Vec::new(),
         },
         prompt: PromptSnapshot {
-            default_mode: PromptMode::Queue,
+            default_mode: PromptMode::Steer,
             supports_multiline: true,
             authoritative: false,
             history: Vec::new(),
@@ -1350,6 +1354,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         agent: AgentSnapshot::default(),
         context_usage: ContextUsageSnapshot::default(),
         turn_status: TurnStatusSnapshot::default(),
+        session_mode: SessionModeId::Normal,
         capabilities: CapabilityMatrix::default(),
     }
 }

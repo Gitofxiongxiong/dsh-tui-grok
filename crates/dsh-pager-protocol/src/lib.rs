@@ -230,6 +230,68 @@ pub struct TuiRespondResult {
     pub accepted: bool,
 }
 
+/// Shift+Tab session-mode identifiers owned by the external TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionModeId {
+    #[default]
+    Normal,
+    Plan,
+    DangerFullAccess,
+}
+
+impl SessionModeId {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Plan => "plan",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::Plan,
+            Self::Plan => Self::DangerFullAccess,
+            Self::DangerFullAccess => Self::Normal,
+        }
+    }
+}
+
+impl fmt::Display for SessionModeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One resolved session-mode bundle returned by `tui.setSessionMode`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuiSessionMode {
+    pub id: SessionModeId,
+    pub label: String,
+    pub plan: bool,
+    pub sandbox: String,
+    pub approval: String,
+}
+
+/// Parameters for `tui.setSessionMode`. Omit `mode_id` to cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuiSetSessionModeParams {
+    pub session_id: String,
+    pub generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_id: Option<SessionModeId>,
+}
+
+/// Receipt returned by `tui.setSessionMode`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TuiSetSessionModeResult {
+    pub accepted: bool,
+    pub mode: TuiSessionMode,
+}
+
 /// One client-requested mutation of a pending queue item.
 ///
 /// The queue message schema is owned by the host. `content` therefore remains
@@ -757,6 +819,29 @@ mod tests {
             JsonRpcLine::Success(parsed) => assert_eq!(parsed.id, success.id),
             other => panic!("expected success, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_mode_id_serializes_as_kebab_case() {
+        assert_eq!(
+            serde_json::to_value(SessionModeId::DangerFullAccess).unwrap(),
+            serde_json::Value::String("danger-full-access".into())
+        );
+        let params = TuiSetSessionModeParams {
+            session_id: "s".into(),
+            generation: 2,
+            mode_id: Some(SessionModeId::Plan),
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        assert_eq!(value["sessionId"], "s");
+        assert_eq!(value["modeId"], "plan");
+        let cycle = TuiSetSessionModeParams {
+            session_id: "s".into(),
+            generation: 2,
+            mode_id: None,
+        };
+        let cycle_value = serde_json::to_value(&cycle).unwrap();
+        assert!(cycle_value.get("modeId").is_none());
     }
 
     #[test]
