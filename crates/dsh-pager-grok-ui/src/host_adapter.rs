@@ -211,13 +211,25 @@ pub struct WorkspaceSnapshot {
     pub rows: Vec<WorkspaceRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentRow {
     pub id: String,
     pub parent_id: String,
     pub label: String,
     pub mode: Option<String>,
     pub status: Option<String>,
+    #[serde(default)]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub context_pct: Option<u8>,
+    #[serde(default)]
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,13 +305,48 @@ pub struct AgentViewSnapshot {
 }
 
 /// Host-owned job/subagent projection used by task/status surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRow {
     pub id: String,
     pub kind: String,
     pub label: String,
     pub status: String,
     pub detail: Option<String>,
+    #[serde(default)]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub output_lines: Option<u64>,
+    #[serde(default)]
+    pub output_truncated: bool,
+    #[serde(default)]
+    pub is_monitor: bool,
+}
+
+impl TaskRow {
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self.status.trim().to_ascii_lowercase().as_str(),
+            "running" | "pending" | "queued" | "active" | "watching"
+        )
+    }
+}
+
+impl SubagentRow {
+    pub fn is_running(&self) -> bool {
+        self.running
+            || self.status.as_deref().is_some_and(|status| {
+                matches!(
+                    status.trim().to_ascii_lowercase().as_str(),
+                    "running" | "active" | "thinking" | "working" | "waiting"
+                )
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,6 +634,31 @@ impl GrokHostSnapshot {
                         label: job.label.clone(),
                         status: job.status.clone(),
                         detail: job.detail.clone(),
+                        activity: job
+                            .raw
+                            .get("activity")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        started_at_ms: job.started_at.and_then(|value| u64::try_from(value).ok()),
+                        finished_at_ms: job.finished_at.and_then(|value| u64::try_from(value).ok()),
+                        output: job
+                            .raw
+                            .get("output")
+                            .or_else(|| job.raw.get("stdout"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        output_lines: job
+                            .raw
+                            .get("outputLines")
+                            .or_else(|| job.raw.get("stdoutLines"))
+                            .and_then(Value::as_u64),
+                        output_truncated: job
+                            .raw
+                            .get("outputTruncated")
+                            .or_else(|| job.raw.get("stdoutTruncated"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        is_monitor: job.kind.eq_ignore_ascii_case("monitor"),
                     })
                     .collect::<Vec<_>>()
             })

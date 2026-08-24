@@ -60,7 +60,10 @@ use crate::views::{
         render_scrollbar,
     },
     agent_hints::{self, ActivePane, build_hints, prompt_focus_hint},
-    agent_panes::{AgentPaneController, render_agent_tasks_content, render_inline_agent_panes},
+    agent_panes::{
+        AgentItemId, AgentPaneController, inline_agent_pane_height, render_agent_detail_content,
+        render_agent_tasks_content, render_inline_agent_panes, render_watcher_cue, watcher_label,
+    },
     agent_status::AgentStatusBar,
     context_bar::context_bar_line,
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
@@ -118,6 +121,36 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn is_live_activity(activity: &str) -> bool {
+    !matches!(
+        activity.trim().to_ascii_lowercase().as_str(),
+        "inactive"
+            | "completed"
+            | "complete"
+            | "done"
+            | "failed"
+            | "error"
+            | "cancelled"
+            | "canceled"
+            | "finished"
+    )
+}
+
+fn agent_item_key(id: &AgentItemId) -> String {
+    match id {
+        AgentItemId::Task(id) => format!("task:{id}"),
+        AgentItemId::Subagent(id) => format!("subagent:{id}"),
+    }
+}
+
+fn agent_item_from_key(key: &str) -> Option<AgentItemId> {
+    if let Some(id) = key.strip_prefix("task:") {
+        return Some(AgentItemId::Task(id.to_string()));
+    }
+    key.strip_prefix("subagent:")
+        .map(|id| AgentItemId::Subagent(id.to_string()))
+}
+
 #[derive(Debug, Clone)]
 struct PendingQueueMutation {
     operation: OperationKey,
@@ -132,6 +165,7 @@ pub fn run_interactive(mut transport: RpcTransport, mut session: SessionState) -
         capabilities: terminal.capabilities(),
         ..UiState::default()
     };
+    ui.refresh_agent_subagents(&mut transport, &session, true);
     let result = run_loop(&mut terminal, &mut transport, &mut session, &mut ui);
     // Restore explicitly so an error from the loop does not leave raw mode
     // enabled before the `Drop` fallback runs.
@@ -181,6 +215,7 @@ fn run_loop(
                     .saturating_add(processed as u64);
                 ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
                 ui.shell.invalidate_content();
+                ui.refresh_agent_subagents(transport, session, false);
                 let _ = ui.dispatch_event(ShellEvent::Notification, transport, session)?;
             }
             Ok((_, processed)) => {
@@ -310,6 +345,9 @@ struct UiState {
     media_preview_controller: MediaPreviewController,
     agent_pane: AgentPaneController,
     agent_subagents: Vec<crate::host_adapter::SubagentRow>,
+    agent_detail: Option<AgentItemId>,
+    last_agent_item_click: Option<(Instant, AgentItemId)>,
+    last_subagent_refresh_seq: Option<i64>,
     dashboard: DashboardModel,
     workspace_tree: WorkspaceTreeController,
     dashboard_revision: Option<u64>,
@@ -341,6 +379,53 @@ struct UiState {
 }
 
 impl UiState {
+    /// Refresh the child catalog outside rendering.  Views only consume the
+    /// resulting `SubagentRow` projection; RPC and protocol details stay here.
+    fn refresh_agent_subagents(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        force: bool,
+    ) {
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        if !snapshot.capabilities.subagents {
+            return;
+        }
+        let seq = session.tail_seq();
+        if !force && seq == self.last_subagent_refresh_seq {
+            return;
+        }
+        self.last_subagent_refresh_seq = seq;
+        match dsh_pager::list_subagents(transport, session.session_id()) {
+            Ok(catalog) => {
+                self.agent_subagents = catalog
+                    .entries
+                    .into_iter()
+                    .map(|entry| {
+                        let activity = entry.activity.or(entry.reason);
+                        let running = activity.as_deref().is_some_and(is_live_activity);
+                        crate::host_adapter::SubagentRow {
+                            id: entry.id,
+                            parent_id: session.session_id().to_string(),
+                            label: entry.label.unwrap_or_else(|| entry.kind.clone()),
+                            mode: entry.mode.map(|mode| format!("{mode:?}").to_lowercase()),
+                            status: activity.clone(),
+                            activity,
+                            running,
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                self.status = Some(format!("Subagent list failed: {error}"));
+            }
+        }
+    }
+
     fn submit_effect(
         &mut self,
         transport: &mut RpcTransport,
@@ -611,22 +696,10 @@ impl UiState {
                 )
             },
         );
-        let tasks_height = if snapshot.tasks.is_empty() {
-            0
-        } else {
-            (snapshot.tasks.len() as u16)
-                .min(8)
-                .min((area.height as f32 * 0.15).floor() as u16)
-                .max(1)
-        };
-        let catalog_height = if snapshot.agent.subagents.is_empty() {
-            0
-        } else {
-            (snapshot.agent.subagents.len() as u16)
-                .min(8)
-                .min((area.height as f32 * 0.15).floor() as u16)
-                .max(1)
-        };
+        let tasks_height = inline_agent_pane_height(&snapshot.agent, area.height);
+        let catalog_height = 0;
+        let watcher_visible =
+            !snapshot.turn_status.visible && watcher_label(&snapshot.agent).is_some();
         let queue_height = if snapshot.queue.is_empty() {
             0
         } else {
@@ -650,7 +723,7 @@ impl UiState {
             todo_height: 0,
             queue_height,
             btw_height: 0,
-            turn_status_height: u16::from(snapshot.turn_status.visible),
+            turn_status_height: u16::from(snapshot.turn_status.visible || watcher_visible),
             banner_height: suggestion_rows,
             cta_height: 0,
             follow_ups_height: 0,
@@ -795,25 +868,44 @@ impl UiState {
                 priority: 5,
             });
         }
-        let turn_status_output = render_turn_status(
-            frame.buffer_mut(),
-            agent_layout.turn_status,
-            TurnStatusArgs {
-                activity: &snapshot.turn_status.activity,
-                turn_elapsed: elapsed_since_epoch_ms(snapshot.turn_status.turn_started_at_ms),
-                activity_elapsed: elapsed_since_epoch_ms(
-                    snapshot.turn_status.activity_started_at_ms,
-                ),
-                tick: self.frame as u64,
-                pending_user_input: snapshot.turn_status.pending_user_input,
-                buttons: self.capabilities.mouse.then_some(TurnStatusMouseButtons {
-                    cancel_hovered: self.turn_stop_hovered,
-                }),
-                total_tokens: snapshot.turn_status.total_tokens,
-                cancelling: self.cancel_pending.is_some() && snapshot.running,
-            },
-            theme,
-        );
+        let turn_status_output = if snapshot.turn_status.visible {
+            render_turn_status(
+                frame.buffer_mut(),
+                agent_layout.turn_status,
+                TurnStatusArgs {
+                    activity: &snapshot.turn_status.activity,
+                    turn_elapsed: elapsed_since_epoch_ms(snapshot.turn_status.turn_started_at_ms),
+                    activity_elapsed: elapsed_since_epoch_ms(
+                        snapshot.turn_status.activity_started_at_ms,
+                    ),
+                    tick: self.frame as u64,
+                    pending_user_input: snapshot.turn_status.pending_user_input,
+                    buttons: self.capabilities.mouse.then_some(TurnStatusMouseButtons {
+                        cancel_hovered: self.turn_stop_hovered,
+                    }),
+                    total_tokens: snapshot.turn_status.total_tokens,
+                    cancelling: self.cancel_pending.is_some() && snapshot.running,
+                },
+                theme,
+            )
+        } else {
+            if let Some(rect) = render_watcher_cue(
+                frame.buffer_mut(),
+                agent_layout.turn_status,
+                &snapshot.agent,
+                self.frame as u64,
+                theme,
+            ) {
+                self.hit_map.insert(crate::geometry::HitRegion {
+                    target: HitTarget::Overlay("watcher-cue".into()),
+                    rect,
+                    label: "background tasks and subagents".into(),
+                    link: None,
+                    priority: 25,
+                });
+            }
+            Default::default()
+        };
         if let Some(cancel_button) = turn_status_output.cancel_button {
             self.hit_map.insert(crate::geometry::HitRegion {
                 target: HitTarget::Overlay("turn-stop".into()),
@@ -871,7 +963,17 @@ impl UiState {
         theme: &Theme,
     ) {
         let buf = frame.buffer_mut();
-        render_inline_agent_panes(buf, layout.tasks, layout.catalog, &snapshot.agent, theme);
+        let rows =
+            render_inline_agent_panes(buf, layout.tasks, &snapshot.agent, &self.agent_pane, theme);
+        for row in rows {
+            self.hit_map.insert(crate::geometry::HitRegion {
+                target: HitTarget::Overlay(format!("agent-item:{}", agent_item_key(&row.id))),
+                rect: row.rect,
+                label: "agent task or subagent".into(),
+                link: None,
+                priority: 18,
+            });
+        }
         if layout.queue.height > 0 {
             render_queue_content(
                 buf,
@@ -1562,13 +1664,24 @@ impl UiState {
     ) {
         let theme = Theme::current();
         let shortcuts = [Shortcut {
-            label: "Esc close",
+            label: if self.agent_detail.is_some() {
+                "Esc/q close · ↑/↓ select"
+            } else {
+                "Enter open · x interrupt · Esc close"
+            },
             clickable: true,
             id: 1,
         }];
         let config = ModalWindowConfig {
-            title: "Agent Tasks · DeepSeek host",
-            tabs: Some(&["tasks", "subagents"]),
+            title: if self.agent_detail.is_some() {
+                "Agent Detail · DeepSeek host"
+            } else {
+                "Agent Tasks · DeepSeek host"
+            },
+            tabs: self
+                .agent_detail
+                .is_none()
+                .then_some(&["tasks", "subagents"] as &[&str]),
             shortcuts: &shortcuts,
             sizing: ModalSizing::large(),
             fold_info: None,
@@ -1577,7 +1690,11 @@ impl UiState {
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
             let mut agent = snapshot.agent.clone();
             agent.subagents = self.agent_subagents.clone();
-            render_agent_tasks_content(buf, content.content, &agent, &self.agent_pane, theme);
+            if let Some(id) = self.agent_detail.as_ref() {
+                render_agent_detail_content(buf, content.content, &agent, id, theme);
+            } else {
+                render_agent_tasks_content(buf, content.content, &agent, &self.agent_pane, theme);
+            }
         }
     }
 
@@ -1667,6 +1784,23 @@ impl UiState {
         if self.shell.overlay() == Overlay::None
             && let ShellEvent::Mouse(mouse) = &event
         {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row)
+                && let HitTarget::Overlay(name) = &region.target
+            {
+                if let Some(key) = name.strip_prefix("agent-item:") {
+                    if let Some(id) = agent_item_from_key(key) {
+                        self.handle_agent_item_mouse(id, transport, session);
+                        return Ok(false);
+                    }
+                }
+                if name == "watcher-cue" {
+                    self.agent_detail = None;
+                    self.shell.open_agent_tasks();
+                    self.status = Some("Agent tasks opened".into());
+                    return Ok(false);
+                }
+            }
             let prompt_hit = self
                 .hit_map
                 .hit_test(mouse.column, mouse.row)
@@ -1754,38 +1888,19 @@ impl UiState {
             }
             ShellAction::OpenAgentTasks => {
                 self.agent_pane.clear();
+                self.agent_detail = None;
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
                 );
-                self.agent_subagents.clear();
-                let mut subagent_diagnostic = None;
-                if snapshot.capabilities.subagents {
-                    match dsh_pager::list_subagents(transport, session.session_id()) {
-                        Ok(catalog) => {
-                            self.agent_subagents = catalog
-                                .entries
-                                .into_iter()
-                                .map(|entry| crate::host_adapter::SubagentRow {
-                                    id: entry.id,
-                                    parent_id: session.session_id().to_string(),
-                                    label: entry.label.unwrap_or_else(|| entry.kind.clone()),
-                                    mode: entry.mode.map(|mode| format!("{mode:?}").to_lowercase()),
-                                    status: entry.activity.or(entry.reason),
-                                })
-                                .collect();
-                        }
-                        Err(error) => {
-                            subagent_diagnostic = Some(format!("Subagent list failed: {error}"));
-                        }
-                    }
-                }
+                self.refresh_agent_subagents(transport, session, true);
                 let mut agent_snapshot = snapshot.agent.clone();
                 agent_snapshot.subagents = self.agent_subagents.clone();
                 self.agent_pane.sync(&agent_snapshot);
-                self.status = Some(subagent_diagnostic.unwrap_or_else(|| {
-                    agent_status_message_with_subagents(&snapshot.agent, self.agent_subagents.len())
-                }));
+                self.status = Some(agent_status_message_with_subagents(
+                    &agent_snapshot,
+                    self.agent_subagents.len(),
+                ));
                 Ok(false)
             }
             ShellAction::OpenDashboard => {
@@ -2308,6 +2423,19 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &SessionState,
     ) {
+        if self.agent_detail.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.agent_detail = None;
+                    self.shell.close_overlay();
+                    self.status = Some("Agent detail closed".into());
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.agent_pane.move_selection(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.agent_pane.move_selection(1),
+                _ => {}
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
             self.shell.close_overlay();
             self.status = Some("Agent tasks closed".into());
@@ -2320,6 +2448,11 @@ impl UiState {
         match key.code {
             KeyCode::Up => self.agent_pane.move_selection(-1),
             KeyCode::Down => self.agent_pane.move_selection(1),
+            KeyCode::Enter => {
+                if let Some(id) = self.agent_pane.selected().cloned() {
+                    self.agent_detail = Some(id);
+                }
+            }
             KeyCode::Char('x') => {
                 if let Some(row) = self.agent_pane.selected_subagent(&agent)
                     && row.mode.as_deref() == Some("continuable")
@@ -2344,6 +2477,30 @@ impl UiState {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_agent_item_mouse(
+        &mut self,
+        id: AgentItemId,
+        _transport: &mut RpcTransport,
+        _session: &SessionState,
+    ) {
+        self.agent_pane.select(id.clone());
+        let now = Instant::now();
+        let double_click = self
+            .last_agent_item_click
+            .as_ref()
+            .is_some_and(|(at, previous)| {
+                *previous == id && now.duration_since(*at) <= TRANSCRIPT_DOUBLE_CLICK
+            });
+        self.last_agent_item_click = Some((now, id.clone()));
+        if double_click {
+            self.agent_detail = Some(id);
+            self.shell.open_agent_tasks();
+            self.status = Some("Agent detail opened".into());
+        } else {
+            self.status = Some("Agent item selected · double-click to open".into());
         }
     }
 

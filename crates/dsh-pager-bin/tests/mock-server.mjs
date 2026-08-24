@@ -158,6 +158,36 @@ function emitTailOnce() {
     method: 'events.mux',
     params: { type: 'session/queue', sessionId, items: queue },
   })
+  write({
+    jsonrpc: '2.0',
+    method: 'events.mux',
+    params: {
+      type: 'session/projection',
+      sessionId,
+      key: 'capabilities',
+      seq: 4,
+      value: { subagents: true },
+    },
+  })
+  write({
+    jsonrpc: '2.0',
+    method: 'events.mux',
+    params: {
+      type: 'session/jobs',
+      sessionId,
+      jobs: [{
+        id: 'job-long',
+        kind: 'command',
+        label: 'Long background demo',
+        status: 'running',
+        detail: 'sleep 90',
+        activity: 'sleeping for 90 seconds',
+        startedAt: Date.now(),
+        output: 'Task started\n',
+        outputLines: 1,
+      }],
+    },
+  })
 }
 
 const rl = createInterface({ input: process.stdin })
@@ -257,7 +287,7 @@ rl.on('line', (line) => {
       entries: [{
         kind: 'child',
         id: 'child-mock',
-        activity: 'inactive',
+        activity: 'sleeping for 90 seconds',
         mode: 'continuable',
         label: 'mock child',
         hasChildren: false,

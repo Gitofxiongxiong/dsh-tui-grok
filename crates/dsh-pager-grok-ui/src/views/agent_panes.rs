@@ -1,17 +1,19 @@
-//! Grok-derived task/subagent pane backed by DSH-owned agent snapshots.
+//! Grok-derived task/subagent surfaces backed by DSH-owned snapshots.
 //!
-//! The controller deliberately stores stable IDs instead of a row index. A
-//! refreshed task catalog can reorder or remove rows without turning an
-//! interrupt key into an action for a different subagent.
+//! The top strip is intentionally a compact watcher cue.  It expands into a
+//! single shared list and a detail view, so mouse and keyboard selection keep
+//! the same stable `AgentItemId` even when the host refreshes its snapshot.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
 };
 
 use crate::{
-    host_adapter::{AgentSnapshot, FeatureStatus, SubagentRow},
+    host_adapter::{AgentSnapshot, FeatureStatus, SubagentRow, TaskRow},
     render::line_utils::truncate_str,
     theme::Theme,
 };
@@ -21,6 +23,19 @@ use crate::{
 pub enum AgentItemId {
     Task(String),
     Subagent(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPaneRowKind {
+    Header,
+    Item,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPaneRow {
+    pub id: AgentItemId,
+    pub rect: Rect,
+    pub kind: AgentPaneRowKind,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -62,6 +77,12 @@ impl AgentPaneController {
         self.selected.as_ref()
     }
 
+    pub fn select(&mut self, id: AgentItemId) {
+        if self.order.contains(&id) {
+            self.selected = Some(id);
+        }
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
         if self.order.is_empty() {
             self.selected = None;
@@ -96,6 +117,36 @@ impl AgentPaneController {
     }
 }
 
+/// Height needed for the compact top strip.  A running task/subagent gets a
+/// single line; the strip is hidden when the host has no active work.
+pub fn inline_agent_pane_height(snapshot: &AgentSnapshot, view_height: u16) -> u16 {
+    if snapshot.status != FeatureStatus::Available {
+        return 0;
+    }
+    let tasks = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.is_running())
+        .count();
+    let subagents = snapshot
+        .subagents
+        .iter()
+        .filter(|agent| agent.is_running())
+        .count();
+    let groups = u16::from(tasks > 0) + u16::from(subagents > 0);
+    let rows = tasks.saturating_add(subagents) as u16;
+    if rows == 0 || groups == 0 {
+        return 0;
+    }
+    let cap = if view_height >= 12 {
+        (view_height / 6).max(3)
+    } else {
+        3
+    };
+    (rows.saturating_add(groups)).min(cap).min(8)
+}
+
+/// Render the expanded list used by `Ctrl+G`/`Ctrl+T`.
 pub fn render_agent_tasks_content(
     buffer: &mut Buffer,
     area: Rect,
@@ -124,30 +175,28 @@ pub fn render_agent_tasks_content(
         FeatureStatus::Available => {
             let mut row = 0u16;
             if !snapshot.tasks.is_empty() {
-                put_at(buffer, area, row, "Tasks", theme.gray_bright, theme, true);
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    &format!("Tasks ({})", snapshot.tasks.len()),
+                    theme.gray_bright,
+                    theme,
+                    true,
+                );
                 row = row.saturating_add(1);
             }
             for task in &snapshot.tasks {
                 if row >= area.height.saturating_sub(2) {
                     break;
                 }
-                let selected = controller.selected() == Some(&AgentItemId::Task(task.id.clone()));
-                let marker = if selected { "▸" } else { " " };
-                let line = format!(
-                    "{marker} {} [{}] {}{}",
-                    task.label,
-                    task.status,
-                    task.kind,
-                    task.detail
-                        .as_deref()
-                        .map(|detail| format!(" · {detail}"))
-                        .unwrap_or_default()
-                );
+                let id = AgentItemId::Task(task.id.clone());
+                let selected = controller.selected() == Some(&id);
                 put_at(
                     buffer,
                     area,
                     row,
-                    &line,
+                    &task_line(task, selected, true),
                     if selected {
                         theme.text_primary
                     } else {
@@ -163,7 +212,7 @@ pub fn render_agent_tasks_content(
                     buffer,
                     area,
                     row,
-                    "Subagents",
+                    &format!("Subagents ({})", snapshot.subagents.len()),
                     theme.gray_bright,
                     theme,
                     true,
@@ -174,20 +223,13 @@ pub fn render_agent_tasks_content(
                 if row >= area.height.saturating_sub(2) {
                     break;
                 }
-                let selected =
-                    controller.selected() == Some(&AgentItemId::Subagent(subagent.id.clone()));
-                let marker = if selected { "▸" } else { " " };
-                let mode = subagent.mode.as_deref().unwrap_or("unknown");
-                let status = subagent.status.as_deref().unwrap_or("unknown");
-                let line = format!(
-                    "{marker} {} [{status}] {mode} · {}",
-                    subagent.label, subagent.id
-                );
+                let id = AgentItemId::Subagent(subagent.id.clone());
+                let selected = controller.selected() == Some(&id);
                 put_at(
                     buffer,
                     area,
                     row,
-                    &line,
+                    &subagent_line(subagent, selected),
                     if selected {
                         theme.accent_assistant
                     } else {
@@ -203,7 +245,7 @@ pub fn render_agent_tasks_content(
                     buffer,
                     area,
                     0,
-                    "No active tasks or subagents",
+                    "No tasks or subagents",
                     theme.gray,
                     theme,
                     false,
@@ -215,83 +257,414 @@ pub fn render_agent_tasks_content(
         buffer,
         area,
         area.height.saturating_sub(1),
-        "↑/↓ select · x interrupt selected subagent · Esc close",
+        "↑/↓ select · Enter open · x interrupt subagent · Esc close",
         theme.gray_dim,
         theme,
         false,
     );
 }
 
-/// Draw the task and subagent slices allocated by the shared AgentView layout.
-/// Heights and ordering come from that layout snapshot; this renderer adds no
-/// competing geometry or hidden placeholder rows.
+/// Draw the compact top strip and return item hit rectangles for mouse input.
 pub fn render_inline_agent_panes(
     buffer: &mut Buffer,
-    tasks_area: Rect,
-    catalog_area: Rect,
+    area: Rect,
     snapshot: &AgentSnapshot,
+    controller: &AgentPaneController,
     theme: &Theme,
-) {
-    if tasks_area.height > 0 {
+) -> Vec<AgentPaneRow> {
+    let mut hits = Vec::new();
+    if area.width == 0 || area.height == 0 {
+        return hits;
+    }
+    let mut row = 0u16;
+    let groups = [
+        (
+            "Tasks",
+            snapshot
+                .tasks
+                .iter()
+                .filter(|task| task.is_running())
+                .count(),
+        ),
+        (
+            "Subagents",
+            snapshot
+                .subagents
+                .iter()
+                .filter(|agent| agent.is_running())
+                .count(),
+        ),
+    ];
+    for (group, count) in groups {
+        if count == 0 || row >= area.height {
+            continue;
+        }
+        let header = Rect::new(area.x, area.y.saturating_add(row), area.width, 1);
         put_at(
             buffer,
-            tasks_area,
-            0,
-            "Tasks",
+            area,
+            row,
+            &format!("▾ {group} {count}"),
             theme.gray_bright,
             theme,
             true,
         );
-        for (index, task) in snapshot.tasks.iter().enumerate() {
-            let row = index as u16 + 1;
-            if row >= tasks_area.height {
-                break;
+        row = row.saturating_add(1);
+        let _ = header;
+        match group {
+            "Tasks" => {
+                for task in snapshot.tasks.iter().filter(|task| task.is_running()) {
+                    if row >= area.height {
+                        break;
+                    }
+                    let rect = Rect::new(area.x, area.y.saturating_add(row), area.width, 1);
+                    let id = AgentItemId::Task(task.id.clone());
+                    put_at(
+                        buffer,
+                        area,
+                        row,
+                        &task_line(task, controller.selected() == Some(&id), false),
+                        if controller.selected() == Some(&id) {
+                            theme.text_primary
+                        } else {
+                            theme.text_secondary
+                        },
+                        theme,
+                        controller.selected() == Some(&id),
+                    );
+                    hits.push(AgentPaneRow {
+                        id,
+                        rect,
+                        kind: AgentPaneRowKind::Item,
+                    });
+                    row = row.saturating_add(1);
+                }
             }
+            "Subagents" => {
+                for subagent in snapshot.subagents.iter().filter(|agent| agent.is_running()) {
+                    if row >= area.height {
+                        break;
+                    }
+                    let rect = Rect::new(area.x, area.y.saturating_add(row), area.width, 1);
+                    let id = AgentItemId::Subagent(subagent.id.clone());
+                    put_at(
+                        buffer,
+                        area,
+                        row,
+                        &subagent_line(subagent, controller.selected() == Some(&id)),
+                        if controller.selected() == Some(&id) {
+                            theme.accent_assistant
+                        } else {
+                            theme.gray
+                        },
+                        theme,
+                        controller.selected() == Some(&id),
+                    );
+                    hits.push(AgentPaneRow {
+                        id,
+                        rect,
+                        kind: AgentPaneRowKind::Item,
+                    });
+                    row = row.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    hits
+}
+
+pub fn render_agent_detail_content(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &AgentSnapshot,
+    id: &AgentItemId,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut row = 0u16;
+    match id {
+        AgentItemId::Task(id) => {
+            let Some(task) = snapshot.tasks.iter().find(|task| task.id == *id) else {
+                put(buffer, area, "Task no longer exists", theme.warning, theme);
+                return;
+            };
             put_at(
                 buffer,
-                tasks_area,
+                area,
                 row,
-                &format!("{} [{}] {}", task.status, task.id, task.label),
-                theme.text_secondary,
+                &format!(
+                    "{} {}",
+                    status_icon(&task.status, task.is_running()),
+                    task.label
+                ),
+                theme.text_primary,
+                theme,
+                true,
+            );
+            row += 1;
+            put_at(
+                buffer,
+                area,
+                row,
+                &format!(
+                    "id: {} · kind: {} · status: {}",
+                    task.id, task.kind, task.status
+                ),
+                theme.gray_bright,
                 theme,
                 false,
             );
-        }
-    }
-    if catalog_area.height > 0 {
-        put_at(
-            buffer,
-            catalog_area,
-            0,
-            "Subagents",
-            theme.gray_bright,
-            theme,
-            true,
-        );
-        for (index, subagent) in snapshot.subagents.iter().enumerate() {
-            let row = index as u16 + 1;
-            if row >= catalog_area.height {
-                break;
+            row += 1;
+            if let Some(activity) = task.activity.as_deref().or(task.detail.as_deref()) {
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    &format!("activity: {activity}"),
+                    theme.text_secondary,
+                    theme,
+                    false,
+                );
+                row += 1;
             }
+            if let Some(output) = task.output.as_deref() {
+                for line in output
+                    .lines()
+                    .take(area.height.saturating_sub(row + 2) as usize)
+                {
+                    put_at(buffer, area, row, line, theme.gray, theme, false);
+                    row += 1;
+                }
+            }
+            if task.output_truncated {
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    "output truncated by host",
+                    theme.gray_dim,
+                    theme,
+                    false,
+                );
+            }
+        }
+        AgentItemId::Subagent(id) => {
+            let Some(agent) = snapshot.subagents.iter().find(|agent| agent.id == *id) else {
+                put(
+                    buffer,
+                    area,
+                    "Subagent no longer exists",
+                    theme.warning,
+                    theme,
+                );
+                return;
+            };
             put_at(
                 buffer,
-                catalog_area,
+                area,
                 row,
                 &format!(
-                    "{} [{}] {}",
-                    subagent.status.as_deref().unwrap_or("unknown"),
-                    subagent.id,
-                    subagent.label
+                    "{} {}",
+                    status_icon(
+                        agent.status.as_deref().unwrap_or("unknown"),
+                        agent.is_running()
+                    ),
+                    agent.label
                 ),
                 theme.accent_assistant,
                 theme,
+                true,
+            );
+            row += 1;
+            put_at(
+                buffer,
+                area,
+                row,
+                &format!(
+                    "id: {} · mode: {} · status: {}",
+                    agent.id,
+                    agent.mode.as_deref().unwrap_or("unknown"),
+                    agent.status.as_deref().unwrap_or("unknown")
+                ),
+                theme.gray_bright,
+                theme,
                 false,
             );
+            row += 1;
+            if let Some(activity) = agent.activity.as_deref() {
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    &format!("activity: {activity}"),
+                    theme.text_secondary,
+                    theme,
+                    false,
+                );
+                row += 1;
+            }
+            if let Some(model) = agent.model.as_deref() {
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    &format!("model: {model}"),
+                    theme.text_secondary,
+                    theme,
+                    false,
+                );
+            }
         }
+    }
+    put_at(
+        buffer,
+        area,
+        area.height.saturating_sub(1),
+        "Esc/q close · ↑/↓ select another",
+        theme.gray_dim,
+        theme,
+        false,
+    );
+}
+
+/// A watcher cue shown next to the normal turn status when background work is
+/// running but no foreground turn is active.
+pub fn render_watcher_cue(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &AgentSnapshot,
+    tick: u64,
+    theme: &Theme,
+) -> Option<Rect> {
+    let label = watcher_label(snapshot)?;
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let frame = ["○", "◎", "◉", "◎"][(tick as usize) % 4];
+    put_at(
+        buffer,
+        area,
+        0,
+        &format!("{frame} {label} · Ctrl+G details"),
+        theme.accent_assistant,
+        theme,
+        false,
+    );
+    Some(area)
+}
+
+pub fn watcher_label(snapshot: &AgentSnapshot) -> Option<String> {
+    let tasks = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.is_running())
+        .count();
+    let subagents = snapshot
+        .subagents
+        .iter()
+        .filter(|agent| agent.is_running())
+        .count();
+    if tasks == 0 && subagents == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if tasks > 0 {
+        parts.push(format!(
+            "{tasks} background task{}",
+            if tasks == 1 { "" } else { "s" }
+        ));
+    }
+    if subagents > 0 {
+        parts.push(format!(
+            "{subagents} subagent{}",
+            if subagents == 1 { "" } else { "s" }
+        ));
+    }
+    Some(format!("{} still running", parts.join(" · ")))
+}
+
+fn task_line(task: &TaskRow, selected: bool, detailed: bool) -> String {
+    let marker = if selected { "▸" } else { " " };
+    let activity = task
+        .activity
+        .as_deref()
+        .or(task.detail.as_deref())
+        .unwrap_or("");
+    let elapsed = elapsed_label(task.started_at_ms);
+    let mut line = format!(
+        "{marker} {} {} · {}",
+        status_icon(&task.status, task.is_running()),
+        task.label,
+        task.status
+    );
+    if !activity.is_empty() {
+        line.push_str(&format!(" · {activity}"));
+    }
+    if !elapsed.is_empty() {
+        line.push_str(&format!(" · {elapsed}"));
+    }
+    if task.is_monitor {
+        line.push_str(" · monitor");
+    }
+    if detailed && !task.id.is_empty() {
+        line.push_str(&format!(" · {}", task.id));
+    }
+    line
+}
+
+fn subagent_line(agent: &SubagentRow, selected: bool) -> String {
+    let marker = if selected { "▸" } else { " " };
+    let activity = agent
+        .activity
+        .as_deref()
+        .or(agent.status.as_deref())
+        .unwrap_or("unknown");
+    let mode = agent.mode.as_deref().unwrap_or("unknown");
+    let elapsed = elapsed_label(agent.started_at_ms);
+    let mut line = format!(
+        "{marker} {} {} · {} · {}",
+        status_icon(activity, agent.is_running()),
+        agent.label,
+        activity,
+        mode
+    );
+    if !elapsed.is_empty() {
+        line.push_str(&format!(" · {elapsed}"));
+    }
+    line
+}
+
+fn status_icon(status: &str, running: bool) -> &'static str {
+    if running {
+        return "⠴";
+    }
+    match status.to_ascii_lowercase().as_str() {
+        "completed" | "done" | "success" | "succeeded" => "✓",
+        "failed" | "error" | "cancelled" | "canceled" => "✗",
+        _ => "·",
     }
 }
 
-fn put(buffer: &mut Buffer, area: Rect, text: &str, color: ratatui::style::Color, theme: &Theme) {
+fn elapsed_label(started_at_ms: Option<u64>) -> String {
+    let Some(started_at_ms) = started_at_ms else {
+        return String::new();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(started_at_ms);
+    let seconds = now.saturating_sub(started_at_ms) / 1000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+fn put(buffer: &mut Buffer, area: Rect, text: &str, color: Color, theme: &Theme) {
     put_at(buffer, area, 0, text, color, theme, false);
 }
 
@@ -300,7 +673,7 @@ fn put_at(
     area: Rect,
     row: u16,
     text: &str,
-    color: ratatui::style::Color,
+    color: Color,
     theme: &Theme,
     bold: bool,
 ) {
@@ -330,6 +703,7 @@ mod tests {
                 label: "build".into(),
                 status: "running".into(),
                 detail: None,
+                ..Default::default()
             }],
             subagents: vec![SubagentRow {
                 id: "child-a".into(),
@@ -337,6 +711,8 @@ mod tests {
                 label: "research".into(),
                 mode: Some("continuable".into()),
                 status: Some("running".into()),
+                running: true,
+                ..Default::default()
             }],
         }
     }
@@ -377,7 +753,7 @@ mod tests {
             Rect::new(1, 1, 78, 6),
             &snapshot,
             &AgentPaneController::default(),
-            Theme::current(),
+            &Theme::current(),
         );
         let text = buffer
             .content()
@@ -385,5 +761,14 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("Waiting for authoritative"));
+    }
+
+    #[test]
+    fn watcher_counts_only_live_entries() {
+        let snapshot = snapshot();
+        assert_eq!(
+            watcher_label(&snapshot).as_deref(),
+            Some("1 background task · 1 subagent still running")
+        );
     }
 }

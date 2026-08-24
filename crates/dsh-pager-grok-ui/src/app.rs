@@ -515,7 +515,9 @@ impl AppShell {
                     self.open_image_preview();
                     return ShellAction::OpenImagePreview;
                 }
-                KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('t') | KeyCode::Char('g')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     self.open_agent_tasks();
                     return ShellAction::OpenAgentTasks;
                 }
@@ -775,6 +777,12 @@ mod tests {
             ShellAction::OpenAgentTasks
         );
         assert_eq!(shell.owner(), KeyOwner::AgentTasks);
+        shell.close_overlay();
+        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_g), true),
+            ShellAction::OpenAgentTasks
+        );
     }
 
     #[test]
