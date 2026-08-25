@@ -3325,6 +3325,15 @@ mod tests {
             .join("\n");
         assert!(terminal_text.contains("▾ Run show workspace"));
         assert!(!terminal_text.contains('⌄'));
+        let terminal_header = terminal
+            .iter()
+            .find(|line| line.to_string().contains("Run show workspace"))
+            .expect("expanded terminal header");
+        assert_eq!(terminal_header.to_string(), "▾ Run show workspace");
+        assert_eq!(
+            terminal_header.spans[0].content,
+            format!("{} ", glyphs::disclosure_open())
+        );
         assert!(terminal_text.contains("$ pwd"));
         assert!(terminal_text.contains("/work"));
         assert!(!terminal_text.contains("exit 0"));

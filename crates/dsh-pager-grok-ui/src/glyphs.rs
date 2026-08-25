@@ -10,6 +10,14 @@ pub fn chevron() -> &'static str {
     "›"
 }
 
+/// Open disclosure indicator used by expanded, collapsible surfaces.
+///
+/// This mirrors Grok's `disclosure_open` glyph. Unlike U+2304 DOWN ARROWHEAD,
+/// U+25BE stays vertically centered in the monospace cell used by xterm.js.
+pub fn disclosure_open() -> &'static str {
+    "▾"
+}
+
 pub fn diamond_filled() -> &'static str {
     "◆"
 }

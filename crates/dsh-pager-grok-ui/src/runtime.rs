@@ -4415,7 +4415,8 @@ mod tests {
             .map(|line| line.copy_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(expanded.contains("⌄ Run Query the current workspace"));
+        assert!(expanded.contains("▾ Run Query the current workspace"));
+        assert!(!expanded.contains('⌄'));
         assert!(expanded.contains("/work"));
         assert!(expanded.contains("$ pwd"));
         assert!(!expanded.contains("exit 0"));
