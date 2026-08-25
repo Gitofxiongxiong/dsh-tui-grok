@@ -30,7 +30,7 @@ use ratatui::{
 };
 
 use crate::actions::{ActionId, ActionRegistry};
-use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
+use crate::app::{AppShell, HomeKeyState, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard::{self, ClipboardBackend};
 use crate::diag;
@@ -1798,7 +1798,7 @@ impl UiState {
             false,
             false,
             snapshot.running,
-            false,
+            snapshot.running && self.shell.overlay() == Overlay::None,
             has_visible_queue,
             false,
             false,
@@ -2140,7 +2140,14 @@ impl UiState {
             }
         }
         let prompt_empty = self.prompt.is_empty();
-        let action = self.shell.dispatch(event, prompt_empty);
+        let action = self.shell.dispatch_home(
+            event,
+            HomeKeyState {
+                prompt_empty,
+                turn_running: session.running(),
+                cancel_pending: self.cancel_pending.is_some(),
+            },
+        );
         match action {
             ShellAction::Quit => {
                 diag::log(
@@ -2151,6 +2158,10 @@ impl UiState {
                     ),
                 );
                 Ok(true)
+            }
+            ShellAction::CancelTurn => {
+                self.request_cancel_session(transport, session)?;
+                Ok(false)
             }
             ShellAction::OpenQueue => {
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
@@ -2566,13 +2577,22 @@ impl UiState {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) || !over_stop {
             return Ok(false);
         }
+        self.request_cancel_session(transport, session)?;
+        Ok(true)
+    }
+
+    fn request_cancel_session(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<()> {
         if !session.running() {
             self.status = Some("Turn already finished".into());
-            return Ok(true);
+            return Ok(());
         }
         if self.cancel_pending.is_some() {
             self.status = Some("Cancellation already pending".into());
-            return Ok(true);
+            return Ok(());
         }
 
         let request_id = DshRequestId::new(format!("cancel-{}", self.next_operation));
@@ -2588,7 +2608,7 @@ impl UiState {
         } else {
             self.status = Some(receipt_status_message(&receipt, "Cancel session"));
         }
-        Ok(true)
+        Ok(())
     }
 
     fn handle_file_search_key(

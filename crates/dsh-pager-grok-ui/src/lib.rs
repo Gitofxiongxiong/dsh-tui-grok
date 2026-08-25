@@ -34,8 +34,8 @@ pub mod selection;
 pub mod session_mode;
 
 pub use app::{
-    AppShell, KeyOwner, Overlay, REPLACEMENT_MAP, ReplacementEntry, ShellAction, ShellEvent,
-    ShellLayout, ShellSnapshot,
+    AppShell, HomeKeyState, KeyOwner, Overlay, REPLACEMENT_MAP, ReplacementEntry, ShellAction,
+    ShellEvent, ShellLayout, ShellSnapshot,
 };
 pub use dsh_pager_render::{TerminalCapabilities, Theme};
 pub use effects::{

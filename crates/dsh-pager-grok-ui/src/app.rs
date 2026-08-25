@@ -98,10 +98,34 @@ pub enum ShellEvent {
     Notification,
 }
 
+/// Homepage (no overlay) inputs for the Esc / Ctrl+C policy.
+///
+/// Mirrors Grok `AgentView::try_handle_esc_policy` plus the Ctrl+C
+/// CancelTurn ladder: overlays still steal keys first; this only applies
+/// once the agent surface owns the event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeKeyState {
+    pub prompt_empty: bool,
+    pub turn_running: bool,
+    pub cancel_pending: bool,
+}
+
+impl HomeKeyState {
+    pub const fn idle_prompt(prompt_empty: bool) -> Self {
+        Self {
+            prompt_empty,
+            turn_running: false,
+            cancel_pending: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellAction {
     None,
     Quit,
+    /// Interrupt the in-flight turn without leaving the session.
+    CancelTurn,
     CloseOverlay,
     ClearPrompt,
     ScrollUp(u16),
@@ -363,6 +387,10 @@ impl AppShell {
     }
 
     pub fn dispatch(&mut self, event: ShellEvent, prompt_empty: bool) -> ShellAction {
+        self.dispatch_home(event, HomeKeyState::idle_prompt(prompt_empty))
+    }
+
+    pub fn dispatch_home(&mut self, event: ShellEvent, home: HomeKeyState) -> ShellAction {
         match event {
             ShellEvent::Resize { width, height } => {
                 let area = Rect::new(0, 0, width, height);
@@ -410,11 +438,12 @@ impl AppShell {
                     _ => ShellAction::TranscriptMouse(mouse),
                 }
             }
-            ShellEvent::Key(key) => self.dispatch_key(key, prompt_empty),
+            ShellEvent::Key(key) => self.dispatch_key(key, home),
         }
     }
 
-    fn dispatch_key(&mut self, key: KeyEvent, prompt_empty: bool) -> ShellAction {
+    fn dispatch_key(&mut self, key: KeyEvent, home: HomeKeyState) -> ShellAction {
+        let prompt_empty = home.prompt_empty;
         if self.overlay != Overlay::None {
             if self.overlay == Overlay::Picker {
                 // The copied Grok picker owns its own Esc ladder: first leave
@@ -462,11 +491,27 @@ impl AppShell {
             };
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Grok CancelTurn / Ctrl+C ladder: a draft is cleared first and
+            // the turn keeps running; an empty running prompt cancels the
+            // turn; idle empty or already-cancelling empty quits. Esc is
+            // the one that retries cancel instead of escalating to quit.
+            if !prompt_empty {
+                return ShellAction::ClearPrompt;
+            }
+            if home.turn_running && !home.cancel_pending {
+                return ShellAction::CancelTurn;
+            }
             return ShellAction::Quit;
         }
         if key.code == KeyCode::Esc {
+            // Grok `try_handle_esc_policy` (non-vim homepage): running or
+            // cancelling → cancel/retry immediately, even with a draft;
+            // idle draft → clear; idle empty → swallow. Esc never quits.
+            if home.turn_running || home.cancel_pending {
+                return ShellAction::CancelTurn;
+            }
             return if prompt_empty {
-                ShellAction::Quit
+                ShellAction::None
             } else {
                 ShellAction::ClearPrompt
             };
@@ -571,8 +616,109 @@ mod tests {
         );
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
+            ShellAction::None
+        );
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn running(prompt_empty: bool) -> HomeKeyState {
+        HomeKeyState {
+            prompt_empty,
+            turn_running: true,
+            cancel_pending: false,
+        }
+    }
+
+    fn cancelling(prompt_empty: bool) -> HomeKeyState {
+        HomeKeyState {
+            prompt_empty,
+            turn_running: false,
+            cancel_pending: true,
+        }
+    }
+
+    #[test]
+    fn homepage_esc_cancels_a_running_turn_instead_of_quitting() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(key(KeyCode::Esc)), running(true)),
+            ShellAction::CancelTurn
+        );
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(key(KeyCode::Esc)), running(false)),
+            ShellAction::CancelTurn,
+            "mid-turn Esc keeps the draft and cancels, matching Grok non-vim"
+        );
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(key(KeyCode::Esc)), cancelling(true)),
+            ShellAction::CancelTurn,
+            "Esc while cancelling retries cancel instead of quitting"
+        );
+    }
+
+    #[test]
+    fn homepage_esc_idle_empty_is_swallowed() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
+            ShellAction::None
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), false),
+            ShellAction::ClearPrompt
+        );
+    }
+
+    #[test]
+    fn homepage_ctrl_c_matches_grok_cancel_then_quit_ladder() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(ctrl_c()), running(true)),
+            ShellAction::CancelTurn
+        );
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(ctrl_c()), running(false)),
+            ShellAction::ClearPrompt,
+            "Ctrl+C with a draft clears first and leaves the turn running"
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_c()), false),
+            ShellAction::ClearPrompt
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_c()), true),
             ShellAction::Quit
         );
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(ctrl_c()), cancelling(true)),
+            ShellAction::Quit,
+            "Ctrl+C while cancelling escalates to quit"
+        );
+        assert_eq!(
+            shell.dispatch_home(
+                ShellEvent::Key(ctrl_c()),
+                HomeKeyState {
+                    prompt_empty: true,
+                    turn_running: true,
+                    cancel_pending: true,
+                }
+            ),
+            ShellAction::Quit,
+            "host still running plus a pending cancel is the cancelling state"
+        );
+    }
+
+    #[test]
+    fn overlay_still_owns_esc_while_a_turn_is_running() {
+        let mut shell = AppShell::default();
+        shell.open_file_search();
+        assert!(matches!(
+            shell.dispatch_home(ShellEvent::Key(key(KeyCode::Esc)), running(true)),
+            ShellAction::FileSearchKey(_)
+        ));
     }
 
     #[test]
