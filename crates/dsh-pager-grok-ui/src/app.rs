@@ -269,7 +269,10 @@ impl AppShell {
         ShellSnapshot {
             owner: self.owner,
             overlay: self.overlay,
-            dim_layer: !matches!(self.overlay, Overlay::None | Overlay::Permission),
+            dim_layer: !matches!(
+                self.overlay,
+                Overlay::None | Overlay::Permission | Overlay::Interaction
+            ),
             z_order: if self.overlay == Overlay::None {
                 Vec::new()
             } else {
@@ -325,13 +328,13 @@ impl AppShell {
     /// Match Grok's permission-card Esc rung: keep the blocking card visible
     /// while handing keyboard ownership to scrollback.
     pub fn park_permission(&mut self) {
-        if self.overlay == Overlay::Permission {
+        if matches!(self.overlay, Overlay::Permission | Overlay::Interaction) {
             self.owner = KeyOwner::Transcript;
         }
     }
 
     pub fn focus_permission(&mut self) {
-        if self.overlay == Overlay::Permission {
+        if matches!(self.overlay, Overlay::Permission | Overlay::Interaction) {
             self.owner = KeyOwner::Interaction;
         }
     }
@@ -421,10 +424,7 @@ impl AppShell {
             if self.overlay == Overlay::Queue {
                 return ShellAction::QueueKey(key);
             }
-            if self.overlay == Overlay::Interaction {
-                return ShellAction::InteractionKey(key);
-            }
-            if self.overlay == Overlay::Permission {
+            if matches!(self.overlay, Overlay::Interaction | Overlay::Permission) {
                 if self.owner == KeyOwner::Interaction {
                     return ShellAction::InteractionKey(key);
                 }
@@ -704,6 +704,29 @@ mod tests {
 
         shell.park_permission();
         assert_eq!(shell.overlay(), Overlay::Permission);
+        assert_eq!(shell.owner(), KeyOwner::Transcript);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Down)), true),
+            ShellAction::ScrollDown(1)
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Enter)), true),
+            ShellAction::OpenInteraction
+        );
+        assert_eq!(shell.owner(), KeyOwner::Interaction);
+    }
+
+    #[test]
+    fn question_card_parks_focus_without_closing_or_dimming() {
+        let mut shell = AppShell::default();
+        shell.open_interaction();
+        let focused = shell.snapshot();
+        assert_eq!(focused.overlay, Overlay::Interaction);
+        assert_eq!(focused.cursor_owner, KeyOwner::Interaction);
+        assert!(!focused.dim_layer);
+
+        shell.park_permission();
+        assert_eq!(shell.overlay(), Overlay::Interaction);
         assert_eq!(shell.owner(), KeyOwner::Transcript);
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Down)), true),

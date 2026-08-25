@@ -27,6 +27,8 @@ pub mod permission_view;
 pub mod progress_bar;
 pub mod prompt_contract;
 pub mod prompt_widget;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/question_view.rs"]
+pub mod question_view;
 pub mod queue;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/session_picker.rs"]
 pub mod session_picker;

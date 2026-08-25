@@ -1,108 +1,88 @@
-//! Approval/question content rendered from the host-owned interaction DTO.
+//! Host-owned interaction DTO projected onto Grok blocking composer cards.
 //!
-//! The view owns only presentation state. Request identity and generation stay
-//! in the runtime/effect boundary so a late response cannot answer a new modal.
+//! Presentation state lives here. Request identity and generation stay in the
+//! runtime/effect boundary so a late response cannot answer a new card.
 
 use dsh_pager::{DshInteraction, DshRenderBlock};
 use dsh_pager_protocol::SessionModeId;
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-};
 use serde_json::{Value, json};
 
-use crate::theme::Theme;
 use crate::{
     host_adapter::TranscriptRow,
     views::{
         execute_tool_adapter::project_execute_tool,
         permission_view::{PermissionChoice, PermissionOption, PermissionViewState},
+        question_view::{QuestionOption, QuestionViewState},
     },
 };
 
-/// Render a pending question. Approval uses the Grok-derived blocking
-/// permission card and never enters this generic modal path.
-pub fn render_question_content(
-    buffer: &mut Buffer,
-    area: Rect,
+/// Project a DSH question onto the Grok question card.
+pub fn question_state(
     interaction: &DshInteraction,
-    selected_option: usize,
-    answer_text: &str,
+    selected: usize,
     pending: bool,
-    theme: &Theme,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    if !matches!(interaction, DshInteraction::Question { .. }) {
-        return;
-    }
-    buffer.set_string(
-        area.x,
-        area.y,
-        "Question",
-        Style::default()
-            .fg(theme.gray_bright)
-            .add_modifier(Modifier::BOLD),
-    );
-    let mut y = area.y.saturating_add(2);
-    match interaction {
-        DshInteraction::Approval { .. } => {}
-        DshInteraction::Question { questions, .. } => {
-            let question = questions.first();
-            let prompt = question
-                .and_then(|value| value.get("question").or_else(|| value.get("text")))
+    args_expanded: bool,
+) -> Option<QuestionViewState> {
+    let DshInteraction::Question { questions, .. } = interaction else {
+        return None;
+    };
+    let question = questions.first()?;
+    let title = question
+        .get("question")
+        .or_else(|| question.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("Please provide an answer")
+        .to_string();
+    let header = question
+        .get("header")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            question
+                .get("intent")
+                .and_then(|intent| intent.get("kind"))
                 .and_then(Value::as_str)
-                .unwrap_or("Please provide an answer");
-            put_line(buffer, area, &mut y, prompt, theme.text_primary, theme);
-            if let Some(options) = question.and_then(|value| value.get("options"))
-                && let Some(options) = options.as_array()
-            {
-                for (index, option) in options.iter().enumerate() {
-                    if y >= area.bottom().saturating_sub(1) {
-                        break;
-                    }
-                    let label = option_label(option);
-                    let marker = if index == selected_option { ">" } else { " " };
-                    put_line(
-                        buffer,
-                        area,
-                        &mut y,
-                        &format!("{marker} {}. {label}", index + 1),
-                        if index == selected_option {
-                            theme.text_primary
-                        } else {
-                            theme.gray
-                        },
-                        theme,
-                    );
-                }
-            }
-            if y < area.bottom().saturating_sub(1) {
-                put_line(
-                    buffer,
-                    area,
-                    &mut y,
-                    &format!("answer: {answer_text}"),
-                    theme.text_primary,
-                    theme,
-                );
-            }
-            put_line(
-                buffer,
-                area,
-                &mut y,
-                if pending {
-                    "sending response..."
-                } else {
-                    "1-9 choose   type text   Enter submit   Esc cancel"
-                },
-                theme.fuzzy_accent,
-                theme,
-            );
-        }
-    }
+                .and_then(|kind| match kind {
+                    "plan-review" => Some("Plan review".to_string()),
+                    _ => None,
+                })
+        });
+    let detail = question
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(|value| {
+            value
+                .lines()
+                .map(str::to_string)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let options = question
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|option| QuestionOption {
+            label: option_label(option),
+            description: option
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+        .filter(|option| !option.label.is_empty())
+        .collect::<Vec<_>>();
+    let mut state = QuestionViewState {
+        header,
+        title,
+        detail,
+        options,
+        active_idx: selected,
+        args_expanded,
+        pending,
+    };
+    state.clamp_selection();
+    Some(state)
 }
 
 /// Project a DSH approval plus its already-streamed tool call into the
@@ -194,6 +174,11 @@ pub const fn approval_outcome(choice: PermissionChoice) -> &'static str {
 }
 
 /// Build the protocol response for the currently displayed interaction.
+///
+/// DSH `AskUserQuestionAnswerItem.selected` is option **labels**. Typed text
+/// that is not one of those labels is mouse/CSI noise or free-text; it must
+/// not replace the numbered choice, and single-select cannot send `custom`
+/// alongside `selected`.
 pub fn response_for(
     interaction: &DshInteraction,
     selected_option: usize,
@@ -202,56 +187,52 @@ pub fn response_for(
     match interaction {
         DshInteraction::Approval { .. } => None,
         DshInteraction::Question { questions, .. } => {
-            let question = questions.first();
+            let question = questions.first()?;
             let id = question
-                .and_then(|value| value.get("id").or_else(|| value.get("questionId")))
+                .get("id")
+                .or_else(|| question.get("questionId"))
                 .and_then(Value::as_str)
                 .unwrap_or("q1");
-            let selected = if !answer_text.trim().is_empty() {
-                answer_text.trim().to_string()
-            } else {
-                question
-                    .and_then(|value| value.get("options"))
-                    .and_then(Value::as_array)
-                    .and_then(|options| options.get(selected_option))
-                    .map(option_value)
-                    .unwrap_or_default()
-            };
-            if selected.is_empty() {
-                return None;
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let labels = options
+                .iter()
+                .map(option_label)
+                .filter(|label| !label.is_empty())
+                .collect::<Vec<_>>();
+            let typed = answer_text.trim();
+            if labels.is_empty() {
+                if typed.is_empty() {
+                    return None;
+                }
+                return Some(dsh_pager_protocol::TuiInteractionResponse::Question {
+                    answers: json!({
+                        "answers": [{
+                            "id": id,
+                            "selected": [],
+                            "custom": typed
+                        }]
+                    }),
+                });
             }
+            let chosen = labels
+                .iter()
+                .find(|label| *label == typed)
+                .cloned()
+                .or_else(|| labels.get(selected_option).cloned())?;
             Some(dsh_pager_protocol::TuiInteractionResponse::Question {
                 answers: json!({
                     "answers": [{
                         "id": id,
-                        "selected": [selected],
-                        "text": answer_text,
+                        "selected": [chosen]
                     }]
                 }),
             })
         }
     }
-}
-
-fn put_line(
-    buffer: &mut Buffer,
-    area: Rect,
-    y: &mut u16,
-    text: &str,
-    fg: ratatui::style::Color,
-    theme: &Theme,
-) {
-    if *y >= area.bottom() {
-        return;
-    }
-    let clipped: String = text.chars().take(area.width as usize).collect();
-    buffer.set_string(
-        area.x,
-        *y,
-        clipped,
-        Style::default().fg(fg).bg(theme.bg_base),
-    );
-    *y = (*y).saturating_add(1);
 }
 
 fn option_label(value: &Value) -> String {
@@ -266,12 +247,13 @@ fn option_label(value: &Value) -> String {
 
 fn option_value(value: &Value) -> String {
     value
-        .get("value")
+        .get("label")
+        .or_else(|| value.get("value"))
         .or_else(|| value.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| value.to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -292,7 +274,76 @@ mod tests {
         let response = response_for(&interaction, 0, "").unwrap();
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["answers"]["answers"][0]["id"], "q1");
-        assert_eq!(value["answers"]["answers"][0]["selected"][0], "yes");
+        assert_eq!(value["answers"]["answers"][0]["selected"][0], "Yes");
+        assert!(value["answers"]["answers"][0].get("text").is_none());
+        assert!(value["answers"]["answers"][0].get("custom").is_none());
+    }
+
+    #[test]
+    fn plan_review_submits_approve_label_even_with_mouse_garbage() {
+        let interaction = DshInteraction::Question {
+            request_id: "rpc-plan".into(),
+            questions: vec![json!({
+                "id": "plan-review",
+                "question": "Approve this plan and leave plan mode?",
+                "options": [
+                    { "label": "Approve", "description": "Leave plan mode" },
+                    { "label": "Keep planning", "description": "Stay in plan mode" }
+                ],
+                "intent": { "kind": "plan-review", "approve": "Approve" }
+            })],
+        };
+        for typed in ["", "[<:;M", "  [<:;M"] {
+            let response = response_for(&interaction, 0, typed).expect(typed);
+            let value = serde_json::to_value(response).unwrap();
+            assert_eq!(
+                value["answers"]["answers"][0]["id"], "plan-review",
+                "{typed}"
+            );
+            assert_eq!(
+                value["answers"]["answers"][0]["selected"][0], "Approve",
+                "{typed}"
+            );
+            assert!(
+                value["answers"]["answers"][0].get("custom").is_none(),
+                "{typed}"
+            );
+        }
+        let keep = response_for(&interaction, 1, "").unwrap();
+        let value = serde_json::to_value(keep).unwrap();
+        assert_eq!(
+            value["answers"]["answers"][0]["selected"][0],
+            "Keep planning"
+        );
+        assert!(response_for(&interaction, 9, "[<:;M").is_none());
+    }
+
+    fn plan_review_interaction() -> DshInteraction {
+        DshInteraction::Question {
+            request_id: "rpc-plan".into(),
+            questions: vec![json!({
+                "id": "plan-review",
+                "question": "Approve this plan and leave plan mode?",
+                "options": [
+                    { "label": "Approve", "description": "Leave plan mode" },
+                    { "label": "Keep planning", "description": "Stay in plan mode" }
+                ],
+                "detail": "# Plan\n\n- ship the HTML report",
+                "intent": { "kind": "plan-review", "approve": "Approve" }
+            })],
+        }
+    }
+
+    #[test]
+    fn question_state_projects_plan_review_onto_the_grok_card() {
+        let state = question_state(&plan_review_interaction(), 9, false, false).unwrap();
+        assert_eq!(state.header.as_deref(), Some("Plan review"));
+        assert_eq!(state.title, "Approve this plan and leave plan mode?");
+        assert!(state.detail.iter().any(|line| line.contains("# Plan")));
+        assert_eq!(state.options[0].label, "Approve");
+        assert_eq!(state.options[1].label, "Keep planning");
+        assert_eq!(state.active_idx, 1);
+        assert_eq!(state.selected_label(), Some("Keep planning"));
     }
 
     #[test]

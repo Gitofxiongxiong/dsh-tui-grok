@@ -71,18 +71,17 @@ use crate::views::{
     context_bar::context_bar_line,
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
     file_search::{controller::FileSearchController, line_viewer::render_file_search_content},
-    interaction::{approval_outcome, permission_state, render_question_content, response_for},
+    interaction::{approval_outcome, permission_state, question_state, response_for},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
         render_modal_window,
     },
-    permission_view::{
-        PermissionChoice, PermissionViewState, permission_view_height, render_permission_view,
-    },
+    permission_view::{PermissionChoice, permission_view_height, render_permission_view},
     prompt_contract::{
         PromptFlagContract, PromptGeometry, PromptInfoContract, PromptStyleContract,
     },
     prompt_widget::GrokPromptRenderer,
+    question_view::{question_view_height, render_question_view},
     queue::{
         QueueRenderState, moved_selection, queue_item_is_visible, render_queue_content,
         visible_queue_items, visible_queue_len,
@@ -802,7 +801,16 @@ impl UiState {
         if let Some(permission) = permission.as_mut() {
             permission.args_expanded = self.interaction_args_expanded;
         }
-        let suggestion_rows = if permission.is_some() {
+        let question = snapshot.interaction.as_ref().and_then(|interaction| {
+            question_state(
+                interaction,
+                self.interaction_selected,
+                self.interaction_pending.is_some(),
+                self.interaction_args_expanded,
+            )
+        });
+        let blocking_card = permission.is_some() || question.is_some();
+        let suggestion_rows = if blocking_card {
             0
         } else {
             self.suggestion_items(&snapshot)
@@ -833,24 +841,27 @@ impl UiState {
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
         };
-        let prompt_height = permission.as_ref().map_or_else(
-            || {
-                GrokPromptRenderer::desired_height(
-                    self.prompt.textarea(),
-                    prompt_outer_width,
-                    &prompt_style,
-                    Some(&prompt_info),
-                    prompt_cap,
-                )
-            },
-            |permission| {
-                permission_view_height(
-                    permission,
-                    area.height,
-                    prompt_outer_width.saturating_sub(5) as usize,
-                )
-            },
-        );
+        let prompt_height = if let Some(permission) = permission.as_ref() {
+            permission_view_height(
+                permission,
+                area.height,
+                prompt_outer_width.saturating_sub(5) as usize,
+            )
+        } else if let Some(question) = question.as_ref() {
+            question_view_height(
+                question,
+                area.height,
+                prompt_outer_width.saturating_sub(5) as usize,
+            )
+        } else {
+            GrokPromptRenderer::desired_height(
+                self.prompt.textarea(),
+                prompt_outer_width,
+                &prompt_style,
+                Some(&prompt_info),
+                prompt_cap,
+            )
+        };
         let tasks_height = inline_agent_pane_height(&snapshot.agent, area.height);
         let catalog_height = 0;
         let watcher_visible =
@@ -945,6 +956,17 @@ impl UiState {
                 self.shell.owner() == KeyOwner::Interaction,
             );
             self.permission_option_rows = result.option_rows;
+        } else if let Some(question) = question.as_ref() {
+            self.permission_area = input;
+            let result = render_question_view(
+                frame.buffer_mut(),
+                input,
+                question,
+                self.hovered_permission_item,
+                theme,
+                self.shell.owner() == KeyOwner::Interaction,
+            );
+            self.permission_option_rows = result.option_rows;
         } else {
             self.permission_area = Rect::default();
             self.permission_option_rows.clear();
@@ -962,18 +984,17 @@ impl UiState {
             }
         }
         self.render_suggestions(frame, agent_layout.banner, &snapshot);
+        let (prompt_target, prompt_label) = if permission.is_some() {
+            (HitTarget::Overlay("permission".into()), "permission")
+        } else if question.is_some() {
+            (HitTarget::Overlay("question".into()), "question")
+        } else {
+            (HitTarget::Prompt, "prompt")
+        };
         self.hit_map.insert(crate::geometry::HitRegion {
-            target: if permission.is_some() {
-                HitTarget::Overlay("permission".into())
-            } else {
-                HitTarget::Prompt
-            },
+            target: prompt_target,
             rect: input,
-            label: if permission.is_some() {
-                "permission".into()
-            } else {
-                "prompt".into()
-            },
+            label: prompt_label.into(),
             link: None,
             priority: 15,
         });
@@ -1078,7 +1099,29 @@ impl UiState {
         let footer_text = self.status_line(&snapshot, capability_notice, &task_status);
         AgentView::render_status_line(frame, agent_layout.status_line, &footer_text, theme);
         if let Some(permission) = permission.as_ref() {
-            self.render_permission_shortcuts(frame, agent_layout.shortcuts, permission, compact);
+            self.render_blocking_card_shortcuts(
+                frame,
+                agent_layout.shortcuts,
+                permission.options.len(),
+                permission.pending,
+                permission
+                    .has_collapsible_display(self.permission_area.width.saturating_sub(5) as usize),
+                permission.args_expanded,
+                compact,
+                "permission",
+            );
+        } else if let Some(question) = question.as_ref() {
+            self.render_blocking_card_shortcuts(
+                frame,
+                agent_layout.shortcuts,
+                question.options.len(),
+                question.pending,
+                question
+                    .has_collapsible_display(self.permission_area.width.saturating_sub(5) as usize),
+                question.args_expanded,
+                compact,
+                "question",
+            );
         } else {
             let (hints, help_hint) = self.pane_shortcut_hints(&snapshot, textarea_rows > 1);
             AgentView::render_shortcuts(frame, agent_layout.shortcuts, &hints, help_hint);
@@ -1090,8 +1133,6 @@ impl UiState {
             self.render_resume_picker(frame, area, compact);
         } else if self.shell.overlay() == Overlay::Queue {
             self.render_queue(frame, area, &snapshot);
-        } else if self.shell.overlay() == Overlay::Interaction {
-            self.render_interaction(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::FileSearch {
             self.render_file_search(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::ImagePreview {
@@ -1213,7 +1254,7 @@ impl UiState {
             } else {
                 Overlay::Interaction
             };
-            if self.shell.overlay() != target {
+            if changed || self.shell.overlay() != target {
                 if approval {
                     self.shell.open_permission();
                 } else {
@@ -1604,50 +1645,6 @@ impl UiState {
         }
     }
 
-    fn render_interaction(
-        &mut self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        snapshot: &GrokHostSnapshot,
-    ) {
-        let Some(interaction @ DshInteraction::Question { .. }) = snapshot.interaction.as_ref()
-        else {
-            return;
-        };
-        let theme = Theme::current();
-        let shortcuts = [
-            Shortcut {
-                label: "Enter respond",
-                clickable: true,
-                id: 1,
-            },
-            Shortcut {
-                label: "Esc defer",
-                clickable: true,
-                id: 2,
-            },
-        ];
-        let config = ModalWindowConfig {
-            title: "Interaction · host request",
-            tabs: None,
-            shortcuts: &shortcuts,
-            sizing: ModalSizing::medium(),
-            fold_info: None,
-        };
-        let buf = frame.buffer_mut();
-        if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
-            render_question_content(
-                buf,
-                content.content,
-                interaction,
-                self.interaction_selected,
-                self.interaction_editor.text(),
-                self.interaction_pending.is_some(),
-                theme,
-            );
-        }
-    }
-
     fn active_pane(&self) -> ActivePane {
         match self.shell.overlay() {
             Overlay::Queue => ActivePane::Queue,
@@ -1721,12 +1718,16 @@ impl UiState {
         (hints, help_hint)
     }
 
-    fn render_permission_shortcuts(
+    fn render_blocking_card_shortcuts(
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        permission: &PermissionViewState,
+        option_count: usize,
+        pending: bool,
+        collapsible: bool,
+        expanded: bool,
         compact: bool,
+        parked_label: &'static str,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -1734,32 +1735,28 @@ impl UiState {
         let focused = self.shell.owner() == KeyOwner::Interaction;
         let hints = if focused {
             let mut hints = Vec::new();
-            if !permission.pending {
-                let last = char::from(b'0' + permission.options.len().clamp(1, 9) as u8);
+            if !pending && option_count > 0 {
+                let last = char::from(b'0' + option_count.clamp(1, 9) as u8);
                 hints.push(HintItem::paired(
                     KeyShortcut::key(KeyCode::Char('1')),
                     KeyShortcut::key(KeyCode::Char(last)),
                     "select",
                 ));
-                if permission.options.len() > 1 {
+                if option_count > 1 {
                     hints.push(HintItem::new(KeyShortcut::key(KeyCode::Tab), "next option"));
                 }
-                if permission.has_collapsible_display(area.width.saturating_sub(5) as usize) {
-                    hints.push(HintItem::new(
-                        KeyShortcut::ctrl(KeyCode::Char('f')),
-                        if permission.args_expanded {
-                            "collapse"
-                        } else {
-                            "expand"
-                        },
-                    ));
-                }
+            }
+            if !pending && collapsible {
+                hints.push(HintItem::new(
+                    KeyShortcut::ctrl(KeyCode::Char('f')),
+                    if expanded { "collapse" } else { "expand" },
+                ));
             }
             hints.push(HintItem::new(KeyShortcut::key(KeyCode::Esc), "scrollback"));
             hints
         } else {
             vec![
-                HintItem::new(KeyShortcut::key(KeyCode::Enter), "permission"),
+                HintItem::new(KeyShortcut::key(KeyCode::Enter), parked_label),
                 HintItem::paired(
                     KeyShortcut::key(KeyCode::Up),
                     KeyShortcut::key(KeyCode::Down),
@@ -2235,7 +2232,17 @@ impl UiState {
                     && !text.is_empty()
                     && self.interaction_pending.is_none()
                 {
-                    let _ = self.interaction_editor.insert_paste(&text);
+                    let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                        session,
+                        Some(transport.control_plane()),
+                    );
+                    let has_options = snapshot.interaction.as_ref().is_some_and(|interaction| {
+                        question_state(interaction, 0, false, false)
+                            .is_some_and(|state| !state.options.is_empty())
+                    });
+                    if !has_options {
+                        let _ = self.interaction_editor.insert_paste(&text);
+                    }
                 }
                 Ok(false)
             }
@@ -3466,42 +3473,93 @@ impl UiState {
         if matches!(interaction, DshInteraction::Approval { .. }) {
             return self.handle_approval_key(key, transport, session, interaction, &snapshot);
         }
+        self.handle_question_key(key, transport, session, interaction)
+    }
+
+    fn handle_question_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        interaction: &DshInteraction,
+    ) -> PagerResult<()> {
+        if key.code == KeyCode::Esc {
+            self.shell.park_permission();
+            self.status = Some(if self.interaction_pending.is_some() {
+                "Question response pending; focus moved to scrollback".into()
+            } else {
+                "Question parked; press Enter or i to return".into()
+            });
+            return Ok(());
+        }
         if self.interaction_pending.is_some() {
-            if key.code == KeyCode::Esc {
-                self.shell.close_overlay();
-                self.status = Some("Interaction response pending".into());
+            return Ok(());
+        }
+        let Some(mut state) = question_state(
+            interaction,
+            self.interaction_selected,
+            false,
+            self.interaction_args_expanded,
+        ) else {
+            return Ok(());
+        };
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
+            if state.has_collapsible_display(self.permission_area.width.saturating_sub(5) as usize)
+            {
+                self.interaction_args_expanded = !self.interaction_args_expanded;
             }
             return Ok(());
         }
+        let count = state.options.len();
         match key.code {
-            KeyCode::Esc => {
-                self.shell.close_overlay();
-                self.status = Some("Interaction deferred".into());
+            KeyCode::Tab if count > 0 => {
+                self.interaction_selected = (self.interaction_selected + 1) % count;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::BackTab if count > 0 => {
+                self.interaction_selected = if self.interaction_selected == 0 {
+                    count - 1
+                } else {
+                    self.interaction_selected - 1
+                };
+            }
+            KeyCode::Up | KeyCode::Char('k') if count > 0 => {
                 self.interaction_selected = self.interaction_selected.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.interaction_selected = self.interaction_selected.saturating_add(1);
+            KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+                self.interaction_selected = self
+                    .interaction_selected
+                    .saturating_add(1)
+                    .min(count.saturating_sub(1));
             }
-            KeyCode::Char(digit @ '1'..='9') => {
-                self.interaction_selected = digit.to_digit(10).unwrap_or(1) as usize - 1;
-            }
-            KeyCode::Enter => {
-                let response = response_for(
-                    interaction,
-                    self.interaction_selected,
-                    self.interaction_editor.text(),
-                );
-                if let Some(response) = response {
-                    self.submit_interaction(transport, session, interaction, response)?;
-                } else {
-                    self.status = Some("Answer is empty".into());
+            KeyCode::Char(digit @ '1'..='9') if count > 0 => {
+                let index = digit.to_digit(10).unwrap_or(1) as usize - 1;
+                if index < count {
+                    self.interaction_selected = index;
+                    if let Some(response) = response_for(interaction, index, "") {
+                        self.submit_interaction(transport, session, interaction, response)?;
+                    }
                 }
             }
-            _ => {
+            KeyCode::Enter => {
+                if count == 0 {
+                    let typed = self.interaction_editor.text();
+                    if let Some(response) = response_for(interaction, 0, typed) {
+                        self.submit_interaction(transport, session, interaction, response)?;
+                    } else {
+                        self.status = Some("Answer is empty".into());
+                    }
+                } else {
+                    state.active_idx = self.interaction_selected;
+                    state.clamp_selection();
+                    if let Some(response) = response_for(interaction, state.active_idx, "") {
+                        self.submit_interaction(transport, session, interaction, response)?;
+                    }
+                }
+            }
+            _ if count == 0 => {
                 let _ = self.interaction_editor.handle_key(&key);
             }
+            _ => {}
         }
         Ok(())
     }
@@ -3593,9 +3651,6 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<()> {
-        if self.interaction_pending.is_some() {
-            return Ok(());
-        }
         let snapshot = GrokHostSnapshot::from_session_with_control_plane(
             session,
             Some(transport.control_plane()),
@@ -3607,20 +3662,56 @@ impl UiState {
         if matches!(interaction, DshInteraction::Approval { .. }) {
             return self.handle_approval_mouse(mouse, transport, session, interaction);
         }
-        match handle_modal_mouse(&mut self.modal, mouse.kind, mouse.column, mouse.row) {
-            ModalWindowOutcome::CloseRequested | ModalWindowOutcome::ShortcutActivated(2) => {
-                self.shell.close_overlay();
-                self.status = Some("Interaction deferred".into());
+        self.handle_question_mouse(mouse, transport, session, interaction)
+    }
+
+    fn handle_question_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        interaction: &DshInteraction,
+    ) -> PagerResult<()> {
+        let item = self
+            .permission_option_rows
+            .iter()
+            .position(|row| contains(*row, mouse.column, mouse.row));
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                self.hovered_permission_item = item;
             }
-            ModalWindowOutcome::ShortcutActivated(1) => {
-                if let Some(response) = response_for(
-                    interaction,
-                    self.interaction_selected,
-                    self.interaction_editor.text(),
-                ) {
-                    self.submit_interaction(transport, session, interaction, response)?;
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.handle_transcript_mouse(mouse);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = item {
+                    self.shell.focus_permission();
+                    self.interaction_selected = index;
+                    if self.interaction_pending.is_some() {
+                        return Ok(());
+                    }
+                    let now = Instant::now();
+                    let double_click =
+                        self.last_permission_click
+                            .is_some_and(|(previous, previous_index)| {
+                                previous_index == index
+                                    && now.duration_since(previous) <= TRANSCRIPT_DOUBLE_CLICK
+                            });
+                    if double_click {
+                        self.last_permission_click = None;
+                        if let Some(response) = response_for(interaction, index, "") {
+                            self.submit_interaction(transport, session, interaction, response)?;
+                        }
+                    } else {
+                        self.last_permission_click = Some((now, index));
+                    }
+                } else if contains(self.permission_area, mouse.column, mouse.row) {
+                    self.shell.focus_permission();
+                    self.last_permission_click = None;
                 } else {
-                    self.status = Some("Answer is empty".into());
+                    self.shell.park_permission();
+                    self.last_permission_click = None;
+                    self.handle_transcript_mouse(mouse);
                 }
             }
             _ => {}
@@ -4496,6 +4587,74 @@ mod tests {
             matches!(&region.target, HitTarget::Overlay(name) if name == "turn-stop")
         }));
         assert!(!screen.contains("Interaction · host request"));
+    }
+
+    #[test]
+    fn question_replaces_composer_with_grok_question_card() {
+        let mut session = SessionState::new("question-session".into(), 4);
+        session
+            .install_initial(SessionHistoryValue {
+                events: Vec::new(),
+                has_more: false,
+                projections: None,
+            })
+            .expect("empty session fixture");
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "type": "question/requested",
+                    "sessionId": "question-session",
+                    "requestId": "rpc-plan",
+                    "questions": [{
+                        "id": "plan-review",
+                        "question": "Approve this plan and leave plan mode?",
+                        "options": [
+                            { "label": "Approve", "description": "Leave plan mode" },
+                            { "label": "Keep planning", "description": "Stay in plan mode" }
+                        ],
+                        "detail": "# Plan\n\n- ship the HTML report",
+                        "intent": { "kind": "plan-review", "approve": "Approve" }
+                    }]
+                })),
+            })
+            .expect("question fixture");
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.host".into(),
+                params: Some(json!({
+                    "type": "host/session-status",
+                    "sessionId": "question-session",
+                    "generation": 4,
+                    "running": true
+                })),
+            })
+            .expect("running fixture");
+
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render question");
+        let screen = buffer_text(terminal.backend().buffer(), 80, 24);
+
+        assert_eq!(ui.shell.overlay(), crate::app::Overlay::Interaction);
+        assert_eq!(ui.shell.owner(), crate::app::KeyOwner::Interaction);
+        assert_eq!(ui.permission_option_rows.len(), 2);
+        assert!(screen.contains("Plan review"));
+        assert!(screen.contains("Approve this plan and leave plan mode?"));
+        assert!(screen.contains("1 (●) Approve"));
+        assert!(screen.contains("2 (○) Keep planning"));
+        assert!(screen.contains("Leave plan mode"));
+        assert!(screen.contains('┃'));
+        assert!(ui.hit_map.regions().iter().any(|region| {
+            matches!(&region.target, HitTarget::Overlay(name) if name == "question")
+        }));
+        assert!(!screen.contains("Interaction · host request"));
+        assert!(!screen.contains("answer:"));
     }
 
     #[test]
