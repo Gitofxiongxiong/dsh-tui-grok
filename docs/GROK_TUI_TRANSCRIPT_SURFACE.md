@@ -174,7 +174,7 @@ worker没有 DSH 中性真源，按 B/D 边界排除；它们不是继续在 vie
 | Execute | Label：`Run [description\|command]`；有 description 时 collapsed 不露出 `$ cmd` | Collapsed；`!` bash 为 Truncated | 有，行波 `running_accent` |
 | Edit | `Edit` / `Creating` + path + hunk 统计 | 按变体 | 配置可选 |
 | ListDir | `List path (N entries)` | Collapsed | 无 |
-| Search | `Search "pattern"` | Collapsed | 无 |
+| Search | `Search "pattern"`，可带 `in glob` / `in path` 和 `(N matches in M files)`；glob 把 pattern 升成无引号搜索词 | Collapsed | 无 |
 | WebFetch / WebSearch | `Fetch` / `Web Search` | Collapsed | 折叠时无；展开运行时有 |
 | MCP use_tool | Server + Action | Collapsed | 折叠时无；展开运行时有 |
 | 失败 | 红 bullet；Execute 红 rail | 视变体 | 静态 `accent_error` |

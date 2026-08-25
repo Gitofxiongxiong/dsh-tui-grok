@@ -89,6 +89,24 @@ impl BlockLine {
         self.background_is_panel = is_panel;
         self
     }
+
+    /// Decorative panel band used by tool result previews (Read/Search boxes).
+    pub fn with_panel_background(self, background: Color) -> Self {
+        self.with_background(background, true)
+    }
+
+    /// Non-selectable decoration such as a blank gap or metadata row.
+    pub fn separator(content: Line<'static>) -> Self {
+        Self {
+            content,
+            background: None,
+            bg_start_col: 0,
+            background_is_panel: false,
+            selectable: false,
+            header: false,
+            joiner: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

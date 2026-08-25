@@ -12,7 +12,7 @@ use crossterm::terminal::{
 use dsh_grok_inline::{LinkSpan, Terminal as InlineTerminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
 /// Semantic palette shared by every Grok-derived view.
@@ -170,6 +170,33 @@ impl Theme {
     pub fn current() -> &'static Self {
         static THEME: OnceLock<Theme> = OnceLock::new();
         THEME.get_or_init(Self::default)
+    }
+
+    /// Foreground style using a palette color, matching Grok `Theme::fg`.
+    pub const fn fg(&self, color: Color) -> Style {
+        Style::new().fg(color)
+    }
+
+    /// Muted text. `Color::Reset` uses DIM so terminal-native palettes stay
+    /// polarity-safe; RGB themes keep an explicit gray foreground.
+    pub const fn muted(&self) -> Style {
+        match self.gray {
+            Color::Reset => Style::new().add_modifier(Modifier::DIM),
+            c => Style::new().fg(c),
+        }
+    }
+
+    /// Dim text (gray_dim). Same Reset→DIM rule as [`Self::muted`].
+    pub const fn dim(&self) -> Style {
+        match self.gray_dim {
+            Color::Reset => Style::new().add_modifier(Modifier::DIM),
+            c => Style::new().fg(c),
+        }
+    }
+
+    /// Primary body text.
+    pub const fn primary(&self) -> Style {
+        Style::new().fg(self.text_primary)
     }
 }
 
@@ -460,5 +487,23 @@ mod tests {
         assert_ne!(theme.diff_delete_fg, theme.diff_insert_fg);
         assert_ne!(theme.md_code, theme.md_text);
         assert!(theme.md_heading_h1_mod.contains(super::Modifier::BOLD));
+    }
+
+    #[test]
+    fn style_helpers_match_grok_reset_and_rgb_rules() {
+        use super::{Color, Modifier, Theme};
+
+        let theme = Theme::default();
+        assert_eq!(theme.primary().fg, Some(theme.text_primary));
+        assert_eq!(theme.muted().fg, Some(theme.gray));
+        assert_eq!(theme.dim().fg, Some(theme.gray_dim));
+        assert_eq!(theme.fg(theme.path).fg, Some(theme.path));
+
+        let mut native = theme;
+        native.gray = Color::Reset;
+        native.gray_dim = Color::Reset;
+        assert_eq!(native.muted().fg, None);
+        assert!(native.muted().add_modifier.contains(Modifier::DIM));
+        assert!(native.dim().add_modifier.contains(Modifier::DIM));
     }
 }

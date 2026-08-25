@@ -18,7 +18,9 @@ pub use execute::{ExecuteBlockContext, ExecuteBlockLine, ExecuteToolCallBlock};
 pub use list_dir::ListDirToolCallBlock;
 pub use other::OtherToolCallBlock;
 pub use read::{LineRange, ReadLine, ReadToolCallBlock};
-pub use search::{SearchFileMatch, SearchLineMatch, SearchToolCallBlock};
+pub use search::{
+    SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode, SearchToolCallBlock,
+};
 pub use web_fetch::WebFetchToolCallBlock;
 pub use web_search::{WebSearchSource, WebSearchToolCallBlock};
 

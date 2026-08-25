@@ -2325,7 +2325,7 @@ mod tests {
         assert!(
             !collapsed
                 .iter()
-                .any(|line| line.copy_text.contains("Search TODO"))
+                .any(|line| line.copy_text.contains("Search \"TODO\""))
         );
         assert_eq!(scrollback.layout(80).entries[1].height, 0);
 
@@ -2340,7 +2340,7 @@ mod tests {
         assert!(
             expanded
                 .iter()
-                .any(|line| line.copy_text.contains("Search TODO"))
+                .any(|line| line.copy_text.contains("Search \"TODO\""))
         );
         let group_header = expanded
             .iter()
@@ -2352,7 +2352,7 @@ mod tests {
             .expect("expanded read member");
         let search_member = expanded
             .iter()
-            .find(|line| line.copy_text.contains("Search TODO"))
+            .find(|line| line.copy_text.contains("Search \"TODO\""))
             .expect("expanded search member");
         assert!(group_header.rail);
         assert!(group_header.line.spans[0].content.starts_with('┃'));
