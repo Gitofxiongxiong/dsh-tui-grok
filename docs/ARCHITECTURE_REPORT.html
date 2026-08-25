@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dsh-pager-grok 项目结构分析报告</title>
+<style>
+:root{
+  --bg:#0f1419; --panel:#161c24; --panel2:#1c242f; --border:#2a3441;
+  --fg:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff; --accent2:#3fb950;
+  --warn:#d29922; --danger:#f85149; --code:#c9d1d9;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.7 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:32px 28px 80px}
+header{border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:28px}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:20px;margin:44px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+h3{font-size:16px;margin:26px 0 8px;color:var(--accent)}
+p{margin:8px 0}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:13px}
+pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;overflow-x:auto;font-size:12.5px;line-height:1.55}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+th,td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top}
+th{background:var(--panel2)}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;white-space:nowrap}
+.tag-a{background:#1f3d2b;color:var(--accent2)}
+.tag-b{background:#3d2f1f;color:var(--warn)}
+.tag-c{background:#1f2d3d;color:var(--accent)}
+.tag-d{background:#3d1f1f;color:var(--danger)}
+.tag-ok{background:#1f3d2b;color:var(--accent2)}
+.tag-part{background:#3d2f1f;color:var(--warn)}
+.tag-no{background:#3d1f1f;color:var(--danger)}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  padding:14px 18px;margin:12px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.kpi{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px}
+.kpi b{display:block;font-size:22px;color:var(--accent)}
+.kpi span{color:var(--muted);font-size:12.5px}
+ul,ol{margin:6px 0;padding-left:22px}
+li{margin:3px 0}
+.path{color:var(--code);font-size:12.5px;background:var(--panel2);
+  padding:1px 5px;border-radius:4px;word-break:break-all}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0}
+.flow .node{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12.5px}
+.flow .arrow{color:var(--muted)}
+.note{color:var(--muted);font-size:13px}
+footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:12.5px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>dsh-pager-grok 项目结构分析报告</h1>
+  <p class="note">分析时间：2026-08-25 · 方法：3 个并行子 agent 源码深潜（DSH 外置 TS 插件套件 / Rust host 层 / Grok UI 层）+ 主 agent 综合 · 纯只读分析，未修改任何代码、协议或 vendor 内容</p>
+</header>
+
+<h2>1. 项目概览</h2>
+<div class="card">
+<p><b>一句话定位</b>：<code>dsh-pager-grok</code>（仓库名 <code>dsh-tui-grok</code>）是 DeepSeek Harness 的原生终端 UI 实验项目：<b>保持 Grok Build TUI 的前端样式、布局、交互状态机、快捷键、鼠标行为、滚动/选择、主题、动效和终端生命周期，把它适配到 DeepSeek Harness</b>。它不是"重新实现一个类似的 pager"，而是优先复刻 Grok Build 的完整 UI 组件交互和视觉效果。</p>
+<p>项目从 <code>dsh-pager</code> 拆出并接入 Grok Build UI，是独立仓库；DeepSeek Harness 原仓库只作为外部 backend/profile 宿主。本仓库包含：Rust TUI（9 个 crate + 2 个 Grok vendor crate）、DSH-neutral adapter、协议/transport、以及 4 个外置 TypeScript 插件包。</p>
+</div>
+<div class="grid">
+  <div class="kpi"><b>97</b><span>Git commits（本分析时点）</span></div>
+  <div class="kpi"><b>11</b><span>Rust workspace members（9 个 crate + 2 个 Grok vendor）</span></div>
+  <div class="kpi"><b>~6 万行</b><span>Rust 源码（src/ 下 .rs）</span></div>
+  <div class="kpi"><b>4</b><span>外置 TypeScript 插件包（packages/）</span></div>
+  <div class="kpi"><b>126</b><span>开发进度审计记录（docs/开发进度记录/）</span></div>
+  <div class="kpi"><b>M0–M1 ✅</b><span>里程碑：M2–M10 ◐ 部分完成，M11 ❌ 未开始</span></div>
+</div>
+
+<h3>三个不可改变的决策（设计契约）</h3>
+<table>
+<tr><th>决策</th><th>含义</th></tr>
+<tr><td>Grok 前端是视觉和交互真源</td><td>组件树、布局算法、主题 token、focus/Esc ladder、滚动/选择/鼠标状态机优先从 Grok 复制或结构性移植</td></tr>
+<tr><td>DSH 是数据和副作用真源</td><td>session、事件顺序、连接、队列、交互请求、generation、RPC receipt 只能来自 DeepSeek Harness</td></tr>
+<tr><td>适配层是唯一接缝</td><td>view 不调用 RPC，runtime 不把 Grok 类型带进 host；差异集中在 DTO、projection、Intent/Effect adapter</td></tr>
+</table>
+<p class="note">来源：<span class="path">docs/GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md</span>（§0.3）、<span class="path">docs/ARCHITECTURE.md</span>、<span class="path">AGENTS.md</span>。</p>
+
+<h2>2. 仓库布局</h2>
+<h3>2.1 Rust workspace（crates/）</h3>
+<table>
+<tr><th>crate</th><th>职责</th><th>规模（src/ .rs）</th></tr>
+<tr><td><span class="path">dsh-pager</span></td><td>Host runtime：transport、loader、SessionState、control_plane、presentation、scrollback、identity、dashboard——DSH 真源层，不 import Grok view、不碰 ratatui Frame</td><td>10 文件 ≈11.5k 行</td></tr>
+<tr><td><span class="path">dsh-pager-protocol</span></td><td>线协议、版本协商、wire DTO；向后兼容与 fixture</td><td>≈1.1k 行</td></tr>
+<tr><td><span class="path">dsh-pager-grok-ui</span></td><td>Grok-derived 视图/输入/布局、host adapter、effect reducer（默认 UI 入口）</td><td>47 文件 ≈25.1k 行</td></tr>
+<tr><td><span class="path">dsh-pager-bin</span></td><td>参数解析、backend shell、非交互 smoke、UI 入口（不实现布局）</td><td>≈0.5k 行</td></tr>
+<tr><td><span class="path">dsh-pager-primitives</span></td><td>中性渲染 helper（line_utils、scrollbar、wrapping）</td><td>≈2.3k 行</td></tr>
+<tr><td><span class="path">dsh-pager-render</span></td><td>终端渲染/生命周期 glue</td><td>≈0.5k 行</td></tr>
+<tr><td><span class="path">dsh-pager-test-support</span></td><td>fixture、mock Harness、PTY screen、semantic snapshot、parity 工具</td><td>≈0.6k 行</td></tr>
+<tr><td><span class="path">dsh-grok-inline</span></td><td>Grok 低耦合终端模块（terminal、scrollback、segment、resize）</td><td>≈3.2k 行</td></tr>
+<tr><td><span class="path">dsh-grok-textarea</span></td><td>Grok 低耦合编辑器（editor、textarea、wrapping、editor_keys、render + 上游测试）</td><td>13 文件 ≈13.5k 行</td></tr>
+<tr><td><span class="path">dsh-pager-grok-ui/vendor/grok/xai-grok-markdown(-core)</span></td><td>Grok 上游 markdown 渲染 vendor（固定 snapshot，保留上游测试/许可证）</td><td>—</td></tr>
+</table>
+<h3>2.2 外置 TypeScript 插件套件（packages/，pnpm workspace）</h3>
+<table>
+<tr><th>包</th><th>定位（详见第 5 章）</th><th>规模（src/ .ts）</th></tr>
+<tr><td><span class="path">dsh-tui-protocol</span>（@dsh-pager-grok/tui-protocol）</td><td>插件协议/DTO 定义</td><td>≈1.1k 行</td></tr>
+<tr><td><span class="path">dsh-tui-server</span>（@dsh-pager-grok/tui-server）</td><td>插件服务端实现</td><td>≈2.1k 行</td></tr>
+<tr><td><span class="path">dsh-tui-embedded</span>（@dsh-pager-grok/tui-embedded）</td><td>嵌入 DSH profile 的入口包</td><td>≈0.04k 行</td></tr>
+<tr><td><span class="path">dsh-tui-session-projection-recovery</span>（@dsh-pager-grok/tui-session-projection-recovery）</td><td>会话投影恢复</td><td>≈0.2k 行</td></tr>
+</table>
+<h3>2.3 脚本与文档</h3>
+<ul>
+<li><b>scripts/</b>：<span class="path">baseline.sh</span>（M0 基线校验）、<span class="path">check-protocol-fixtures.py</span>、<span class="path">check-source-manifest.py</span>、<span class="path">pty-smoke.py</span>、<span class="path">parity-matrix.py</span>、<span class="path">e2e.sh</span>、<span class="path">real-e2e.sh</span>、<span class="path">start-new-chat.sh</span>、<span class="path">setup-dev-profile.sh</span>、<span class="path">dsh-tui-common.sh</span>、<span class="path">test-fast.sh</span></li>
+<li><b>docs/</b>：总控计划 <span class="path">GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md</span>（§0–§14）、<span class="path">ARCHITECTURE.md</span>、<span class="path">MIGRATION_PLAN.md</span>、<span class="path">SOURCE_POLICY.md</span>、<span class="path">TESTING.md</span>、<span class="path">EXTERNAL_DSH_PLUGIN.md</span>、<span class="path">M0_BASELINE.md</span>，以及 126 份时间戳审计记录（docs/开发进度记录/）</li>
+<li><b>固定基线</b>：Grok mirror commit <span class="path">19d42e35c07a9c9244f03f6df0c4c353f970d4f9</span>、Grok SOURCE_REV <span class="path">7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa</span>、TUI_PROTOCOL_VERSION=1、Rust 1.98.0（rust-toolchain.toml）</li>
+</ul>
+
+<h2>3. 三层架构与架构所有权</h2>
+<div class="flow">
+  <div class="node">backend / RPC</div><span class="arrow">→</span>
+  <div class="node">dsh-pager（session、loader、control-plane、协议 DTO）</div><span class="arrow">→</span>
+  <div class="node">dsh-pager-grok-ui（Grok 视图、输入、布局、交互状态）</div><span class="arrow">→</span>
+  <div class="node">dsh-pager-bin（进程入口与命令行 smoke）</div>
+</div>
+<table>
+<tr><th>区域</th><th>负责内容</th><th>规则</th></tr>
+<tr><td><span class="path">dsh-pager-protocol</span></td><td>线协议、版本、wire DTO</td><td>保持向后兼容和 fixture；不放 UI</td></tr>
+<tr><td><span class="path">dsh-pager</span></td><td>transport、loader、SessionState、control plane、presentation</td><td>只拥有 DSH 真源；不得 import Grok view 或 ratatui Frame</td></tr>
+<tr><td><span class="path">dsh-pager-grok-ui</span></td><td>Grok-derived view/input/layout、host adapter、effect reducer</td><td>view 不调用 RPC；适配逻辑集中在 adapter</td></tr>
+<tr><td><span class="path">dsh-grok-inline / dsh-grok-textarea</span></td><td>Grok 低耦合终端和编辑器</td><td>保留来源、许可证和上游测试</td></tr>
+<tr><td><span class="path">dsh-pager-primitives / render</span></td><td>中性渲染 helper、terminal lifecycle glue</td><td>已有 Grok 实现时不再维护平行算法</td></tr>
+<tr><td><span class="path">dsh-pager-bin</span></td><td>参数、backend shell、非交互 smoke、UI 入口</td><td>不实现布局和业务 view</td></tr>
+<tr><td><span class="path">dsh-pager-test-support</span></td><td>fixture、mock Harness、PTY screen、semantic snapshot</td><td>新行为必须在合适层级留下证据</td></tr>
+</table>
+<p class="note">来源：<span class="path">AGENTS.md</span>（架构所有权表）、<span class="path">docs/ARCHITECTURE.md</span>。旧 <span class="path">app.rs</span>、<span class="path">block_viewer.rs</span>、<span class="path">picker.rs</span>、<span class="path">queue_view.rs</span>、<span class="path">selection.rs</span> 仅作行为 oracle 或迁移 fallback，不是默认 UI 入口。</p>
+
+<h2>4. 核心数据流</h2>
+<pre>RPC notifications
+       │
+       ▼
+SessionState / ControlPlaneStore
+       │  snapshot + commands
+       ▼
+GrokHostAdapter ──────► Grok views/widgets ──────► terminal
+       ▲                         │
+       └────── UiEffect ◄────────┘</pre>
+<ul>
+<li>唯一允许跨层的方向是 <b>runtime → adapter → Grok view</b>；Grok view 不反向调用 RPC（未来可把同一 host adapter 接到 Codex CLI 等兼容 harness）</li>
+<li>UI 的每个用户意图都经过 <b>UiIntent → UiEffect → receipt/notification</b> 边界；最终状态以 Harness 的 authoritative snapshot 为准</li>
+<li>session、request、generation、sequence、render entry、queue item、interaction 均有稳定 identity；replay/live、attach/detach、reconnect、partial replacement、queue revision 由 host authoritative state 收敛</li>
+<li>任何 effect 经 Intent→Effect→receipt 发送，不能因重绘重复发 RPC；stale/gone/duplicate/unsupported/error 显式进入诊断或 Grok status/modal</li>
+</ul>
+<p class="note">来源：<span class="path">docs/ARCHITECTURE.md</span>（数据流）、<span class="path">AGENTS.md</span>（异步、身份和效果）。各层实现细节见第 5–7 章。</p>
+
+<h2>5. DSH 外置 TypeScript 插件套件专题</h2>
+<div class="card">
+<p><b>四包三层架构</b>：<span class="path">tui-protocol</span>（纯协议/codec 库）→ <span class="path">tui-server</span>（Cordis stdio gateway + 有界 control-plane 缓存）→ <span class="path">tui-embedded</span>（纯 bundle patch）+ <span class="path">tui-session-projection-recovery</span>（装饰 <code>session.list</code> 的冷行恢复插件）。依赖方向单一向下，全部只依赖 DSH 官方 <code>0.1.0-rc.8</code> 发布包，不 fork、不改 Harness 源码。</p>
+</div>
+<h3>5.1 逐包职责（子 agent A 深潜）</h3>
+<table>
+<tr><th>包</th><th>定位</th><th>关键内容</th></tr>
+<tr><td><span class="path">@dsh-pager-grok/tui-protocol</span></td><td>纯协议/codec 库（无插件、无 Config、无注册）</td><td><code>constants.ts</code>（TUI_PROTOCOL_VERSION=1、TUI_SERVER_INFO_NAME、8 个应用错误码 -32001..-32008）；<code>types.ts</code>（hello/attach/detach/subscribe/respond/setSessionMode 的 params/result、control-plane 基线类型、JSON-RPC 信封）；<code>methods.ts</code>（约 40 个 ApiProxy 单方法 + <code>fileReferences.list</code>，编译期锁死与官方 RpcMethodMap 同步）；<code>codec.ts</code>（行帧编解码 + 7 个 typed decoder）；双向（server 与 Rust 客户端）共享同一套形状</td></tr>
+<tr><td><span class="path">@dsh-pager-grok/tui-server</span></td><td>Cordis 插件：stdio JSON-RPC gateway + control-plane</td><td><code>gateway.ts</code>（hello 分配 clientId/generation、attach/detach/subscribe/respond/setSessionMode、mux/host 双 pump、attach 后 per-session live buffer 直到 session.history 返回才 flush 的 load barrier、respond 按 requestId 指纹 at-most-once）；<code>transport.ts</code>（<code>TuiLineTransport</code>，maxQueuedFrames=1024 背压丢 notification——control-plane 可重放故安全）；<code>control-plane.ts</code>（有界 512 会话/256 记录/1h TTL 的值后备投影缓存，<code>canResume</code> 判断 resume vs baseline-required）；<code>dispatch.ts</code>（ApiProxy 单方法转发、fileReferences.list 特判走公开 provider）；<code>session-mode.ts</code>（normal/plan/danger-full-access 三档折叠与写入）</td></tr>
+<tr><td><span class="path">@dsh-pager-grok/tui-embedded</span></td><td>DSH profile bundle patch（无运行时 API）</td><td>实质是 <code>cordis.patch.yml</code>，经 <code>dsh.bundle.patch</code> manifest 字段被 profile composer 解析：关 HMR（stdout 必须保持协议管道）、设定 persona/tools mode、insert code-runtime/storage/session-projection-cache/api-gateway/tui-server 等 row；不挂 HTTP server/Web runtime/浏览器插件；dependencies 带 10 个官方 0.1.0-rc.8 包</td></tr>
+<tr><td><span class="path">@dsh-pager-grok/tui-session-projection-recovery</span></td><td>Cordis 插件：冷会话投影恢复</td><td>装饰公开 <code>ctx.apiProxy.sessions.list</code> seam：先调宿主 list → 跳过 attached/已有 projections 行 → 按 16 个/批 <code>Promise.allSettled</code> 调 <code>coldSnapshot()</code> 恢复投影 → 合并非空快照 → fail-soft + 取消传播 → disposer 还原原函数</td></tr>
+</table>
+<h3>5.2 包间依赖与协议双端关系</h3>
+<pre>tui-protocol（纯库，无 workspace 依赖）
+   ▲ peer: workspace:*
+tui-server ──workspace:*──► tui-protocol
+   ▲ deps: workspace:*
+tui-embedded ──► tui-server + tui-session-projection-recovery（+10 个官方 @deepseek-ai/* 0.1.0-rc.8）
+tui-session-projection-recovery（不依赖其他 workspace 包）</pre>
+<ul>
+<li><b>协议双端同构</b>：TS <code>tui-protocol</code> 是服务端参考定义（协议"原点"：含 codec、control-plane 基线、错误码、方法表），Rust <code>dsh-pager-protocol</code> 是客户端镜像（+自持业务 DTO）。共享同一 wire 常量（TUI_PROTOCOL_VERSION=1）、camelCase/kebab-case wire 名，以及<b>字节级相同的 hello fixtures</b>（两侧 diff 验证 identical）；Rust 客户端以 <code>embedded_hello_params</code> 走 <code>tui.hello</code> 握手并校验版本/服务名</li>
+<li><b>不对称处</b>：TS 额外拥有 control-plane 基线类型与 <code>API_PROXY_METHOD_SET</code> 方法表；Rust 额外拥有转发业务方法的客户端 DTO（SessionPromptParams、QueueAction、Subagent* 等），TS server 对这些 params 保持 <code>unknown</code> 不透明（gateway 校验）；Rust 订阅 receipt 全字段 default 兼容旧网关 <code>{}</code></li>
+<li><b>文档小瑕疵（未确认）</b>：<span class="path">crates/dsh-pager-protocol/src/lib.rs:1</span> 文档写 "shared with <code>@deepseek-ai/dsh-tui-protocol</code>"，疑似外置化前的旧官方名残留（实际包名 <code>@dsh-pager-grok/tui-protocol</code>）</li>
+</ul>
+<h3>5.3 profile 安装 / 自举机制</h3>
+<ul>
+<li><b>开发期</b>：<span class="path">scripts/setup-dev-profile.sh</span> + <span class="path">dsh-tui-common.sh</span>——解析 <code>DSH_HARNESS_ROOT</code>/<code>DSH_HOME</code>/<code>DSH_TUI_PROFILE</code> → 缺依赖时 <code>pnpm install --frozen-lockfile</code> → <code>pnpm run build:ts</code> → <b>一次</b> <code>dsh plugin add</code> 源码 link 四个本地包目录进 <code>$DSH_HOME/profiles/&lt;name&gt;</code>；profile 三查（is_managed/is_ready/links_current_repo），不写入 Harness checkout</li>
+<li><b>为何必须一次性 link</b>：<code>pnpm pack</code> 会把 <code>workspace:*</code> 转成普通 <code>0.1.0</code>，分次装 tarball 时最后装 embedded 会去 npm registry 下载未发布的 tui-server 触发 404（<span class="path">docs/EXTERNAL_DSH_PLUGIN.md:49-52</span>）</li>
+<li><b>运行路径</b>：<span class="path">scripts/start-new-chat.sh</span> 默认先 setup → <code>cargo build -p dsh-pager-bin --locked</code> → <code>export DSH_TUI_SERVER="$harness_entry --profile $tui_profile"</code> → exec <code>dsh-pager --new</code>；<code>--check</code> 走 <code>--hello</code> 只验证握手</li>
+<li><b>发布路径</b>：npm 发布后 <code>dsh plugin add @dsh-pager-grok/tui-embedded@0.1.0</code> 单包安装（profile 依赖带入其余包）；四包保持同版本</li>
+<li><b>bundle 组合</b>：<code>tui-embedded</code> 的 <code>dsh.bundle.patch</code> 字段把 <code>cordis.patch.yml</code> 组合到官方 dsh-base 之上（关 HMR 保 stdout 协议管道；tools mode 取自 <code>DSH_TOOLS_MODE</code>）</li>
+</ul>
+<h3>5.4 TS 侧与 Rust 侧职责边界</h3>
+<table>
+<tr><th>侧</th><th>拥有</th><th>不拥有</th></tr>
+<tr><td><b>Rust crates</b>（dsh-pager / dsh-pager-protocol / dsh-pager-grok-ui）</td><td>transport（stdio 子进程 RPC）、SessionState/loader、control-plane 真源、Grok 派生 UI/交互/布局、转发业务方法的客户端 DTO</td><td>不 import Grok view/ratatui Frame 进 session；view 不得直持 RpcTransport</td></tr>
+<tr><td><b>TS server</b>（tui-server + tui-protocol）</td><td>协议载体（JSON-RPC 行帧、codec、方法表）、gateway 状态机、有界 control-plane <b>缓存</b>（值后备镜像，非真源）、经公开 ctx.apiProxy/fileReferences/agents seam 转发接线</td><td>不拥有 session 日志（"session log remains owned by the host"，<span class="path">control-plane.ts:3-7</span>）、不实现 transport 真源、不改 Harness 源码</td></tr>
+<tr><td><b>TS 辅助插件</b></td><td>recovery：装饰 session.list 补冷行投影；embedded：纯 patch 清单组合 host rows</td><td>无独立事件流/真源（invariant 均为空实现）</td></tr>
+</table>
+<p class="note">关键边界证据：交互回答经 <code>dispatchRespond → api.respond</code> 回传宿主（<span class="path">dispatch.ts:108-118</span>）；session-mode 走宿主同款写路径（<span class="path">session-mode.ts:4-6</span>）；<code>fileReferences.list</code> 是 server 自适配的 TUI method（<span class="path">docs/EXTERNAL_DSH_PLUGIN.md:12</span>）。历史事实：四包原属 Harness 官方 <code>@deepseek-ai/dsh-tui-*</code>，已外置为本仓 <code>@dsh-pager-grok/tui-*</code>（记录：<span class="path">docs/开发进度记录/2026-08-24_00-12-29_externalize_dsh_tui_backend.md</span>）。测试纵深：protocol 17 passed / server 43 passed（计数来自进度记录，只读未运行），embedded 用 cordis-plugin-include 真实组合 patch 断言。</p>
+
+<h2>6. Rust host 层</h2>
+<div class="card">
+<p><b>总览</b>：host 层是「系统真源」，UI 是「可替换消费者」——<span class="path">crates/dsh-pager/src/lib.rs</span> 声明 "runtime facade only"，只持有协议/传输/会话/control plane/presentation 数据模型，公开 API 以 DTO（<code>DshPresentationModel</code>、<code>DshRenderEntry</code>、<code>DshQueueItem</code>）暴露；不 import Grok view、不持有 ratatui Frame（仅用 <code>ratatui::text::Line</code> 等中性类型）。</p>
+</div>
+<h3>6.1 各 crate 关键内容（子 agent B 深潜）</h3>
+<table>
+<tr><th>crate / 文件</th><th>关键职责与类型</th></tr>
+<tr><td><span class="path">dsh-pager/src/transport.rs</span>（315 行）</td><td><code>RpcTransport</code>：spawn 后端子进程（stdio JSON-RPC over newline frames）、后台 reader 线程 <code>dsh-pager-rpc-reader</code>、<code>call()</code> 30s 超时、<code>try_notification</code> 拉通知、<code>reconnect()</code> 复用 client_id、<code>hello()</code> 校验协议版本与 serverInfo.name、挂 ControlPlaneRouter</td></tr>
+<tr><td><span class="path">dsh-pager/src/loader.rs</span>（837 行）</td><td>RPC 调用层：load_session（list_workspaces → subscribe_control_plane → tui.attach → fetch_tail → install_initial → drain_notifications → 最多 2 次 repair 的 load barrier）、submit_prompt/respond/update_queue/cancel/rename（OperationToken 守卫）/fork/dispatch（预分配幂等 sessionId）/peek/子 agent 交互/attachment（1MB 上限）；<code>api_call</code> 解 <code>ApiResult{ok,value,error}</code> 信封</td></tr>
+<tr><td><span class="path">dsh-pager/src/session.rs</span>（1,465 行）</td><td><code>SessionState</code> 状态机：<code>ConnectionPhase</code>、<code>OperationToken{session_id,seq,generation}</code>、<code>PendingInteraction</code>（approval 按 approvalId 去重）、乱序 <code>pending_events:BTreeMap</code>、queue 原子替换 + <code>queue_revision</code> 每次 +1、<code>install_initial/repair_tail</code>、<code>needs_repair()</code> load barrier 判据、<code>presentation_model()</code> 产出 DTO</td></tr>
+<tr><td><span class="path">dsh-pager/src/control_plane.rs</span>（2,282 行）</td><td><code>ControlPlaneStore</code>（有界：512 会话 / 256 记录/会话 / TTL 1h）+ <code>ControlPlaneRouter</code>：generation 过滤、mux 按 <code>seen_sequences</code> 去重、host 按 <code>stable_json</code> 指纹去重、<code>remember_request</code> requestId 单次、<code>apply_baseline</code> 原子替换、<code>replay(since)</code> / <code>can_resume()</code> 连续 seq 校验；路由只把当前会话 presentation 帧转给 SessionState</td></tr>
+<tr><td><span class="path">dsh-pager/src/presentation.rs</span>（3,278 行）</td><td>DSH 真源 → 渲染 DTO 的唯一适配点：<code>DshRenderEntryId{Event{seq},Partial{turn,step,surface}}</code>、<code>DshRenderBlock</code>（Unknown 保留 raw）、tool/diff/search/web 视图 DTO、<code>DshPresentationModel</code>、<code>DshRenderUpdate{Upsert,Remove,RemoveSourceRange}</code>、<code>DshPresentationAdapter</code>（partials/active_surfaces/tool_calls/orphan_tool_results 状态机，按 event_type 分派 10+ 类事件）</td></tr>
+<tr><td><span class="path">dsh-pager/src/scrollback.rs</span>（1,759 行）</td><td><code>Scrollback</code>：entry 模型 + width 敏感行缓存 + <code>HeightIndex</code>（Fenwick 前缀和，O(log n) 布局）+ content/layout 双 revision + <code>content_delta_since</code>（256 条有界 change log）+ <code>paint_window</code>（overscan）+ <code>finalize_stream</code>（EOF/error 不伪造 history event）+ 渲染器回填高度</td></tr>
+<tr><td><span class="path">dsh-pager/src/dashboard.rs</span>（1,265 行）</td><td><code>DashboardModel</code>：行派生、lineage depth、workspace 分组、折叠、状态过滤、selection、<code>DashboardActionState</code> 行级动作生命周期（Available/Confirming/Pending/Accepted/Rejected/Stale/Unavailable）</td></tr>
+<tr><td><span class="path">dsh-pager-protocol/src/lib.rs</span>（1,052 行）</td><td><code>TUI_PROTOCOL_VERSION=1</code>、<code>TuiHelloParams/Result</code>（client identity/capabilities）、ResumeClass、Attach/Subscribe/Detach 参数（receipt 全字段 default 兼容旧网关 <code>{}</code>）、<code>PromptMode{Queue,Steer}</code>、<code>SessionModeId</code>、<code>QueueAction{Edit,Remove,Steer}</code>（content 值承载）、<code>ApiError/ApiResult</code>、<code>SessionEvent</code>、JSON-RPC 信封与编解码；向后兼容 = serde default + host-owned 字段 <code>Value</code> 值承载 + fixture 与 Harness 真源解析级比对</td></tr>
+<tr><td><span class="path">dsh-pager-bin/src/main.rs</span>（454 行）+ tests（160 行 + mock-server.mjs 591 行）</td><td>参数解析（--hello/--load-only/--dashboard/--smoke-*/--new/--session/--backend 等）；smoke 标志强制 mock 后端；流程 spawn → hello → load → smoke|run_interactive；8 个非交互 smoke 测试断言 exit code + stderr</td></tr>
+<tr><td><span class="path">dsh-pager-primitives</span>（2,257 行）/ <span class="path">dsh-pager-render</span>（509 行）</td><td>primitives：line_utils（unicode-width 截断）、scrollbar（Grok 派生 + tui-scrollbar）、wrapping 1,606 行（Grok 派生，byte→显示列高亮段）；render：<code>Theme</code>（~60 语义色）、<code>TerminalCapabilities::probe()</code>、<code>TerminalSurface</code>（raw/alternate 生命周期、OSC52、cell-diff draw、resize_epoch），唯一消费方是 grok-ui</td></tr>
+<tr><td><span class="path">dsh-pager-test-support</span>（574 行 + 12 个 parity fixture）</td><td>Scenario（可序列化步骤）→ JSONL fixture（带行号报错）→ TestSandbox（env_clear 隔离）→ run_with_timeout（必回收子进程）→ normalize_ansi/visible_lines → ParityManifest（semantic-reference-v1，6 尺寸 × ≥12 状态 × ≥9 输入 = 972 case，8 场景）</td></tr>
+</table>
+<h3>6.2 完整数据流（带证据路径）</h3>
+<pre>main.rs:50 RpcTransport::spawn → main.rs:55 hello()（校验 TUI_PROTOCOL_VERSION/serverInfo.name，存 client_id、set_generation）
+ → loader.rs:197 load_session：
+    choose_session（RecentOrCreate）→ list_workspaces → subscribe_control_plane（tui.subscribe scope=all）
+    → tui.attach{sessionId,generation} → SessionState::new → fetch_tail（history maxMessages=50）
+    → install_initial（validate_page → history/projections → scrollback.rebuild → drain_pending → mark_connected）
+    → drain_notifications（循环 try_notification → route_notification）→ needs_repair 屏障（≤2 次 repair_tail）
+ → 通知折叠：ControlPlaneRouter::route（store.apply_notification：mux 按 seq 去重 / host 按指纹去重 /
+    stale generation 丢弃 / baseline 原子替换）→ duplicate 短路 → 非当前会话帧只进 store →
+    当前会话帧 → SessionState::accept_notification（accept_mux/accept_host）
+ → 呈现输出：SessionState::presentation_model() → DshPresentationModel{entries,queue,queue_revision,interaction}
+ → 渲染：dsh-pager-grok-ui::run_interactive（host_adapter + UiEffectSink）
+ → 效果回流：UI 动作 → loader 函数 → RPC（submit_prompt→session.prompt、respond→tui.respond、
+    update_queue→session.updateQueue、rename→session.rename+set_projection）→ receipt → 下一轮 notification 收敛</pre>
+<h3>6.3 DSH 真源机制实现位置</h3>
+<ul>
+<li><b>稳定身份</b>：<span class="path">identity.rs</span>（DshSessionId/DshRequestId/DshQueueItemId/DshInteractionId/DshGeneration/DshSeq）+ <code>OperationToken{session_id,seq,generation}</code> + <code>accepts_operation</code>（<span class="path">session.rs:59/186</span>）</li>
+<li><b>generation/重连</b>：<span class="path">session.rs:276</span> <code>set_generation</code>（清投影/队列/交互 + queue_revision 递增 + finalize 流）；<span class="path">loader.rs:302</span> <code>reconnect_session</code> —— 注释明确 "v1 does not claim lossless stream resume"，是 baseline-based 而非 lossless</li>
+<li><b>幂等/去重</b>：<span class="path">control_plane.rs:1017</span> <code>seen_sequences</code>（exact-seq）、<span class="path">control_plane.rs:1551</span> <code>stable_json</code> 指纹、<span class="path">control_plane.rs:868</span> <code>remember_request</code>、approval 按 approvalId 去重、<code>dispatch_session_with_id</code> 预分配幂等 sessionId、queue 快照原子替换</li>
+<li><b>queue 权威</b>：<span class="path">session.rs:645</span> 每次 session/queue 帧 queue_revision +1（含内容相同帧，作为可观察确认边界）；经 <code>DshPresentationModel.queue_revision</code> 暴露给 UI</li>
+<li><b>control plane</b>：有界缓存 + <code>can_resume</code>（连续 seq 证明）+ <code>replay(since)</code> + <code>apply_baseline</code> 原子替换</li>
+<li><b>scrollback 模型</b>：Fenwick <code>HeightIndex</code>、双 revision、<code>content_delta_since</code> 增量日志；<code>DshRenderEntryId::Partial{turn,step,surface}</code> surface 身份</li>
+<li><b>load barrier</b>：<span class="path">session.rs:568</span> <code>needs_repair</code>（pending_events 非空或 subscribed_last_seq &gt; tail_seq）+ <span class="path">loader.rs:239</span> 修复循环</li>
+</ul>
+
+<h2>7. Grok UI 层</h2>
+<div class="card">
+<p><b>双层结构</b>：Grok UI 是「vendor 挂载 + DSH adapter」——vendor 文件按上游路径保存（<code>crates/dsh-pager-grok-ui/vendor/grok/</code>，约 43k 行），<code>src/</code> 用 <code>#[path]</code> 直接编译它们（<span class="path">lib.rs:7-20</span>、<span class="path">views/mod.rs</span>、<span class="path">scrollback.rs</span>），DSH 知识被强制收在 <code>host_adapter.rs</code> / <code>runtime.rs</code> / <code>effects.rs</code> ——符合「view 不调用 RPC、adapter 是唯一接缝」的架构契约。</p>
+<p>规模：grok-ui src 25,146 行（51 个 .rs，其中 runtime.rs 5,516 / host_adapter.rs 2,472 / materialize_entry.rs 2,746）+ vendor 43,071 行 + dsh-grok-inline 3,162 行 + dsh-grok-textarea 13,451 行（含上游测试 6,782 行原样保留）≈ <b>84,830 行</b>。</p>
+</div>
+<h3>7.1 模块分组与复用等级（子 agent C 深潜）</h3>
+<table>
+<tr><th>模块组</th><th>职责</th><th>关键文件</th><th>复用等级</th></tr>
+<tr><td>状态机 shell</td><td><code>AppShell</code>/<code>KeyOwner</code>/<code>Overlay</code> 视图状态机；无 transport、无 ratatui Frame（文件头明示）；ScreenMode 注释"Copied from Grok"</td><td><span class="path">src/app.rs</span></td><td><span class="tag tag-c">C 自建</span>（过渡实现；M3 完整 Grok AppView 未接入）</td></tr>
+<tr><td>host adapter</td><td><code>SessionState/ControlPlaneStore → GrokHostSnapshot</code> 分区 DTO（transcript/queue/interaction/tasks/file_search/media/turn_status/session_mode/capabilities）；TranscriptRow 明确不含 protocol/SessionState 引用</td><td><span class="path">src/host_adapter.rs</span></td><td><span class="tag tag-c">C 自建</span>（纯投影层）</td></tr>
+<tr><td>effect 链路</td><td><code>UiIntent → UiEffect → UiEffectReceipt</code> 全链路；<code>UiContext/OperationKey/EffectLedger/DshEffectSink/AsyncEffectExecutor</code>；RPC 知识全部收在这里</td><td><span class="path">src/effects.rs</span></td><td><span class="tag tag-c">C 自建</span>（UiEffectSink 是 host-neutral trait）</td></tr>
+<tr><td>runtime 协调器</td><td><code>run_interactive/run_loop</code>：resize → poll_effects → drain_notifications_bounded(256) → draw → poll event → dispatch_event；<code>UiState</code> 持有全部 UI 状态（手工布局过渡态）</td><td><span class="path">src/runtime.rs</span></td><td><span class="tag tag-c">C 自建</span></td></tr>
+<tr><td>调度/会话模式/诊断/parity</td><td><code>BoundedScheduler</code>/<code>GenerationGuard</code>/<code>ReconnectPolicy</code>；SessionModeId 推导；文件型 panic 诊断；M10 semantic screen runner</td><td><span class="path">src/{scheduler,session_mode,diag,parity}.rs</span></td><td><span class="tag tag-c">C 自建</span></td></tr>
+<tr><td>theme/appearance/glyphs</td><td>语义 Theme 归 <code>dsh_pager_render</code>；vendor wave/pulse 公式；vendor scrollback_config 类型树 + <code>GrokAppearanceSnapshot</code> 值 seam（每帧解析成颜色，不 import Grok TOML store）；Grok glyph 子集镜像</td><td><span class="path">src/{theme,appearance,glyphs}.rs</span></td><td><span class="tag tag-b">A1/B</span></td></tr>
+<tr><td>geometry/selection</td><td><code>HitMap/HitTarget/HitRegion/LinkTarget</code> 渲染期统一命中几何；grapheme-aware 选择 + copy 重建</td><td><span class="path">src/{geometry,selection}.rs</span></td><td><span class="tag tag-c">C 自建</span>（M8）</td></tr>
+<tr><td>input/render</td><td><code>#[path]</code> 挂 vendor <code>key.rs</code>/<code>line_editor.rs</code>；<code>PromptEditor</code> seam 包 textarea（64KB 上限、can_send 复刻 Grok 规则）；wrapping 精确 soft-wrap joiner；markdown 主题映射；vendor color/tool_paths 切片</td><td><span class="path">src/input/mod.rs</span>、<span class="path">src/render/</span></td><td><span class="tag tag-b">A1/B</span></td></tr>
+<tr><td>scrollback 投影接线</td><td><code>DshScrollbackHost</code> revision 增量同步 → 窗口化物化 → vendor EntryRenderer/BlockRenderer 直接画 Buffer；富内容保持结构（project_entry/project_tool），不在 adapter 扁平化</td><td><span class="path">src/scrollback_adapter/</span>（host_pane 1,508 行、materialize_entry 2,746 行）</td><td><span class="tag tag-c">C 接线层</span>（消费 vendor renderer；头注："Canonical history remains owned by dsh_pager::Scrollback"）</td></tr>
+<tr><td>views</td><td>agent 布局解算器（B）；task/subagent watcher（C）；interaction → Grok permission/question 卡片投影（C，卡片本身 vendor B）；queue/dashboard/workspace 用 Grok modal primitives 组合 DSH 数据（C）；<b>welcome.rs 的 whale 精灵来自 dsh-TUI（c0f4f87b…，MIT），非 Grok 来源</b>；直接挂载 vendor views：picker/modal_window/status_bar/timeline/shortcuts_bar（A0）、permission/question/session_picker/turn_status/context_bar 等（B）</td><td><span class="path">src/views/</span></td><td><span class="tag tag-a">A0</span>/<span class="tag tag-b">B</span>/<span class="tag tag-c">C</span> 混合</td></tr>
+<tr><td>dsh-grok-inline</td><td><code>xai-ratatui-inline</code> 派生（头注 mirror commit + SOURCE_REV，Apache-2.0）；<code>terminal.rs</code> 是 Ratatui Terminal 的 fork（MIT/Apache-2.0 双许可 NOTICE 注明）；上游测试保留</td><td><span class="path">crates/dsh-grok-inline/src/</span></td><td><span class="tag tag-a">A0</span></td></tr>
+<tr><td>dsh-grok-textarea</td><td><code>xai-ratatui-textarea</code> 派生，经 Cargo alias <code>xai-ratatui-textarea</code> 被 grok-ui 消费；上游测试 6,782 行原样保留</td><td><span class="path">crates/dsh-grok-textarea/src/</span></td><td><span class="tag tag-a">A0</span></td></tr>
+</table>
+<h3>7.2 Intent → Effect → Receipt 链路</h3>
+<ul>
+<li><b>定义层</b>（<span class="path">src/effects.rs</span>）：<code>UiIntent</code>（17 种语义意图：SubmitPrompt/AttachSession/QueueMutation/RespondInteraction/SetSessionMode…）→ <code>compile_intent</code>（纯函数，含 per-intent dedupe_key）→ <code>UiEffect</code>；<code>UiContext{session_id,generation,request_id}</code> 防止 view 拿到 SessionState；<code>OperationKey</code> 幂等/诊断身份；<code>UiEffectStatus</code> 九态（Accepted/Queued/Pending/Rejected/Stale/Conflict/Unsupported/Failed/Timeout）；<code>EffectLedger</code>（分配 ui-N request id、去重、上限 1024）</li>
+<li><b>双执行路径</b>：同步 <code>DshEffectSink::dispatch_effect</code>（prepare → ledger 去重 → 调 <code>dsh_pager::*</code> RPC → classify_effect_error → receipt）；异步 <code>AsyncEffectExecutor</code>（encode_async_request → transport.begin_call_value → Pending receipt → poll_call_value → UiEffectCompletion）</li>
+<li><b>消费层</b>（<span class="path">src/runtime.rs:614-798</span>）：每帧 poll completion 并做 <b>session_id + generation 校验</b>（stale 直接丢弃为诊断）；receipt 仅是 admission，"authoritative state still arrives through the next snapshot/notification"（<span class="path">effects.rs:124-133</span>）</li>
+<li><b>view 层零 transport</b>：全仓 grep 确认 <code>RpcTransport</code> 只出现在 effects.rs 与 runtime.rs，<code>views/</code> 与 <code>vendor/</code> 零命中 —— 符合 AGENTS.md 硬约束</li>
+</ul>
+<h3>7.3 scrollback 投影机制（DSH host → Grok 条目）</h3>
+<ol>
+<li><b>真源</b>：<code>dsh_pager::Scrollback</code>（Fenwick）拥有 entry identity / partial replacement / 高度索引 / anchor（<span class="path">host_pane.rs:1-6</span> 头注）</li>
+<li><b>revision 同步</b>：<code>DshScrollbackHost::sync_with_appearance</code> —— options 或 semantic_dirty 或 host_revision 变化才工作；优先 <code>try_incremental_revision_sync</code>（content_delta_since 的 topology_changed/entries 增量，group/pending 邻接敏感时回退全量）（<span class="path">host_pane.rs:220-369</span>）</li>
+<li><b>投影</b>：entry_projections（project_groups：DSH entries → vendor groups::scan + verb_group 状态机 → GroupProjection）；估算高度 <code>set_projected_height</code> 回写 Fenwick</li>
+<li><b>窗口化物化</b>：<code>prepare_body_viewport</code> → <code>paint_window(width, top, viewport_height, overscan)</code> → <code>materialize_range</code> 逐条 DshRenderEntry → ProjectedBlock（project_entry.rs）→ vendor BlockRenderer/ThinkingBlock/UserPromptBlock/ToolCallBlock（project_tool.rs + execute_tool_adapter.rs 特判 Execute）→ RichPaintLine（materialize_entry.rs）；follow/anchor 迭代收敛到不动点（<span class="path">host_pane.rs:578-747</span>）</li>
+<li><b>绘制</b>：vendor EntryRenderer::paint_dynamic/paint_buffer_line 直接写 ratatui Buffer；sticky 由 vendor sticky.rs 组合（<span class="path">host_pane.rs:843-1010</span>）</li>
+<li><b>动画 tick</b>：<span class="path">tick.rs</span> 单调时间 → 30fps Grok 动画 tick（DEFAULT_ANIMATION_FPS=30、GROK_WAVE_SPEED=0.15），不动语义行缓存</li>
+</ol>
+<h3>7.4 vendor 来源与许可证</h3>
+<ul>
+<li>镜像 commit <span class="path">19d42e35c07a9c9244f03f6df0c4c353f970d4f9</span>、SOURCE_REV <span class="path">7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa</span>、上游目录 <span class="path">/home/leo/code/grok-build</span></li>
+<li>vendor LICENSE = Apache-2.0（"Copyright 2023-2026 SpaceXAI"）；xai-grok-markdown(-core)、dsh-grok-inline、dsh-grok-textarea 各有 NOTICE；dsh-grok-inline 的 terminal.rs 为 Ratatui fork（MIT/Apache-2.0 双许可）</li>
+<li><span class="path">SOURCE_MANIFEST.md</span> 对每个 vendor 文件给出 upstream path / upstream SHA-256 / vendored SHA-256 / local change 四列（none = A0 原样；其余为 A1/B 适配说明），manifest 更新于 2026-08-25</li>
+<li>例外：<span class="path">views/welcome.rs</span> 的 whale 精灵来自 dsh-TUI（c0f4f87b…，MIT），不是 Grok 来源</li>
+</ul>
+
+<h2>8. Grok 源码复用策略</h2>
+<table>
+<tr><th>等级</th><th>定义</th><th>可接受改动</th></tr>
+<tr><td><span class="tag tag-a">A0 原样复制</span></td><td>固定 snapshot vendoring，保留测试/许可证</td><td>路径、crate 名、版权头</td></tr>
+<tr><td><span class="tag tag-a">A1 小改</span></td><td>单模块轻量接线</td><td>import、别名、feature、少量 DTO 字段映射；有效逻辑通常 ≤100 行</td></tr>
+<tr><td><span class="tag tag-b">B 结构性适配</span></td><td>复用 Grok 组件、状态机、不变量和视觉规则</td><td>允许跨文件，但保留源码组织和测试，DSH seam 单独隔离</td></tr>
+<tr><td><span class="tag tag-c">C DSH 自建</span></td><td>只有 DSH 真源、协议、身份和 DeepSeek 产品语义</td><td>不复制 Grok runtime；新 surface 仍组合 Grok UI primitives</td></tr>
+<tr><td><span class="tag tag-d">D 排除</span></td><td>与目标无关或引入另一套 agent runtime</td><td>不复制、不依赖（Grok agent/ACP/shell/tools/persistence 等）</td></tr>
+</table>
+<p class="note">来源：<span class="path">docs/GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md</span> §4.1；文件级复用地图见 §4.2。现有 vendor 已登记 picker、modal_window、shortcuts_bar、status_bar、timeline、line_editor、key、modal_window_state（<span class="path">crates/dsh-pager-grok-ui/vendor/grok</span>）。</p>
+
+<h2>9. 验证门禁</h2>
+<table>
+<tr><th>层级</th><th>内容</th></tr>
+<tr><td>Rust 快速检查</td><td><code>cargo fmt --all -- --check</code>、<code>cargo check --workspace</code>、<code>cargo test --workspace --locked</code>、<code>cargo clippy --workspace --all-targets --all-features -- -D warnings</code></td></tr>
+<tr><td>协议/source 校验</td><td><code>python3 scripts/check-protocol-fixtures.py</code>、<code>scripts/check-source-manifest.py</code>（hash/许可证/NOTICE 漂移检测）</td></tr>
+<tr><td>PTY 烟测</td><td><code>python3 scripts/pty-smoke.py --binary target/debug/dsh-pager</code>（resize、折行、滚动、picker/modal、退出终端恢复）</td></tr>
+<tr><td>完整 E2E 门禁</td><td><code>scripts/e2e.sh</code>：ReferenceRunner 六档尺寸 × 12 状态 × 9 输入矩阵（648 cases）、workspace 测试、mock Harness PTY 主路径；真实 Harness 可经 DSH_TUI_SERVER 注入，无凭据时记录 unavailable 而非伪造成功</td></tr>
+<tr><td>浏览器终端像素对比（用户可见 TUI 变更强制）</td><td>ttyd + xterm.js + Playwright：DSH TUI 与本机 Grok（/home/leo/.grok/bin/grok）驱动到相同语义状态，固定 viewport/DPR/字体/主题截图并 diff；截图不得含真实凭据</td></tr>
+</table>
+<p class="note">已知基线问题（须登记修复，不得改 vendor 掩盖）：fast clippy 对未修改 vendor 测试报 needless_borrow；all-features clippy 触发 optional markdown fixture 依赖与 ratatui Backend/safe-buffer API 缺口。</p>
+<p class="note">来源：<span class="path">AGENTS.md</span>（验证门禁、浏览器截图对比章节）、<span class="path">docs/TESTING.md</span>、<span class="path">docs/M0_BASELINE.md</span>。</p>
+
+<h2>10. 里程碑状态（M0–M11）</h2>
+<table>
+<tr><th>里程碑</th><th>状态</th><th>要点</th></tr>
+<tr><td>M0 治理/基线</td><td><span class="tag tag-ok">✅ 已完成</span></td><td>Git 根、source manifest checker、baseline.sh、fallback semantic fixtures、协议 fixture、all-features clippy、mock PTY</td></tr>
+<tr><td>M1 contract/projection/effects</td><td><span class="tag tag-ok">✅ 已完成</span></td><td>typed identity、rich block/partial/lineage DTO、GrokHostSnapshot、UiIntent→UiEffect→Receipt、dedupe guard、capability matrix</td></tr>
+<tr><td>M2 terminal/render</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>TerminalSurface capability-aware 生命周期、resize epoch、cell diff/link-map draw；完整 Grok Appearance/render primitive 未成为默认生产路径</td></tr>
+<tr><td>M3 AppView/AgentView</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>AppShell reducer、KeyOwner/overlay/back、picker-owned Esc ladder、adaptive pane 布局；runtime.rs 仍手工布局</td></tr>
+<tr><td>M4 scrollback/blocks</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>DshRenderBlock（Markdown/Reasoning/Tool/Result/Image/Diff/Unknown）、Grok-derived block projection 已进默认 runtime；缺完整 Grok renderer/reference golden/50k 性能门禁</td></tr>
+<tr><td>M5 prompt</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>Grok EditBuffer prompt、history/slash suggestions、Ctrl-P/Ctrl-N、Unicode/paste/receipt 测试；完整 Grok prompt widget 与外部进程 handoff 仍缺</td></tr>
+<tr><td>M6 picker/dashboard</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>DashboardModel 从 ControlPlaneStore revision 同步、stable-ID query/group/archive、peek→attach；真实双 session race 与完整 Grok picker 仍缺</td></tr>
+<tr><td>M7 queue/interactions</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>queue/interaction effect RPC 错误映射 conflict/stale/timeout/unsupported/failed；approval 使用 Grok-derived blocking card；完整 reorder drag 仍缺</td></tr>
+<tr><td>M8 mouse/media</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>render-time HitMap、grapheme/display column selection、OSC52/OSC8/image placeholder capability 路径；完整 Grok golden 仍缺</td></tr>
+<tr><td>M9 lifecycle/performance</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>BoundedScheduler、GenerationGuard、指数退避 reconnect、late-result 拒绝、reader/terminal restore；真实长时 soak 仍缺</td></tr>
+<tr><td>M10 parity/release</td><td><span class="tag tag-part">◐ 部分完成</span></td><td>ReferenceRunner 648 cases 接入 e2e.sh、真实 Harness hello/load/PTY/Flash smoke 通过；未完成真实 Grok reference 对照与完整矩阵</td></tr>
+<tr><td>M11 cleanup/other harness</td><td><span class="tag tag-no">❌ 未开始</span></td><td>删除旧 UI fallback、稳定 host trait、评估其他 Harness 复用</td></tr>
+</table>
+<p class="note">结论：当前唯一完整完成的是 M0–M1（治理 + DSH-neutral contract）；M2–M10 是可运行的部分切片，不是完整 Grok TUI parity；M11 未开始。来源：<span class="path">docs/GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md</span> §6.1。</p>
+
+<h2>11. 风险登记（摘要）</h2>
+<table>
+<tr><th>风险</th><th>影响</th><th>缓解/门禁</th></tr>
+<tr><td>Grok source drift</td><td>视觉/行为基准漂移</td><td>固定 revision、自动 hash、一次性升级流程</td></tr>
+<tr><td>平行 UI 继续膨胀</td><td>永远无法达 parity、双份 bug</td><td>reuse review、旧模块冻结、删除出口</td></tr>
+<tr><td>adapter 扁平化内容</td><td>tool/diff/image/selection 丢失</td><td>rich DTO contract、结构化 snapshots</td></tr>
+<tr><td>identity race</td><td>串 session、错误操作</td><td>newtype、load barrier、stale fixture</td></tr>
+<tr><td>effect 重复发送</td><td>重复 prompt/queue mutation</td><td>operation key、idempotency、receipt test</td></tr>
+<tr><td>RPC 阻塞 UI</td><td>TUI 不可用</td><td>bounded scheduler、timeout、cancel</td></tr>
+<tr><td>scroll 几何分叉</td><td>鼠标/选择错误</td><td>render-time hit map、geometry fixture</td></tr>
+<tr><td>terminal 泄漏</td><td>用户终端损坏</td><td>RAII/Drop、PTY restore test、soak</td></tr>
+<tr><td>真实 backend 与 mock 不同</td><td>发布后失效</td><td>real backend smoke、replay/live fixture</td></tr>
+<tr><td>能力伪造</td><td>数据/信任损坏</td><td>typed capability blocked、无 fake success</td></tr>
+</table>
+<p class="note">完整登记表（14 项）见 <span class="path">docs/GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md</span> §11。</p>
+
+<h2>12. 证据索引（关键文件路径）</h2>
+<ul>
+<li>总控计划：<span class="path">docs/GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md</span>；架构：<span class="path">docs/ARCHITECTURE.md</span>；迁移：<span class="path">docs/MIGRATION_PLAN.md</span>；插件边界：<span class="path">docs/EXTERNAL_DSH_PLUGIN.md</span>；验证：<span class="path">docs/TESTING.md</span>、<span class="path">docs/M0_BASELINE.md</span>；复用：<span class="path">docs/SOURCE_POLICY.md</span></li>
+<li>host：<span class="path">crates/dsh-pager/src/{session,transport,loader,control_plane,presentation,scrollback,identity}.rs</span>；协议：<span class="path">crates/dsh-pager-protocol/src/lib.rs</span></li>
+<li>UI：<span class="path">crates/dsh-pager-grok-ui/src/{app,host_adapter,effects,runtime,scheduler,scrollback_adapter,theme,appearance,selection}.rs</span> 及 <span class="path">views/</span>、<span class="path">render/</span>、<span class="path">input/</span>；vendor manifest：<span class="path">crates/dsh-pager-grok-ui/SOURCE_MANIFEST.md</span></li>
+<li>Grok 低耦合：<span class="path">crates/dsh-grok-inline/src/</span>、<span class="path">crates/dsh-grok-textarea/src/</span></li>
+<li>测试支撑：<span class="path">crates/dsh-pager-test-support/src/{scenario,sandbox,fixture,process,screen,parity}.rs</span>；tests：<span class="path">crates/dsh-pager/tests/</span>、<span class="path">crates/dsh-pager-bin/tests/</span>、<span class="path">crates/dsh-pager-protocol/tests/</span></li>
+<li>TS 插件：<span class="path">packages/dsh-tui-{protocol,server,embedded,session-projection-recovery}/</span>；profile 脚本：<span class="path">scripts/{setup-dev-profile,start-new-chat,dsh-tui-common,real-e2e}.sh</span></li>
+</ul>
+
+<footer>
+  <p>本报告由主 agent 综合 3 个并行子 agent 的源码分析结论生成（子 agent 均只读，未修改任何文件）；所有关键结论均标注证据文件路径，分析时点 2026-08-25。报告为静态分析产物，不构成代码变更；本批次修改仅包含本报告与对应进度记录回写。</p>
+</footer>
+</div>
+</body>
+</html>
