@@ -38,7 +38,10 @@ export { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
 export { serve } from './serve.js'
 
 export const name = 'tui-server'
-export const inject = ['apiProxy']
+// createApiRemoteAgentResolver reads both services directly. Cordis service
+// access is not transitively authorized through apiProxy, so declare the
+// resolver's own dependencies on this plugin as well.
+export const inject = ['apiProxy', 'agents', 'sessions']
 
 /** Runtime stream overrides used by tests. */
 export interface TuiServerConfig {

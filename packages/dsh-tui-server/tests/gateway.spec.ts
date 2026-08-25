@@ -571,23 +571,76 @@ describe('dispatchUnary', () => {
 })
 
 describe('plugin apply', () => {
-  it('serves through ctx.apiProxy when streams are injected', async () => {
+  it('serves session-mode requests through its declared Agent dependencies', async () => {
     const inbound = new PassThrough()
     const outbound = new PassThrough()
     const ctx = new Context()
+    const events: { type: string; data?: unknown }[] = [
+      { type: 'plan/mode', data: { active: false } },
+      { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
+      { type: 'approval/policy', data: { policy: 'never' } },
+    ]
+    const session = {
+      header: { id: sessionId },
+      events,
+      append(type: string, data: Record<string, unknown>) {
+        events.push({ type, data })
+      },
+    }
+    const agent = { id: sessionId, session } as unknown as Agent
+    class FakeAgents extends Service {
+      constructor() {
+        super(ctx, 'agents')
+      }
+      get(id: string): Agent | undefined {
+        return id === sessionId ? agent : undefined
+      }
+      isOwnedBy(): boolean {
+        return false
+      }
+    }
+    class FakeSessions extends Service {
+      constructor() {
+        super(ctx, 'sessions')
+      }
+      get(id: string): typeof session | undefined {
+        return id === sessionId ? session : undefined
+      }
+    }
     class FakeProxy extends Service {
       constructor() {
         super(ctx, 'apiProxy')
         Object.assign(this, fakeApi())
       }
     }
+    await ctx.plugin(FakeAgents)
+    await ctx.plugin(FakeSessions)
     await ctx.plugin(FakeProxy)
     await ctx.plugin(TuiServer, { input: inbound, output: outbound })
     inbound.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tui.hello', params: {
       protocolVersion: 1, clientType: 'test',
     } })}\n`)
-    const parsed = await readResult(outbound)
-    expect(parsed.ok).toBe(true)
+    const helloResult = await readResult(outbound)
+    expect(helloResult.ok).toBe(true)
+    if (!helloResult.ok || !('result' in helloResult.message)) throw new Error('tui.hello failed')
+    const generation = (helloResult.message.result as { generation: number }).generation
+    inbound.write(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tui.setSessionMode',
+      params: { sessionId, generation },
+    })}\n`)
+    const modeResult = await readResult(outbound)
+    expect(modeResult.ok).toBe(true)
+    if (!modeResult.ok || !('result' in modeResult.message)) throw new Error('tui.setSessionMode failed')
+    expect(modeResult.message.result).toMatchObject({
+      accepted: true,
+      mode: { id: 'normal' },
+    })
+    expect(events.slice(-2)).toEqual([
+      { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+      { type: 'approval/policy', data: { policy: 'ask' } },
+    ])
     await ctx.fiber.dispose()
   })
 })
