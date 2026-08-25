@@ -406,6 +406,18 @@ S1 可以单独先做，因为它删除的是已经被证伪的模型，且不�
 > `docs/开发进度记录/2026-08-25_15-26-51_S3R-S5上游闭包整合.md`。生产窗口仍会在
 > S6 开始前 clone/materialize 全历史，runtime 仍有 Paragraph/overlay glue；因此
 > S6A/S6B 和 50k 验收继续开放，不能声称 N2/S7 pixel parity。
+>
+> 执行状态续（2026-08-25 15:54 +0800）：S6 已启动。Host `Scrollback` 新增独立的
+> content/layout revision、borrowed entry view、单 entry owned 转换及 Fenwick
+> `PaintWindow`；UI 只在 content revision/appearance/fold/group/pending 语义变化时扫描
+> borrowed metadata，rich block 仅物化 viewport ± 1 viewport overscan。production runtime
+> 已删除 transcript `Paragraph<Vec<Line>>` 和第二条 timestamp overlay，统一调用
+> `EntryRenderer::paint_buffer_line` 写 `Buffer` 并从同一返回值建立 hover hit region。
+> 50k 测试区分 cold scan 与 8 个 unchanged hot frames，后者为 0 revision scan、0 新
+> materialization，paint 行数受 viewport 限制。上游 `render.rs` 的
+> `content_y0/entry-base/skip_rows` 及 `sticky.rs` 的纯坐标算法已复制/适配；sticky 尚未
+> 接入 production，S7 的 legacy `RichTranscript` 删除、browser pixel gate 也仍开放，
+> 因而这里只记为 **S6 启动并完成第一条生产纵切**，不宣称 S6/S7 全部闭包。
 
 禁止的顺序：先把 `transcript.rs` 拆成 `wave.rs` `tools.rs` `thinking.rs` 三个
 本地文件再谈 vendor。那是把平行宇宙正规化，漂移不会减。

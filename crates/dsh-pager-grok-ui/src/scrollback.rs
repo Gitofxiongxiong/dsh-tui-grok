@@ -10,6 +10,10 @@ pub mod entry_renderer;
 pub mod groups;
 #[path = "../vendor/grok/xai-grok-pager/src/scrollback/layout.rs"]
 pub mod layout;
+#[path = "../vendor/grok/xai-grok-pager/src/scrollback/render.rs"]
+pub mod render;
+#[path = "../vendor/grok/xai-grok-pager/src/scrollback/sticky.rs"]
+pub mod sticky;
 #[path = "../vendor/grok/xai-grok-pager/src/scrollback/blocks/thinking.rs"]
 pub mod thinking;
 #[path = "../vendor/grok/xai-grok-pager/src/scrollback/blocks/tool/mod.rs"]

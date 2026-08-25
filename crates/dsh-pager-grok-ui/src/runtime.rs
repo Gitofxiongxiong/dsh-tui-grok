@@ -25,8 +25,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::Style,
-    text::{Line, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders},
 };
 
 use crate::actions::{ActionId, ActionRegistry};
@@ -43,7 +42,8 @@ use crate::geometry::{
 };
 use crate::host_adapter::{
     AgentSnapshot, FeatureStatus, FileSearchRow, FileSearchSnapshot, GrokHostSnapshot,
-    MediaSnapshot, SuggestionSnapshot, resume_picker_entries, resume_picker_search_hits,
+    MediaSnapshot, SuggestionSnapshot, media_snapshot_from_scrollback, resume_picker_entries,
+    resume_picker_search_hits,
 };
 use crate::input::{PromptEditor, key::KeyShortcut, line_editor::LineEditOutcome};
 use crate::media::{
@@ -351,6 +351,9 @@ struct UiState {
     image_selected: usize,
     media_preview: Option<MediaPreviewBuffer>,
     media_preview_controller: MediaPreviewController,
+    transcript_media_revision: Option<u64>,
+    transcript_media_enabled: Option<bool>,
+    transcript_media: MediaSnapshot,
     agent_pane: AgentPaneController,
     agent_subagents: Vec<crate::host_adapter::SubagentRow>,
     agent_detail: Option<AgentItemId>,
@@ -383,6 +386,7 @@ struct UiState {
     selected_transcript: Option<HitTarget>,
     last_transcript_click: Option<(Instant, dsh_pager::DshRenderEntryId, Option<usize>)>,
     hover_link: Option<LinkTarget>,
+    transcript_mouse_pos: Option<(u16, u16)>,
     context_hovered: bool,
     turn_stop_hovered: bool,
     frame_links: Vec<dsh_grok_inline::LinkSpan>,
@@ -639,8 +643,17 @@ impl UiState {
         let background = Block::default().style(Style::default().bg(theme.bg_base));
         frame.render_widget(background, area);
 
-        let mut snapshot =
-            GrokHostSnapshot::from_session_with_control_plane(session, Some(control_plane));
+        let mut snapshot = GrokHostSnapshot::for_render(session, Some(control_plane));
+        let scrollback_revision = session.scrollback.revision();
+        if self.transcript_media_revision != Some(scrollback_revision)
+            || self.transcript_media_enabled != Some(snapshot.capabilities.image)
+        {
+            self.transcript_media =
+                media_snapshot_from_scrollback(&session.scrollback, snapshot.capabilities.image);
+            self.transcript_media_revision = Some(scrollback_revision);
+            self.transcript_media_enabled = Some(snapshot.capabilities.image);
+        }
+        snapshot.media = self.transcript_media.clone();
         self.apply_file_search_result(&mut snapshot);
         self.sync_dashboard(control_plane);
         // Subagent catalog responses are host-authoritative but arrive through
@@ -729,7 +742,7 @@ impl UiState {
             appearance.show_timeline,
             false,
             area.width,
-            snapshot.transcript.len(),
+            snapshot.transcript_len,
         );
         let short = area.height <= crate::views::agent::SHORT_TERMINAL_ROWS;
         let mut layout_params = AgentViewLayoutParams {
@@ -1221,8 +1234,6 @@ impl UiState {
             layout.timeline_width,
             layout.scrollback.height,
         );
-        let mut lines = Vec::new();
-        let mut timestamp_overlays = Vec::new();
         let mut total_height = 0;
         let mut scroll_top = 0;
         let render_width = content.width.saturating_sub(1).max(1) as usize;
@@ -1241,6 +1252,12 @@ impl UiState {
             show_timestamps,
             (*appearance).scrollback(*theme),
         );
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(theme.bg_light))
+            .style(Style::default().bg(theme.bg_base));
+        let transcript_inner = block.inner(content);
+        frame.render_widget(block, content);
         let empty = self.scrollback_pane.is_empty();
         if empty {
             self.scroll = 0;
@@ -1262,18 +1279,35 @@ impl UiState {
             max_scroll = total_height.saturating_sub(content.height as usize);
             scroll_top = scroll_top.min(max_scroll);
             self.scroll = max_scroll.saturating_sub(scroll_top);
+            let following = self.scroll == 0;
+            scroll_top = self.scrollback_pane.prepare_viewport(
+                scrollback,
+                scroll_top,
+                content.height,
+                following,
+            );
+            total_height = self.scrollback_pane.total_height(scrollback);
+            max_scroll = total_height.saturating_sub(content.height as usize);
+            scroll_top = scroll_top.min(max_scroll);
+            self.scroll = max_scroll.saturating_sub(scroll_top);
             for paint in self
                 .scrollback_pane
                 .visible_lines(scrollback, scroll_top, content.height)
             {
                 let text = paint.copy_text.clone();
-                let timestamp = paint.timestamp.clone();
-                while lines.len() < paint.screen_y as usize {
-                    lines.push(Line::from(""));
-                }
-                lines.push(paint.line);
-                if let Some(timestamp) = timestamp {
-                    timestamp_overlays.push((paint.screen_y, timestamp, paint.background));
+                if let Some(timestamp) = self.scrollback_pane.paint_buffer_line(
+                    frame.buffer_mut(),
+                    transcript_inner,
+                    &paint,
+                    self.transcript_mouse_pos,
+                ) {
+                    self.hit_map.insert(crate::geometry::HitRegion {
+                        target: HitTarget::Overlay("transcript-timestamp".into()),
+                        rect: timestamp.rect,
+                        label: timestamp.label,
+                        link: None,
+                        priority: 12,
+                    });
                 }
                 if !paint.selectable {
                     continue;
@@ -1305,18 +1339,6 @@ impl UiState {
             }
             self.scroll_anchor = self.scrollback_pane.anchor_at(scrollback, scroll_top);
         }
-        let block = Block::default()
-            .borders(Borders::LEFT)
-            .border_style(Style::default().fg(theme.bg_light))
-            .style(Style::default().bg(theme.bg_base));
-        let transcript_inner = block.inner(content);
-        frame.render_widget(
-            Paragraph::new(Text::from(lines))
-                .block(block)
-                .style(Style::default().bg(theme.bg_base))
-                .scroll((0, 0)),
-            content,
-        );
         if empty {
             let elapsed = self.welcome_animation.elapsed(Instant::now());
             render_welcome(
@@ -1327,27 +1349,6 @@ impl UiState {
                 snapshot.session_mode,
                 theme,
             );
-        }
-
-        // Timestamp is a right-side overlay, matching Grok's renderer: it is
-        // visible but not part of the selectable/copyable text geometry.
-        if show_timestamps {
-            let buffer = frame.buffer_mut();
-            let timestamp_x = content.x.saturating_add(content.width.saturating_sub(10));
-            for (screen_y, timestamp, background) in timestamp_overlays {
-                let y = content.y.saturating_add(screen_y);
-                let style = Style::default()
-                    .fg(theme.gray)
-                    .bg(background.unwrap_or(theme.bg_base));
-                buffer.set_string(timestamp_x, y, format!("{:>10}", timestamp.short), style);
-                self.hit_map.insert(crate::geometry::HitRegion {
-                    target: HitTarget::Overlay("transcript-timestamp".into()),
-                    rect: Rect::new(timestamp_x, y, 10, 1),
-                    label: timestamp.hover,
-                    link: None,
-                    priority: 12,
-                });
-            }
         }
 
         if let Some(selection) = self.selection.selection() {
@@ -1394,7 +1395,7 @@ impl UiState {
             );
         }
 
-        let turn_count = snapshot.transcript.len();
+        let turn_count = snapshot.transcript_len;
         let rail_geometry = if layout.timeline_width > 0 {
             compute_rail(
                 rail,
@@ -2159,6 +2160,7 @@ impl UiState {
                 self.selection.clear();
                 self.selected_transcript = None;
                 self.hover_link = None;
+                self.transcript_mouse_pos = None;
                 self.frame_links.clear();
                 self.geometry_lines.clear();
                 self.last_transcript_click = None;
@@ -2179,6 +2181,7 @@ impl UiState {
                 self.scroll = self.scroll.saturating_sub(3);
             }
             MouseEventKind::Moved => {
+                self.transcript_mouse_pos = Some((mouse.column, mouse.row));
                 self.hover_link = self.hit_map.link_at(mouse.column, mouse.row).cloned();
                 if let Some(link) = &self.hover_link {
                     self.status = Some(format!("Link: {}", link.url));
@@ -2799,6 +2802,7 @@ impl UiState {
         self.selected_transcript = None;
         self.selection.clear();
         self.hover_link = None;
+        self.transcript_mouse_pos = None;
         self.frame_links.clear();
     }
 

@@ -396,6 +396,8 @@ pub struct GrokHostSnapshot {
     pub status: Option<String>,
     pub running: bool,
     pub transcript: Vec<TranscriptRow>,
+    #[serde(default)]
+    pub transcript_len: usize,
     pub picker_rows: Vec<HostRowOwned>,
     pub session_header: SessionHeader,
     pub agent_view: AgentViewSnapshot,
@@ -525,7 +527,7 @@ fn finite_epoch_ms(value: f64) -> u64 {
 
 impl GrokHostSnapshot {
     pub fn from_session(session: &SessionState) -> Self {
-        Self::from_session_with_control_plane(session, None)
+        Self::build_from_session(session, None, true)
     }
 
     /// Project the current session and all control-plane roster rows into the
@@ -534,6 +536,21 @@ impl GrokHostSnapshot {
     pub fn from_session_with_control_plane(
         session: &SessionState,
         control_plane: Option<&ControlPlaneStore>,
+    ) -> Self {
+        Self::build_from_session(session, control_plane, true)
+    }
+
+    /// Production draw snapshot. Transcript storage stays host-owned; this
+    /// keeps only a small tail for interaction/turn-status projection while
+    /// the scrollback renderer consumes borrowed/windowed entries directly.
+    pub fn for_render(session: &SessionState, control_plane: Option<&ControlPlaneStore>) -> Self {
+        Self::build_from_session(session, control_plane, false)
+    }
+
+    fn build_from_session(
+        session: &SessionState,
+        control_plane: Option<&ControlPlaneStore>,
+        include_transcript: bool,
     ) -> Self {
         let cwd = control_plane
             .and_then(|store| store.snapshot(session.session_id()))
@@ -560,12 +577,21 @@ impl GrokHostSnapshot {
             .title()
             .map(str::to_string)
             .unwrap_or_else(|| format!("Session {}", session.session_id()));
-        let presentation = session.presentation_model();
-        let transcript: Vec<TranscriptRow> = presentation
-            .entries
-            .into_iter()
-            .map(TranscriptRow::from)
-            .collect();
+        let mut presentation = if include_transcript {
+            session.presentation_model()
+        } else {
+            session.presentation_controls()
+        };
+        let interaction = presentation.interaction.clone();
+        let transcript_len = session.scrollback.entries().len();
+        let transcript: Vec<TranscriptRow> = if include_transcript {
+            std::mem::take(&mut presentation.entries)
+                .into_iter()
+                .map(TranscriptRow::from)
+                .collect()
+        } else {
+            render_support_transcript(session, interaction.as_ref())
+        };
         let mut picker_rows = Vec::new();
         if let Some(control_plane) = control_plane {
             for row in control_plane.snapshots() {
@@ -635,7 +661,6 @@ impl GrokHostSnapshot {
             .collect();
         let capabilities = CapabilityMatrix::from_session(session);
         let context_usage = context_usage_snapshot(session);
-        let interaction = presentation.interaction.clone();
         let turn_status = turn_status_snapshot(
             session,
             &transcript,
@@ -699,6 +724,7 @@ impl GrokHostSnapshot {
             status: session.status_message().map(str::to_string),
             running: session.running(),
             transcript,
+            transcript_len,
             picker_rows,
             session_header,
             agent_view,
@@ -738,6 +764,7 @@ impl GrokHostSnapshot {
             status: None,
             running: true,
             transcript: Vec::new(),
+            transcript_len: 0,
             picker_rows: vec![
                 HostRowOwned {
                     id: "demo".into(),
@@ -868,6 +895,40 @@ impl GrokHostSnapshot {
             .map(|row| row.id.as_str())
             .collect()
     }
+}
+
+fn render_support_transcript(
+    session: &SessionState,
+    interaction: Option<&DshInteraction>,
+) -> Vec<TranscriptRow> {
+    let wanted_call = interaction.and_then(|interaction| match interaction {
+        DshInteraction::Approval { call_id, .. } => call_id.as_deref(),
+        DshInteraction::Question { .. } => None,
+    });
+    let mut rows = session
+        .scrollback
+        .render_entry_refs()
+        .rev()
+        .filter(|entry| {
+            entry.kind == DshRenderKind::ToolCall
+                && (entry.finish == DshRenderFinish::Running
+                    || wanted_call.is_some_and(|wanted| {
+                        entry.content.blocks.iter().any(|block| {
+                            matches!(
+                                block,
+                                DshRenderBlock::ToolCall {
+                                    call_id: Some(candidate),
+                                    ..
+                                } if candidate == wanted
+                            )
+                        })
+                    }))
+        })
+        .take(4)
+        .map(|entry| TranscriptRow::from(entry.to_owned()))
+        .collect::<Vec<_>>();
+    rows.reverse();
+    rows
 }
 
 impl From<DshRenderEntry> for TranscriptRow {
@@ -1295,6 +1356,41 @@ fn media_snapshot(transcript: &[TranscriptRow], enabled: bool) -> MediaSnapshot 
     }
 }
 
+/// Revision-time media projection for the production draw path. It scans
+/// borrowed entry metadata and clones only image identifiers, never the full
+/// transcript or unrelated block payloads.
+pub fn media_snapshot_from_scrollback(
+    scrollback: &dsh_pager::scrollback::Scrollback,
+    enabled: bool,
+) -> MediaSnapshot {
+    let rows =
+        scrollback
+            .render_entry_refs()
+            .flat_map(|entry| {
+                entry.content.blocks.iter().enumerate().filter_map(
+                    move |(index, block)| match block {
+                        DshRenderBlock::Image {
+                            attachment_id,
+                            media_type,
+                            name,
+                            ..
+                        } => Some(MediaRow {
+                            id: format!("{}:image:{index}", render_entry_id(entry.id)),
+                            attachment_id: attachment_id.clone(),
+                            media_type: media_type.clone(),
+                            name: name.clone().or_else(|| attachment_id.clone()),
+                        }),
+                        _ => None,
+                    },
+                )
+            })
+            .collect();
+    MediaSnapshot {
+        status: feature_status(enabled),
+        rows,
+    }
+}
+
 fn workspace_snapshot(
     control_plane: Option<&ControlPlaneStore>,
     actions_supported: bool,
@@ -1330,6 +1426,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
     let generation = model.generation;
     let queue_revision = model.queue_revision;
     let interaction = model.interaction.clone();
+    let transcript_len = model.entries.len();
     GrokHostSnapshot {
         session_title: format!("Session {session_id}"),
         session_id: session_id.clone(),
@@ -1339,6 +1436,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         status: None,
         running: false,
         transcript: model.entries.into_iter().map(TranscriptRow::from).collect(),
+        transcript_len,
         picker_rows: Vec::new(),
         session_header: SessionHeader {
             id: DshSessionId::new(session_id.clone()),
@@ -1627,6 +1725,14 @@ mod tests {
         );
         assert_eq!(snapshot.turn_status.total_tokens, Some(12_345));
         assert!(snapshot.turn_status.pending_user_input);
+
+        let render_snapshot = GrokHostSnapshot::for_render(&state, None);
+        assert_eq!(render_snapshot.transcript_len, 1);
+        assert_eq!(render_snapshot.transcript.len(), 1);
+        assert_eq!(
+            render_snapshot.turn_status.activity,
+            snapshot.turn_status.activity
+        );
     }
 
     #[test]
@@ -1653,6 +1759,39 @@ mod tests {
         assert_eq!(first.workspace.status, FeatureStatus::Pending);
         assert_eq!(first.agent.status, FeatureStatus::Unsupported);
         assert_eq!(first.context_usage, ContextUsageSnapshot::default());
+    }
+
+    #[test]
+    fn production_snapshot_does_not_clone_settled_transcript_rows() {
+        let mut state = SessionState::new("bounded-render".into(), 1);
+        let events = (0..100)
+            .map(|seq| HistoryEntry {
+                event: SessionEvent {
+                    event_type: "user/message".into(),
+                    seq,
+                    time: 1_787_500_000_000.0 + seq as f64,
+                    data: json!({
+                        "source": { "kind": "user" },
+                        "content": [{ "type": "text", "text": format!("entry {seq}") }]
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            })
+            .collect();
+        state
+            .install_initial(SessionHistoryValue {
+                events,
+                has_more: false,
+                projections: None,
+            })
+            .expect("history");
+
+        let snapshot = GrokHostSnapshot::for_render(&state, None);
+        assert_eq!(snapshot.transcript_len, 100);
+        assert!(snapshot.transcript.is_empty());
     }
 
     #[test]

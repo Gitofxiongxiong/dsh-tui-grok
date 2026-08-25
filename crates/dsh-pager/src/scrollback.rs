@@ -191,11 +191,118 @@ impl ScrollbackEntry {
         // One header row plus one spacer row between entries.
         body_rows.saturating_add(2)
     }
+
+    fn semantic_eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.source_seq == other.source_seq
+            && self.created_at_ms == other.created_at_ms
+            && self.started_at_ms == other.started_at_ms
+            && self.finished_at_ms == other.finished_at_ms
+            && self.kind == other.kind
+            && self.text == other.text
+            && self.partial == other.partial
+            && self.visibility == other.visibility
+            && self.finish == other.finish
+            && self.group_key == other.group_key
+            && self.selectable == other.selectable
+            && self.lineage == other.lineage
+            && self.content == other.content
+    }
+
+    fn as_render_ref(&self) -> DshRenderEntryRef<'_> {
+        DshRenderEntryRef {
+            id: self.id,
+            source_seq: self.source_seq,
+            created_at_ms: self.created_at_ms,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            kind: self.kind,
+            text: &self.text,
+            partial: self.partial,
+            visibility: self.visibility,
+            finish: self.finish,
+            group_key: self.group_key.as_deref(),
+            selectable: self.selectable,
+            lineage: &self.lineage,
+            content: &self.content,
+        }
+    }
 }
 
 impl From<DshRenderEntry> for ScrollbackEntry {
     fn from(entry: DshRenderEntry) -> Self {
         Self::new(entry)
+    }
+}
+
+/// Borrowed presentation view over one host-owned scrollback entry.
+///
+/// The view deliberately contains no owned text or block payload. Viewers may
+/// scan identity and semantic metadata for a revision, then clone only the
+/// entries that intersect their paint window through [`Self::to_owned`].
+#[derive(Debug, Clone, Copy)]
+pub struct DshRenderEntryRef<'a> {
+    pub id: DshRenderEntryId,
+    pub source_seq: i64,
+    pub created_at_ms: Option<u64>,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
+    pub kind: DshRenderKind,
+    pub text: &'a str,
+    pub partial: bool,
+    pub visibility: DshRenderVisibility,
+    pub finish: DshRenderFinish,
+    pub group_key: Option<&'a str>,
+    pub selectable: bool,
+    pub lineage: &'a [i64],
+    pub content: &'a DshRenderContent,
+}
+
+impl DshRenderEntryRef<'_> {
+    pub fn to_owned(self) -> DshRenderEntry {
+        DshRenderEntry {
+            id: self.id,
+            source_seq: self.source_seq,
+            created_at_ms: self.created_at_ms,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            kind: self.kind,
+            text: self.text.to_owned(),
+            partial: self.partial,
+            visibility: self.visibility,
+            finish: self.finish,
+            group_key: self.group_key.map(str::to_owned),
+            selectable: self.selectable,
+            lineage: self.lineage.to_vec(),
+            content: self.content.clone(),
+        }
+    }
+
+    /// Allocation-free height estimate used until a richer viewer measures
+    /// this entry. It intentionally matches the host's initial Fenwick value.
+    pub fn estimated_height(self, width: usize) -> usize {
+        if self.visibility == DshRenderVisibility::Hidden {
+            return 0;
+        }
+        if self.visibility == DshRenderVisibility::Collapsed {
+            return 3;
+        }
+        let body_width = width.max(1).saturating_sub(2).max(1);
+        let body_rows = self
+            .text
+            .split('\n')
+            .map(|line| {
+                if line.is_empty() {
+                    1
+                } else {
+                    UnicodeWidthStr::width(line)
+                        .max(1)
+                        .saturating_add(body_width.saturating_sub(1))
+                        / body_width
+                }
+            })
+            .sum::<usize>();
+        body_rows.saturating_add(2)
     }
 }
 
@@ -357,6 +464,16 @@ pub struct ScrollbackLayout<'a> {
     pub entries: &'a [EntryLayout],
 }
 
+/// Owned description of a viewport-relative entry slice. The range indexes
+/// the canonical entry array; `content_y0` is the virtual row of its first
+/// entry and lets a renderer skip clipped rows without copying all layouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaintWindow {
+    pub entries: Range<usize>,
+    pub content_y0: usize,
+    pub total_height: usize,
+}
+
 /// Entry-based scrollback projection with width-sensitive line/layout caches.
 #[derive(Debug, Default)]
 pub struct Scrollback {
@@ -368,6 +485,8 @@ pub struct Scrollback {
     heights: HeightIndex,
     layout_width: usize,
     dirty_from: Option<usize>,
+    content_revision: u64,
+    layout_revision: u64,
 }
 
 impl Scrollback {
@@ -375,8 +494,38 @@ impl Scrollback {
         &self.entries
     }
 
+    /// Monotonic revision of canonical entry content and topology.
+    pub fn revision(&self) -> u64 {
+        self.content_revision
+    }
+
+    /// Monotonic revision of width-specific height geometry. Rich viewers may
+    /// update this revision without invalidating their semantic entry cache.
+    pub fn layout_revision(&self) -> u64 {
+        self.layout_revision
+    }
+
+    pub fn render_entry_refs(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = DshRenderEntryRef<'_>> + ExactSizeIterator {
+        self.entries.iter().map(ScrollbackEntry::as_render_ref)
+    }
+
+    pub fn render_entry_ref(&self, entry_idx: usize) -> Option<DshRenderEntryRef<'_>> {
+        self.entries
+            .get(entry_idx)
+            .map(ScrollbackEntry::as_render_ref)
+    }
+
+    pub fn render_entry_range(&self, range: Range<usize>) -> &[ScrollbackEntry] {
+        let start = range.start.min(self.entries.len());
+        let end = range.end.min(self.entries.len()).max(start);
+        &self.entries[start..end]
+    }
+
     pub fn rebuild(&mut self, history: &[HistoryEntry]) {
-        self.entries.clear();
+        let revision = self.content_revision;
+        let previous = std::mem::take(&mut self.entries);
         self.positions.clear();
         let updates = self.adapter.adapt_history(history);
         self.layout_snapshot.clear();
@@ -386,11 +535,23 @@ impl Scrollback {
         for update in updates {
             self.apply_update(update);
         }
+        let changed = previous.len() != self.entries.len()
+            || previous
+                .iter()
+                .zip(&self.entries)
+                .any(|(left, right)| !left.semantic_eq(right));
+        self.content_revision = revision.saturating_add(u64::from(changed));
     }
 
     pub fn apply_event(&mut self, entry: &HistoryEntry) {
+        let before = self.content_revision;
         for update in self.adapter.adapt_event(entry) {
             self.apply_update(update);
+        }
+        if self.content_revision != before {
+            // `apply_update` already advanced the revision; coalesce multiple
+            // adapter updates produced by one authoritative event.
+            self.content_revision = before.saturating_add(1);
         }
     }
 
@@ -405,8 +566,12 @@ impl Scrollback {
     ) -> bool {
         let updates = self.adapter.finalize_all(seq, finish, reason);
         let changed = !updates.is_empty();
+        let before = self.content_revision;
         for update in updates {
             self.apply_update(update);
+        }
+        if self.content_revision != before {
+            self.content_revision = before.saturating_add(1);
         }
         changed
     }
@@ -422,24 +587,8 @@ impl Scrollback {
     /// Snapshot render data for a block viewer without exposing mutable layout
     /// caches or protocol event payloads.
     pub fn render_entries(&self) -> Vec<DshRenderEntry> {
-        self.entries
-            .iter()
-            .map(|entry| DshRenderEntry {
-                id: entry.id,
-                source_seq: entry.source_seq,
-                created_at_ms: entry.created_at_ms,
-                started_at_ms: entry.started_at_ms,
-                finished_at_ms: entry.finished_at_ms,
-                kind: entry.kind,
-                text: entry.text.clone(),
-                partial: entry.partial,
-                visibility: entry.visibility,
-                finish: entry.finish,
-                group_key: entry.group_key.clone(),
-                selectable: entry.selectable,
-                lineage: entry.lineage.clone(),
-                content: entry.content.clone(),
-            })
+        self.render_entry_refs()
+            .map(DshRenderEntryRef::to_owned)
             .collect()
     }
 
@@ -475,6 +624,38 @@ impl Scrollback {
             total_height: self.heights.total(),
             entries: &self.layout_snapshot,
         }
+    }
+
+    /// Resolve the entry range intersecting a viewport plus symmetric
+    /// overscan directly from the Fenwick index. This does not build or copy
+    /// the full `EntryLayout` snapshot.
+    pub fn paint_window(
+        &mut self,
+        width: usize,
+        scroll_top: usize,
+        viewport_height: usize,
+        overscan_rows: usize,
+    ) -> PaintWindow {
+        self.ensure_layout(width);
+        let total_height = self.heights.total();
+        let start = scroll_top.saturating_sub(overscan_rows);
+        let height = viewport_height.saturating_add(overscan_rows.saturating_mul(2));
+        let entries = self.heights.window(start, height);
+        let content_y0 = self.heights.start_y(entries.start);
+        PaintWindow {
+            entries,
+            content_y0,
+            total_height,
+        }
+    }
+
+    pub fn entry_layout(&mut self, width: usize, entry_idx: usize) -> Option<EntryLayout> {
+        self.ensure_layout(width);
+        Some(EntryLayout {
+            entry_idx,
+            start_y: self.heights.start_y(entry_idx),
+            height: self.heights.height(entry_idx)?,
+        })
     }
 
     /// Return the cached rendered lines for one projected entry. The returned
@@ -533,6 +714,7 @@ impl Scrollback {
         let changed = self.heights.set(entry_idx, height);
         if changed {
             self.layout_snapshot_dirty = true;
+            self.bump_layout_revision();
         }
         changed
     }
@@ -765,6 +947,7 @@ impl Scrollback {
             .collect();
         self.heights.rebuild(heights);
         self.layout_snapshot_dirty = true;
+        self.bump_layout_revision();
     }
 
     fn evict_unneeded_caches(&mut self, keep: &Range<usize>) {
@@ -802,6 +985,7 @@ impl Scrollback {
             if !self.entries[index].set(entry) {
                 return;
             }
+            self.bump_content_revision();
             if self.layout_width > 0
                 && self.dirty_from.is_none()
                 && self.heights.values.len() == self.entries.len()
@@ -817,6 +1001,7 @@ impl Scrollback {
         let index = self.entries.len();
         self.positions.insert(entry.id, index);
         self.entries.push(entry);
+        self.bump_content_revision();
         if self.layout_width > 0 && self.dirty_from.is_none() && self.heights.values.len() == index
         {
             let height = self.entries[index].estimated_height(self.layout_width);
@@ -832,6 +1017,7 @@ impl Scrollback {
             return;
         };
         self.entries.remove(index);
+        self.bump_content_revision();
         self.reindex_from(index);
         self.mark_dirty(index);
     }
@@ -843,6 +1029,7 @@ impl Scrollback {
         if self.entries.len() == before {
             return;
         }
+        self.bump_content_revision();
         self.positions.clear();
         for (index, entry) in self.entries.iter().enumerate() {
             self.positions.insert(entry.id, index);
@@ -859,6 +1046,14 @@ impl Scrollback {
     fn mark_dirty(&mut self, index: usize) {
         self.dirty_from = Some(self.dirty_from.map_or(index, |dirty| dirty.min(index)));
         self.layout_snapshot_dirty = true;
+    }
+
+    fn bump_content_revision(&mut self) {
+        self.content_revision = self.content_revision.saturating_add(1);
+    }
+
+    fn bump_layout_revision(&mut self) {
+        self.layout_revision = self.layout_revision.saturating_add(1);
     }
 }
 
@@ -958,6 +1153,57 @@ mod tests {
         assert_eq!(index.start_y(2), 3);
         assert_eq!(index.entry_at(3), 2);
         assert!(!index.set(8, 1));
+    }
+
+    #[test]
+    fn content_revision_is_monotonic_and_reads_do_not_advance_it() {
+        let mut scrollback = Scrollback::default();
+        assert_eq!(scrollback.revision(), 0);
+        scrollback.apply_event(&history(
+            1,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "hello" }]
+            }),
+        ));
+        let revision = scrollback.revision();
+        assert!(revision > 0);
+
+        let _ = scrollback.render_entry_refs().collect::<Vec<_>>();
+        let _ = scrollback.paint_window(80, 0, 10, 10);
+        let _ = scrollback.entry_layout(80, 0);
+        assert_eq!(scrollback.revision(), revision);
+
+        let layout_revision = scrollback.layout_revision();
+        assert!(scrollback.set_projected_height(80, 0, 9));
+        assert_eq!(scrollback.revision(), revision);
+        assert!(scrollback.layout_revision() > layout_revision);
+    }
+
+    #[test]
+    fn borrowed_window_clones_only_on_explicit_entry_conversion() {
+        let mut scrollback = Scrollback::default();
+        for seq in 0..100 {
+            scrollback.apply_event(&history(
+                seq,
+                "user/message",
+                json!({
+                    "source": { "kind": "user" },
+                    "content": [{ "type": "text", "text": format!("entry {seq}") }]
+                }),
+            ));
+        }
+        let window = scrollback.paint_window(40, 30, 8, 8);
+        assert!(window.entries.len() < 20);
+        assert_eq!(scrollback.materialized_entry_count(40), 0);
+        let borrowed = scrollback
+            .render_entry_ref(window.entries.start)
+            .expect("borrowed window entry");
+        assert!(borrowed.text.starts_with("entry "));
+        let owned = borrowed.to_owned();
+        assert_eq!(owned.id, borrowed.id);
+        assert_eq!(scrollback.materialized_entry_count(40), 0);
     }
 
     #[test]

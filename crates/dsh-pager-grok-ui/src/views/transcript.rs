@@ -7,14 +7,16 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dsh_pager::scrollback::{Scrollback, compute_paint_window};
+use dsh_pager::scrollback::Scrollback;
 use dsh_pager::{
     DshInteraction, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
-    DshRenderFinish, DshRenderKind, DshRenderVisibility, ScrollAnchor,
+    DshRenderEntryRef, DshRenderFinish, DshRenderKind, DshRenderVisibility, ScrollAnchor,
 };
 #[cfg(test)]
 use dsh_pager::{DshToolCallView, DshToolDiff, DshToolKind, DshToolResult, DshToolResultView};
 use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
@@ -30,8 +32,10 @@ use crate::{
         block_renderer::{BlockRenderSpec, BlockRenderer},
         entry_renderer::{
             DynamicAccentSpec, EntryLayoutSpec, EntryRenderer, EntrySourceLine, GroupHeaderSpec,
-            TIMESTAMP_RESERVED_WIDTH, TimestampLabel, timestamp_label,
+            RenderedEntryLine, TIMESTAMP_RESERVED_WIDTH, TimestampLabel, TimestampPaint,
+            timestamp_label,
         },
+        render::RenderWindow,
         thinking::{ThinkingBlock, ThinkingBlockContext},
         tool::ToolBlockContext,
         types::{AccentStyle, DisplayMode},
@@ -116,7 +120,6 @@ pub struct RichTranscript {
 #[derive(Debug, Clone)]
 struct CachedPaneEntry {
     entry: DshRenderEntry,
-    projection: ProjectionInfo,
     lines: Vec<RichPaintLine>,
 }
 
@@ -151,6 +154,32 @@ impl ProjectionInfo {
             background: (entry.kind == DshRenderKind::User).then_some(theme.bg_light),
         }
     }
+
+    fn plain_ref(entry: DshRenderEntryRef<'_>, width: usize, theme: Theme) -> Self {
+        Self {
+            mode: default_display_mode_ref(entry, width),
+            group_anchor: None,
+            group_header: false,
+            group_hidden: false,
+            group_expanded: false,
+            group_last_visible: false,
+            group_label: None,
+            group_running: false,
+            group_failed: false,
+            rail: entry.kind == DshRenderKind::ToolCall,
+            background: (entry.kind == DshRenderKind::User).then_some(theme.bg_light),
+        }
+    }
+}
+
+/// Instrumentation for proving the distinction between a cold semantic
+/// revision scan and unchanged viewport-bounded paint frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScrollbackPaneStats {
+    pub revision_syncs: usize,
+    pub scanned_entries: usize,
+    pub materialized_entries: usize,
+    pub painted_lines: usize,
 }
 
 /// Production scrollback adapter.
@@ -168,12 +197,19 @@ pub struct ScrollbackPane {
     entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
     expanded_entries: HashSet<DshRenderEntryId>,
     expanded_blocks: HashSet<(DshRenderEntryId, usize)>,
+    foldable_entries: HashSet<DshRenderEntryId>,
+    foldable_blocks: HashSet<(DshRenderEntryId, usize)>,
     expanded_groups: HashSet<DshRenderEntryId>,
     projections: HashMap<DshRenderEntryId, ProjectionInfo>,
     selected_target: Option<HitTarget>,
     pending_user_input: bool,
     pending_call_id: Option<String>,
     pending_entry: Option<DshRenderEntryId>,
+    host_revision: Option<u64>,
+    semantic_dirty: bool,
+    has_visible_entries: bool,
+    theme: Theme,
+    stats: ScrollbackPaneStats,
 }
 
 impl Default for ScrollbackPane {
@@ -187,12 +223,19 @@ impl Default for ScrollbackPane {
             entries: HashMap::new(),
             expanded_entries: HashSet::new(),
             expanded_blocks: HashSet::new(),
+            foldable_entries: HashSet::new(),
+            foldable_blocks: HashSet::new(),
             expanded_groups: HashSet::new(),
             projections: HashMap::new(),
             selected_target: None,
             pending_user_input: false,
             pending_call_id: None,
             pending_entry: None,
+            host_revision: None,
+            semantic_dirty: true,
+            has_visible_entries: false,
+            theme,
+            stats: ScrollbackPaneStats::default(),
         }
     }
 }
@@ -205,12 +248,18 @@ impl ScrollbackPane {
         self.entries.clear();
         self.expanded_entries.clear();
         self.expanded_blocks.clear();
+        self.foldable_entries.clear();
+        self.foldable_blocks.clear();
         self.expanded_groups.clear();
         self.projections.clear();
         self.selected_target = None;
         self.pending_user_input = false;
         self.pending_call_id = None;
         self.pending_entry = None;
+        self.host_revision = None;
+        self.semantic_dirty = true;
+        self.has_visible_entries = false;
+        self.stats = ScrollbackPaneStats::default();
     }
 
     pub fn sync(&mut self, scrollback: &mut Scrollback, width: usize, theme: Theme) {
@@ -235,11 +284,17 @@ impl ScrollbackPane {
     /// Project the host-authoritative interaction onto the exact transcript
     /// entry whose running chrome Grok freezes while waiting for the user.
     pub fn set_pending_interaction(&mut self, interaction: Option<&DshInteraction>) {
-        self.pending_user_input = interaction.is_some();
-        self.pending_call_id = interaction.and_then(|interaction| match interaction {
+        let pending_user_input = interaction.is_some();
+        let pending_call_id = interaction.and_then(|interaction| match interaction {
             DshInteraction::Approval { call_id, .. } => call_id.clone(),
             DshInteraction::Question { .. } => None,
         });
+        if self.pending_user_input != pending_user_input || self.pending_call_id != pending_call_id
+        {
+            self.pending_user_input = pending_user_input;
+            self.pending_call_id = pending_call_id;
+            self.semantic_dirty = true;
+        }
     }
 
     pub fn sync_with_options(
@@ -262,17 +317,40 @@ impl ScrollbackPane {
         appearance: ScrollbackAppearance,
     ) {
         let width = width.max(1);
-        if self.width != width
+        let options_changed = self.width != width
             || self.show_timestamps != show_timestamps
-            || self.appearance != appearance
-        {
-            self.entries.clear();
-        }
+            || self.appearance != appearance;
         self.width = width;
         self.show_timestamps = show_timestamps;
         self.appearance = appearance;
-        let entries = scrollback.render_entries();
+        self.theme = theme;
+        let revision = scrollback.revision();
+        if !options_changed && !self.semantic_dirty && self.host_revision == Some(revision) {
+            return;
+        }
+
+        self.entries.clear();
+        let entries = scrollback.render_entry_refs().collect::<Vec<_>>();
         self.prune_local_state(&entries);
+        self.foldable_entries = entries
+            .iter()
+            .copied()
+            .filter(|entry| is_foldable_ref(*entry))
+            .map(|entry| entry.id)
+            .collect();
+        self.foldable_blocks = entries
+            .iter()
+            .filter(|entry| entry.kind == DshRenderKind::Assistant)
+            .flat_map(|entry| {
+                entry
+                    .content
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| is_local_foldable_block(block))
+                    .map(|(index, _)| (entry.id, index))
+            })
+            .collect();
         self.pending_entry = self.resolve_pending_entry(&entries);
         self.projections = entry_projections(
             &entries,
@@ -282,50 +360,32 @@ impl ScrollbackPane {
             &self.expanded_groups,
             self.pending_entry,
         );
-        let mut live = HashMap::with_capacity(entries.len());
-        for (entry_idx, entry) in entries.into_iter().enumerate() {
+        let mut heights = Vec::with_capacity(entries.len());
+        self.has_visible_entries = false;
+        for entry in entries.iter().copied() {
             let projection = self
                 .projections
                 .get(&entry.id)
                 .cloned()
-                .unwrap_or_else(|| ProjectionInfo::plain(&entry, width, theme));
-            let cached = self.entries.remove(&entry.id);
-            let cached = match cached {
-                Some(cached) if cached.entry == entry && cached.projection == projection => cached,
-                _ => CachedPaneEntry {
-                    lines: semantic_lines(
-                        &entry,
-                        width,
-                        theme,
-                        &projection,
-                        &self.expanded_blocks,
-                        show_timestamps,
-                        &self.appearance,
-                    ),
-                    entry: entry.clone(),
-                    projection: projection.clone(),
-                },
-            };
-            let height =
-                if entry.visibility == DshRenderVisibility::Hidden || projection.group_hidden {
-                    0
-                } else {
-                    cached
-                        .lines
-                        .len()
-                        .saturating_add(if projection.group_anchor.is_some() {
-                            usize::from(projection.group_last_visible)
-                        } else {
-                            1
-                        })
-                };
-            scrollback.set_projected_height(width, entry_idx, height);
-            live.insert(entry.id, cached);
+                .unwrap_or_else(|| ProjectionInfo::plain_ref(entry, width, theme));
+            let height = estimated_projected_height(entry, &projection, width);
+            self.has_visible_entries |= height > 0;
+            heights.push(height);
         }
-        self.entries = live;
+        drop(entries);
+        for (entry_idx, height) in heights.into_iter().enumerate() {
+            scrollback.set_projected_height(width, entry_idx, height);
+        }
+        self.host_revision = Some(revision);
+        self.semantic_dirty = false;
+        self.stats.revision_syncs = self.stats.revision_syncs.saturating_add(1);
+        self.stats.scanned_entries = self
+            .stats
+            .scanned_entries
+            .saturating_add(scrollback.entries().len());
     }
 
-    fn prune_local_state(&mut self, entries: &[DshRenderEntry]) {
+    fn prune_local_state(&mut self, entries: &[DshRenderEntryRef<'_>]) {
         let live = entries.iter().map(|entry| entry.id).collect::<HashSet<_>>();
         self.expanded_entries.retain(|id| live.contains(id));
         self.expanded_groups.retain(|id| live.contains(id));
@@ -368,39 +428,30 @@ impl ScrollbackPane {
                 self.expanded_groups.remove(&anchor);
             }
             self.entries.clear();
+            self.semantic_dirty = true;
             return true;
         }
-        if let Some(block_index) = block_index {
-            let nested_assistant_block = self
-                .entries
-                .get(&entry_id)
-                .is_some_and(|entry| entry.entry.kind == DshRenderKind::Assistant);
-            if nested_assistant_block {
-                let foldable = self
-                    .entries
-                    .get(&entry_id)
-                    .and_then(|entry| entry.entry.content.blocks.get(block_index))
-                    .is_some_and(is_local_foldable_block);
-                if !foldable {
-                    return false;
-                }
-                let key = (entry_id, block_index);
-                if !self.expanded_blocks.insert(key) {
-                    self.expanded_blocks.remove(&key);
-                }
-                // The block projection is width-specific just like the upstream
-                // EntryRenderer cache. Rebuild it on the next frame.
-                self.entries.clear();
-                return true;
+        if let Some(block_index) = block_index
+            && self.foldable_blocks.contains(&(entry_id, block_index))
+        {
+            let key = (entry_id, block_index);
+            if !self.expanded_blocks.insert(key) {
+                self.expanded_blocks.remove(&key);
             }
+            // The block projection is width-specific just like the upstream
+            // EntryRenderer cache. Rebuild it on the next frame.
+            self.entries.clear();
+            self.semantic_dirty = true;
+            return true;
         }
-        if !is_foldable_kind(self.entries.get(&entry_id).map(|entry| &entry.entry)) {
+        if !self.foldable_entries.contains(&entry_id) {
             return false;
         }
         if !self.expanded_entries.insert(entry_id) {
             self.expanded_entries.remove(&entry_id);
         }
         self.entries.clear();
+        self.semantic_dirty = true;
         true
     }
 
@@ -411,9 +462,7 @@ impl ScrollbackPane {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries
-            .values()
-            .all(|entry| entry.entry.visibility == DshRenderVisibility::Hidden)
+        !self.has_visible_entries
     }
 
     pub fn is_animating(&self) -> bool {
@@ -431,21 +480,28 @@ impl ScrollbackPane {
         scrollback.total_height(self.width.max(1))
     }
 
+    pub fn stats(&self) -> ScrollbackPaneStats {
+        self.stats
+    }
+
+    pub fn reset_stats(&mut self) {
+        self.stats = ScrollbackPaneStats::default();
+    }
+
     pub fn anchor_at(
         &mut self,
         scrollback: &mut Scrollback,
         scroll_top: usize,
     ) -> Option<ScrollAnchor> {
-        let (total_height, entries) = {
-            let layout = scrollback.layout(self.width.max(1));
-            (layout.total_height, layout.entries.to_vec())
-        };
+        let total_height = scrollback.total_height(self.width.max(1));
         let top = scroll_top.min(total_height.checked_sub(1)?);
-        let item = entries
-            .iter()
-            .rev()
-            .find(|item| item.height > 0 && item.start_y <= top)?;
-        let entry = scrollback.entries().get(item.entry_idx)?;
+        let window = scrollback.paint_window(self.width.max(1), top, 1, 0);
+        let entry_idx = window.entries.start;
+        let item = scrollback.entry_layout(self.width.max(1), entry_idx)?;
+        if item.height == 0 {
+            return None;
+        }
+        let entry = scrollback.render_entry_ref(entry_idx)?;
         Some(ScrollAnchor {
             entry_id: entry.id,
             intra_row: top
@@ -460,14 +516,117 @@ impl ScrollbackPane {
         anchor: ScrollAnchor,
     ) -> Option<usize> {
         let entry_idx = scrollback.entry_index(anchor.entry_id)?;
-        let item = {
-            let layout = scrollback.layout(self.width.max(1));
-            *layout.entries.get(entry_idx)?
-        };
+        let item = scrollback.entry_layout(self.width.max(1), entry_idx)?;
         Some(
             item.start_y
                 .saturating_add(anchor.intra_row.min(item.height.saturating_sub(1))),
         )
+    }
+
+    /// Materialize only the viewport and one viewport of overscan on either
+    /// side. Height corrections preserve a stable top entry, while follow
+    /// mode re-pins to the final row after every correction.
+    pub fn prepare_viewport(
+        &mut self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+        viewport_height: u16,
+        follow: bool,
+    ) -> usize {
+        let viewport_height = viewport_height as usize;
+        if viewport_height == 0 || self.is_empty() {
+            self.entries.clear();
+            return scroll_top;
+        }
+        let anchor = (!follow)
+            .then(|| self.anchor_at(scrollback, scroll_top))
+            .flatten();
+        let mut top = if follow {
+            self.total_height(scrollback)
+                .saturating_sub(viewport_height)
+        } else {
+            scroll_top
+        };
+        let mut keep_ids = HashSet::new();
+
+        // Every changing pass converts at least one estimate in the bounded
+        // window to an exact rich-renderer height.
+        loop {
+            let window =
+                scrollback.paint_window(self.width.max(1), top, viewport_height, viewport_height);
+            if window.entries.is_empty() {
+                break;
+            }
+            let (changed, ids) = self.materialize_range(scrollback, window.entries);
+            keep_ids = ids;
+            let next_top = if follow {
+                self.total_height(scrollback)
+                    .saturating_sub(viewport_height)
+            } else {
+                anchor
+                    .and_then(|anchor| self.scroll_for_anchor(scrollback, anchor))
+                    .unwrap_or(top)
+            };
+            if !changed && next_top == top {
+                break;
+            }
+            top = next_top;
+        }
+        self.entries.retain(|id, _| keep_ids.contains(id));
+        top
+    }
+
+    fn materialize_range(
+        &mut self,
+        scrollback: &mut Scrollback,
+        range: std::ops::Range<usize>,
+    ) -> (bool, HashSet<DshRenderEntryId>) {
+        let mut changed = false;
+        let mut keep_ids = HashSet::with_capacity(range.len());
+        for entry_idx in range {
+            let Some(entry_ref) = scrollback.render_entry_ref(entry_idx) else {
+                continue;
+            };
+            let entry_id = entry_ref.id;
+            keep_ids.insert(entry_id);
+            let projection =
+                self.projections.get(&entry_id).cloned().unwrap_or_else(|| {
+                    ProjectionInfo::plain_ref(entry_ref, self.width, self.theme)
+                });
+            if entry_ref.visibility == DshRenderVisibility::Hidden || projection.group_hidden {
+                changed |= scrollback.set_projected_height(self.width, entry_idx, 0);
+                continue;
+            }
+            if !self.entries.contains_key(&entry_id) {
+                let entry = entry_ref.to_owned();
+                let lines = semantic_lines(
+                    &entry,
+                    self.width,
+                    self.theme,
+                    &projection,
+                    &self.expanded_blocks,
+                    self.show_timestamps,
+                    &self.appearance,
+                );
+                self.entries
+                    .insert(entry_id, CachedPaneEntry { entry, lines });
+                self.stats.materialized_entries = self.stats.materialized_entries.saturating_add(1);
+            }
+            let cached = self
+                .entries
+                .get(&entry_id)
+                .expect("materialized entry inserted");
+            let height = cached
+                .lines
+                .len()
+                .saturating_add(if projection.group_anchor.is_some() {
+                    usize::from(projection.group_last_visible)
+                } else {
+                    1
+                });
+            changed |= scrollback.set_projected_height(self.width, entry_idx, height);
+        }
+        (changed, keep_ids)
     }
 
     pub fn visible_lines(
@@ -479,38 +638,43 @@ impl ScrollbackPane {
         if viewport_height == 0 {
             return Vec::new();
         }
-        let (total_height, entries) = {
-            let layout = scrollback.layout(self.width.max(1));
-            (layout.total_height, layout.entries.to_vec())
-        };
-        let top = scroll_top.min(total_height);
-        let range = compute_paint_window(&entries, top, viewport_height as usize);
+        let top = self.prepare_viewport(scrollback, scroll_top, viewport_height, false);
+        let host_window =
+            scrollback.paint_window(self.width.max(1), top, viewport_height as usize, 0);
+        let window = RenderWindow::new(
+            host_window.entries,
+            host_window.content_y0,
+            host_window.total_height,
+            top,
+        );
         let mut painted = Vec::new();
-        for entry_idx in range {
-            let Some(entry) = scrollback.entries().get(entry_idx) else {
+        for entry_idx in window.entries {
+            let Some(entry_id) = scrollback.render_entry_ref(entry_idx).map(|entry| entry.id)
+            else {
                 continue;
             };
-            if entries
-                .get(entry_idx)
-                .is_none_or(|layout| layout.height == 0)
-            {
+            let Some(layout) = scrollback.entry_layout(self.width.max(1), entry_idx) else {
+                continue;
+            };
+            if layout.height == 0 {
                 continue;
             }
-            let Some(cached) = self.entries.get(&entry.id) else {
+            let Some(cached) = self.entries.get(&entry_id) else {
                 continue;
             };
             for line in &cached.lines {
-                let virtual_y = entries[entry_idx].start_y.saturating_add(line.line_index);
-                if virtual_y < top {
+                let virtual_y = layout.start_y.saturating_add(line.line_index);
+                let slice_y = virtual_y.saturating_sub(window.content_y0);
+                if slice_y < window.skip_rows {
                     continue;
                 }
-                let screen_y = virtual_y.saturating_sub(top);
+                let screen_y = slice_y.saturating_sub(window.skip_rows);
                 if screen_y >= viewport_height as usize {
                     break;
                 }
                 let mut line = line.clone();
                 line.screen_y = screen_y as u16;
-                line.pending_user_input = self.pending_entry == Some(entry.id);
+                line.pending_user_input = self.pending_entry == Some(entry_id);
                 let selected = self
                     .selected_target
                     .as_ref()
@@ -537,10 +701,69 @@ impl ScrollbackPane {
                 painted.push(line);
             }
         }
+        self.stats.painted_lines = self.stats.painted_lines.saturating_add(painted.len());
         painted
     }
 
-    fn resolve_pending_entry(&self, entries: &[DshRenderEntry]) -> Option<DshRenderEntryId> {
+    pub fn paint_buffer_line(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        paint: &RichPaintLine,
+        mouse_pos: Option<(u16, u16)>,
+    ) -> Option<TimestampPaint> {
+        let rendered = RenderedEntryLine {
+            line: paint.line.clone(),
+            block_index: paint.block_index,
+            line_index: paint.line_index,
+            header: paint.header,
+            group_header: paint.group_header,
+            selectable: paint.selectable,
+            accent: paint.accent,
+            flash_accent: paint.flash_accent,
+            bullet: paint.bullet,
+            accent_flash: paint.accent_flash,
+            background: paint.background,
+            copy_text: paint.copy_text.clone(),
+            content_offset: paint.content_offset,
+            content_width: paint.content_width,
+            timestamp: paint.timestamp.clone(),
+            bullet_span: paint.bullet_span,
+            joiner_to_previous: paint.joiner_to_previous.clone(),
+        };
+        let selected = self
+            .selected_target
+            .as_ref()
+            .is_some_and(|target| line_matches_target(paint, target));
+        let flashing = paint.accent_flash
+            && self.entries.get(&paint.entry_id).is_some_and(|entry| {
+                finish_flash_active(entry.entry.finished_at_ms, now_epoch_ms())
+            });
+        EntryRenderer::paint_buffer_line(
+            buf,
+            area,
+            paint.screen_y,
+            &rendered,
+            DynamicAccentSpec {
+                tick: self.wave_tick,
+                logical_row: paint.accent_wave_row,
+                wave_rows: self.appearance.animation.wave_rows,
+                wave_speed: GROK_WAVE_SPEED,
+                background: paint.background.unwrap_or(self.theme.bg_base),
+                accent: paint.accent,
+                flash_accent: paint.flash_accent,
+                bullet: paint.bullet,
+                bullet_span: paint.bullet_span,
+                selected,
+                flash: flashing,
+                pending_user_input: paint.pending_user_input,
+            },
+            &self.appearance.scrollback.layout,
+            mouse_pos,
+        )
+    }
+
+    fn resolve_pending_entry(&self, entries: &[DshRenderEntryRef<'_>]) -> Option<DshRenderEntryId> {
         if !self.pending_user_input {
             return None;
         }
@@ -1416,19 +1639,6 @@ fn truncate_summary(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn is_foldable_kind(entry: Option<&DshRenderEntry>) -> bool {
-    entry.is_some_and(|entry| {
-        matches!(
-            entry.kind,
-            DshRenderKind::User
-                | DshRenderKind::Thinking
-                | DshRenderKind::ToolCall
-                | DshRenderKind::ToolResult
-                | DshRenderKind::Error
-        ) && !entry.text.trim().is_empty()
-    })
-}
-
 fn default_display_mode(entry: &DshRenderEntry, width: usize, theme: Theme) -> DisplayMode {
     if entry.visibility == DshRenderVisibility::Collapsed {
         return DisplayMode::Collapsed;
@@ -1460,6 +1670,70 @@ fn default_display_mode(entry: &DshRenderEntry, width: usize, theme: Theme) -> D
     }
 }
 
+fn default_display_mode_ref(entry: DshRenderEntryRef<'_>, width: usize) -> DisplayMode {
+    if entry.visibility == DshRenderVisibility::Collapsed {
+        return DisplayMode::Collapsed;
+    }
+    match entry.kind {
+        DshRenderKind::User => {
+            let rows = entry
+                .text
+                .split('\n')
+                .map(|text| word_wrap_line(&Line::from(text), width.max(1)).len().max(1))
+                .sum::<usize>();
+            if rows > 3 {
+                DisplayMode::Truncated
+            } else {
+                DisplayMode::Expanded
+            }
+        }
+        DshRenderKind::Thinking if entry.finish == DshRenderFinish::Running => {
+            DisplayMode::Truncated
+        }
+        DshRenderKind::Thinking
+        | DshRenderKind::ToolCall
+        | DshRenderKind::ToolResult
+        | DshRenderKind::Error
+        | DshRenderKind::AgentContext
+        | DshRenderKind::Context
+        | DshRenderKind::Compaction => DisplayMode::Collapsed,
+        _ => DisplayMode::Expanded,
+    }
+}
+
+fn is_foldable_ref(entry: DshRenderEntryRef<'_>) -> bool {
+    matches!(
+        entry.kind,
+        DshRenderKind::User
+            | DshRenderKind::Thinking
+            | DshRenderKind::ToolCall
+            | DshRenderKind::ToolResult
+            | DshRenderKind::Error
+    ) && !entry.text.trim().is_empty()
+}
+
+fn estimated_projected_height(
+    entry: DshRenderEntryRef<'_>,
+    projection: &ProjectionInfo,
+    width: usize,
+) -> usize {
+    if entry.visibility == DshRenderVisibility::Hidden || projection.group_hidden {
+        return 0;
+    }
+    let base = match projection.mode {
+        DisplayMode::Collapsed => 2,
+        DisplayMode::Truncated => entry.estimated_height(width).min(5),
+        DisplayMode::Expanded => entry.estimated_height(width),
+    };
+    if projection.group_anchor.is_some() {
+        base.saturating_sub(1)
+            .saturating_add(usize::from(projection.group_last_visible))
+            .max(1)
+    } else {
+        base.max(1)
+    }
+}
+
 const FINISH_FLASH_DURATION_MS: u64 = 400;
 
 fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
@@ -1481,7 +1755,7 @@ fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
 }
 
 fn entry_projections(
-    entries: &[DshRenderEntry],
+    entries: &[DshRenderEntryRef<'_>],
     width: usize,
     theme: Theme,
     expanded_entries: &HashSet<DshRenderEntryId>,
@@ -1490,9 +1764,10 @@ fn entry_projections(
 ) -> HashMap<DshRenderEntryId, ProjectionInfo> {
     let mut projections = entries
         .iter()
+        .copied()
         .map(|entry| {
-            let mut projection = ProjectionInfo::plain(entry, width, theme);
-            if expanded_entries.contains(&entry.id) && is_foldable_kind(Some(entry)) {
+            let mut projection = ProjectionInfo::plain_ref(entry, width, theme);
+            if expanded_entries.contains(&entry.id) && is_foldable_ref(entry) {
                 projection.mode = DisplayMode::Expanded;
             }
             (entry.id, projection)
@@ -3183,5 +3458,55 @@ mod tests {
                 .iter()
                 .all(|line| line.background == Some(theme.bg_light))
         );
+    }
+
+    #[test]
+    fn fifty_thousand_entry_hot_frames_are_viewport_bounded() {
+        let mut scrollback = Scrollback::default();
+        for seq in 0..50_000 {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "user/message".into(),
+                    seq,
+                    time: 1.0,
+                    data: json!({
+                        "source": { "kind": "user" },
+                        "content": [{ "type": "text", "text": format!("entry {seq}") }]
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+
+        let theme = *Theme::current();
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, theme);
+        let cold = pane.stats();
+        assert_eq!(cold.revision_syncs, 1);
+        assert_eq!(cold.scanned_entries, 50_000);
+        assert_eq!(cold.materialized_entries, 0);
+
+        let viewport = 24;
+        let first = pane.visible_lines(&mut scrollback, 0, viewport);
+        assert!(!first.is_empty());
+        assert!(pane.entries.len() < 100);
+        assert!(pane.stats().materialized_entries < 100);
+
+        pane.reset_stats();
+        for tick in 1..=8 {
+            pane.set_wave_tick(tick);
+            pane.sync(&mut scrollback, 80, theme);
+            let lines = pane.visible_lines(&mut scrollback, 0, viewport);
+            assert!(lines.len() <= viewport as usize);
+        }
+        let hot = pane.stats();
+        assert_eq!(hot.revision_syncs, 0);
+        assert_eq!(hot.scanned_entries, 0);
+        assert_eq!(hot.materialized_entries, 0);
+        assert!(hot.painted_lines <= viewport as usize * 8);
+        assert!(pane.entries.len() < 100);
     }
 }

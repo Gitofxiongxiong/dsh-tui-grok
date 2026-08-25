@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use dsh_pager::{
-    DshRenderBlock, DshRenderEntry, DshRenderEntryId, DshRenderFinish, DshRenderKind,
-    DshRenderVisibility,
+    DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderEntryRef,
+    DshRenderFinish, DshRenderKind, DshRenderVisibility,
 };
 
 use crate::{
@@ -29,8 +29,60 @@ pub struct GroupProjection {
     pub failed: bool,
 }
 
-pub fn project_groups(
-    entries: &[DshRenderEntry],
+pub trait GroupProjectEntry {
+    fn id(&self) -> DshRenderEntryId;
+    fn kind(&self) -> DshRenderKind;
+    fn visibility(&self) -> DshRenderVisibility;
+    fn finish(&self) -> DshRenderFinish;
+    fn content(&self) -> &DshRenderContent;
+}
+
+impl GroupProjectEntry for DshRenderEntry {
+    fn id(&self) -> DshRenderEntryId {
+        self.id
+    }
+
+    fn kind(&self) -> DshRenderKind {
+        self.kind
+    }
+
+    fn visibility(&self) -> DshRenderVisibility {
+        self.visibility
+    }
+
+    fn finish(&self) -> DshRenderFinish {
+        self.finish
+    }
+
+    fn content(&self) -> &DshRenderContent {
+        &self.content
+    }
+}
+
+impl GroupProjectEntry for DshRenderEntryRef<'_> {
+    fn id(&self) -> DshRenderEntryId {
+        self.id
+    }
+
+    fn kind(&self) -> DshRenderKind {
+        self.kind
+    }
+
+    fn visibility(&self) -> DshRenderVisibility {
+        self.visibility
+    }
+
+    fn finish(&self) -> DshRenderFinish {
+        self.finish
+    }
+
+    fn content(&self) -> &DshRenderContent {
+        self.content
+    }
+}
+
+pub fn project_groups<E: GroupProjectEntry>(
+    entries: &[E],
     display_modes: &HashMap<DshRenderEntryId, DisplayMode>,
     expanded_groups: &HashSet<DshRenderEntryId>,
     pending_entry: Option<DshRenderEntryId>,
@@ -43,13 +95,13 @@ pub fn project_groups(
     let expanded_starts = entries
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| expanded_groups.contains(&entry.id).then_some(index))
+        .filter_map(|(index, entry)| expanded_groups.contains(&entry.id()).then_some(index))
         .collect::<HashSet<_>>();
     let spans = scan(&neutral, &expanded_starts, true);
     let mut projections = HashMap::new();
     for span in spans {
         let start = span.range.start;
-        let anchor = entries[start].id;
+        let anchor = entries[start].id();
         let (label, running, failed) = match span.kind {
             GroupKind::VerbRun { .. } => {
                 let label = verb_group_header_label(&neutral, span.range.clone(), &theme);
@@ -73,7 +125,7 @@ pub fn project_groups(
         for index in span.range.clone() {
             let claimed = is_claimed_member(&neutral, &span, index, true);
             projections.insert(
-                entries[index].id,
+                entries[index].id(),
                 GroupProjection {
                     anchor,
                     header: index == start,
@@ -90,17 +142,17 @@ pub fn project_groups(
     projections
 }
 
-fn project_group_entry(
-    entry: &DshRenderEntry,
+fn project_group_entry<E: GroupProjectEntry>(
+    entry: &E,
     display_modes: &HashMap<DshRenderEntryId, DisplayMode>,
     pending_entry: Option<DshRenderEntryId>,
 ) -> VerbGroupEntry {
     let display_mode = display_modes
-        .get(&entry.id)
+        .get(&entry.id())
         .copied()
         .unwrap_or(DisplayMode::Expanded);
-    let pending_user_input = pending_entry == Some(entry.id);
-    if entry.visibility == DshRenderVisibility::Hidden {
+    let pending_user_input = pending_entry == Some(entry.id());
+    if entry.visibility() == DshRenderVisibility::Hidden {
         return neutral_entry(
             VerbGroupEntryKind::Transparent,
             display_mode,
@@ -109,7 +161,7 @@ fn project_group_entry(
         );
     }
     if matches!(
-        entry.kind,
+        entry.kind(),
         DshRenderKind::AgentContext | DshRenderKind::Context | DshRenderKind::Compaction
     ) {
         return neutral_entry(
@@ -119,7 +171,7 @@ fn project_group_entry(
             pending_user_input,
         );
     }
-    if entry.kind == DshRenderKind::Thinking {
+    if entry.kind() == DshRenderKind::Thinking {
         return neutral_entry(
             VerbGroupEntryKind::Thinking,
             display_mode,
@@ -128,7 +180,7 @@ fn project_group_entry(
         );
     }
     let Some(block) = entry
-        .content
+        .content()
         .blocks
         .iter()
         .find(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
@@ -188,17 +240,17 @@ fn project_group_entry(
     neutral
 }
 
-fn neutral_entry(
+fn neutral_entry<E: GroupProjectEntry>(
     kind: VerbGroupEntryKind,
     display_mode: DisplayMode,
-    entry: &DshRenderEntry,
+    entry: &E,
     pending_user_input: bool,
 ) -> VerbGroupEntry {
     VerbGroupEntry {
         kind,
         display_mode,
-        running: entry.finish == DshRenderFinish::Running,
-        failed: entry.finish == DshRenderFinish::Failed,
+        running: entry.finish() == DshRenderFinish::Running,
+        failed: entry.finish() == DshRenderFinish::Failed,
         pending_user_input,
         sources: Vec::new(),
     }

@@ -45,7 +45,9 @@ pub use presentation::{
     DshToolCallView, DshToolDiff, DshToolKind, DshToolLocation, DshToolResult, DshToolResultView,
     DshWebSource,
 };
-pub use scrollback::{EntryId, EntryLayout, ScrollAnchor, ScrollbackLayout};
+pub use scrollback::{
+    DshRenderEntryRef, EntryId, EntryLayout, PaintWindow, ScrollAnchor, ScrollbackLayout,
+};
 pub use session::{
     ConnectionPhase, Diagnostic, DiagnosticLevel, InteractionKind, OperationToken,
     PendingInteraction, SessionState, SessionUpdate,

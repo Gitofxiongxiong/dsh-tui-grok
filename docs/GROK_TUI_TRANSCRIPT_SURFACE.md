@@ -264,8 +264,12 @@ rail 实际长度不进入周期；单点可见明暗周期约 0.7 秒，多行�
 S3/S4 同步完成了生产 renderer/message-block 接线；S5 又把全部 DSH-presentable
 tool family 与 verb-group 接入同一 chrome。accent 列、`◆` bullet、prompt vpad/
 背景由 `EntryRenderer`/`BlockRenderer` 物化，`Thinking…`、`Thought for Xs`、last-N
-截断及 user/agent/tool 输出来自 vendor B 闭包。sticky/Buffer-direct window 和最终
-`RichTranscript` 收尾仍属于 S6–S7，不能据此宣称整个 N2/pixel parity 已闭包。
+截断及 user/agent/tool 输出来自 vendor B 闭包。S6 第一条生产纵切现已用 host
+content revision + borrowed entry + Fenwick paint window 把 hot frame 限制到
+viewport/overscan，并由 `EntryRenderer` 直接写 `Buffer`；旧 `Paragraph<Vec<Line>>`
+和 runtime timestamp 双路径已删除。sticky 目前只有已测试的纯坐标闭包，尚未接入
+production；最终 `RichTranscript` 收尾仍属于 S6–S7，不能据此宣称整个 N2/pixel
+parity 已闭包。
 
 特殊态：
 
