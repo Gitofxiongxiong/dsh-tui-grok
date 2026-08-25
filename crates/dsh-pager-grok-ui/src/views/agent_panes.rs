@@ -13,7 +13,7 @@ use ratatui::{
 };
 
 use crate::{
-    host_adapter::{AgentSnapshot, FeatureStatus, SubagentRow, TaskRow},
+    host_adapter::{AgentSnapshot, ChildTranscriptView, FeatureStatus, SubagentRow, TaskRow},
     render::line_utils::truncate_str,
     theme::Theme,
 };
@@ -380,6 +380,7 @@ pub fn render_agent_detail_content(
     area: Rect,
     snapshot: &AgentSnapshot,
     id: &AgentItemId,
+    child: Option<&ChildTranscriptView>,
     theme: &Theme,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -496,6 +497,67 @@ pub fn render_agent_detail_content(
                     theme,
                     false,
                 );
+                row = row.saturating_add(1);
+            }
+            row = row.saturating_add(1);
+            match child {
+                Some(view) if view.error.is_some() => {
+                    put_at(
+                        buffer,
+                        area,
+                        row,
+                        &format!(
+                            "history unavailable: {}",
+                            view.error.as_deref().unwrap_or("unknown")
+                        ),
+                        theme.warning,
+                        theme,
+                        false,
+                    );
+                }
+                Some(view) if view.rows.is_empty() => {
+                    put_at(
+                        buffer,
+                        area,
+                        row,
+                        "Child transcript is empty",
+                        theme.gray,
+                        theme,
+                        false,
+                    );
+                }
+                Some(view) => {
+                    let body_bottom = area.height.saturating_sub(1);
+                    for transcript in &view.rows {
+                        if row >= body_bottom {
+                            break;
+                        }
+                        if transcript.text.trim().is_empty() {
+                            continue;
+                        }
+                        put_at(
+                            buffer,
+                            area,
+                            row,
+                            &format!("{}  {}", transcript.label, transcript.text),
+                            theme.text_secondary,
+                            theme,
+                            false,
+                        );
+                        row = row.saturating_add(1);
+                    }
+                }
+                None => {
+                    put_at(
+                        buffer,
+                        area,
+                        row,
+                        "Loading child transcript…",
+                        theme.gray,
+                        theme,
+                        false,
+                    );
+                }
             }
         }
     }
@@ -503,7 +565,7 @@ pub fn render_agent_detail_content(
         buffer,
         area,
         area.height.saturating_sub(1),
-        "Esc/q close · ↑/↓ select another",
+        "q/Esc back · does not cancel the child",
         theme.gray_dim,
         theme,
         false,
@@ -803,6 +865,50 @@ mod tests {
             }],
         };
         assert_eq!(watcher_label(&settled), None);
+    }
+
+    #[test]
+    fn subagent_detail_renders_child_transcript_instead_of_metadata_only() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 8));
+        let snapshot = snapshot();
+        let child = ChildTranscriptView {
+            child_id: "child-a".into(),
+            rows: vec![crate::host_adapter::TranscriptRow {
+                id: dsh_pager::DshRenderEntryId::Event { seq: 1 },
+                created_at_ms: None,
+                started_at_ms: None,
+                finished_at_ms: None,
+                label: "user".into(),
+                text: "delegate this".into(),
+                kind: dsh_pager::DshRenderKind::User,
+                visibility: dsh_pager::DshRenderVisibility::Visible,
+                finish: dsh_pager::DshRenderFinish::Completed,
+                group_key: None,
+                selectable: true,
+                source_seq: 1,
+                seq: dsh_pager::DshSeq::new(1),
+                content: dsh_pager::DshRenderContent {
+                    blocks: Vec::new(),
+                    fallback: String::new(),
+                },
+            }],
+            error: None,
+        };
+        render_agent_detail_content(
+            &mut buffer,
+            Rect::new(0, 0, 80, 8),
+            &snapshot,
+            &AgentItemId::Subagent("child-a".into()),
+            Some(&child),
+            &Theme::current(),
+        );
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("delegate this"));
+        assert!(text.contains("does not cancel"));
     }
 
     #[test]

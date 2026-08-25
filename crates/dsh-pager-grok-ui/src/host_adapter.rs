@@ -5,13 +5,15 @@
 //! stable and must not become a second host-owned view model.
 
 use dsh_pager::{
-    ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
-    DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
-    DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, JobView,
-    SessionControlSnapshot, SessionState, SubagentCatalog, SubagentListEntry, event_time_epoch_ms,
+    ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationAdapter,
+    DshPresentationModel, DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry,
+    DshRenderEntryId, DshRenderFinish, DshRenderKind, DshRenderUpdate, DshRenderVisibility, DshSeq,
+    DshSessionId, JobView, SessionControlSnapshot, SessionState, SubagentCatalog,
+    SubagentListEntry, event_time_epoch_ms,
 };
 use dsh_pager_protocol::{
-    PromptMode, SessionEvent, SessionListValue, SessionModeId, SessionSearchValue, SessionSummary,
+    HistoryEntry, PromptMode, SessionEvent, SessionListValue, SessionModeId, SessionSearchValue,
+    SessionSummary, SubagentAddress, SubagentMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -353,6 +355,50 @@ impl SubagentRow {
             || catalog_activity_is_running(self.activity.as_deref())
             || catalog_activity_is_running(self.status.as_deref())
     }
+
+    /// Durable parent/child address for history and interrupt. Job-only rows
+    /// whose id is the registry job id cannot form an address.
+    pub fn address(&self) -> Option<SubagentAddress> {
+        if self
+            .job_id
+            .as_deref()
+            .is_some_and(|job_id| job_id == self.id)
+        {
+            return None;
+        }
+        let mode = match self.mode.as_deref() {
+            Some("continuable") => SubagentMode::Continuable,
+            Some("one-shot") => SubagentMode::OneShot,
+            _ => return None,
+        };
+        Some(SubagentAddress {
+            parent_session_id: self.parent_id.clone(),
+            child_session_id: self.id.clone(),
+            mode,
+        })
+    }
+}
+
+/// Fold a child history page into the same transcript rows the parent view uses.
+pub fn child_transcript_from_history(history: &[HistoryEntry]) -> Vec<TranscriptRow> {
+    let mut adapter = DshPresentationAdapter::default();
+    adapter
+        .adapt_history(history)
+        .into_iter()
+        .filter_map(|update| match update {
+            DshRenderUpdate::Upsert(entry) if entry.visibility != DshRenderVisibility::Hidden => {
+                Some(TranscriptRow::from(entry))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChildTranscriptView {
+    pub child_id: String,
+    pub rows: Vec<TranscriptRow>,
+    pub error: Option<String>,
 }
 
 fn catalog_activity_is_running(value: Option<&str>) -> bool {
@@ -2253,5 +2299,49 @@ mod tests {
             snapshot.agent.subagents[0].activity.as_deref(),
             Some("running")
         );
+        assert_eq!(
+            snapshot.agent.subagents[0]
+                .address()
+                .unwrap()
+                .child_session_id,
+            "child"
+        );
+    }
+
+    #[test]
+    fn child_transcript_folds_history_into_parent_transcript_rows() {
+        let history = vec![HistoryEntry {
+            event: SessionEvent {
+                event_type: "user/message".into(),
+                seq: 1,
+                time: 1.0,
+                data: json!({
+                    "source": { "kind": "user" },
+                    "content": [{ "type": "text", "text": "delegate this" }]
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        }];
+        let rows = child_transcript_from_history(&history);
+        assert!(
+            rows.iter().any(|row| row.text.contains("delegate this")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn job_only_subagent_row_cannot_form_a_child_address() {
+        let row = SubagentRow {
+            id: "subagent-1".into(),
+            parent_id: "parent".into(),
+            label: "research".into(),
+            mode: Some("one-shot".into()),
+            job_id: Some("subagent-1".into()),
+            ..Default::default()
+        };
+        assert!(row.address().is_none());
     }
 }

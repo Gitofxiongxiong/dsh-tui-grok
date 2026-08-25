@@ -41,9 +41,9 @@ use crate::geometry::{
     insert_text_line,
 };
 use crate::host_adapter::{
-    AgentSnapshot, FeatureStatus, FileSearchRow, FileSearchSnapshot, GrokHostSnapshot,
-    MediaSnapshot, SuggestionSnapshot, media_snapshot_from_scrollback, resume_picker_entries,
-    resume_picker_search_hits,
+    AgentSnapshot, ChildTranscriptView, FeatureStatus, FileSearchRow, FileSearchSnapshot,
+    GrokHostSnapshot, MediaSnapshot, SuggestionSnapshot, child_transcript_from_history,
+    media_snapshot_from_scrollback, resume_picker_entries, resume_picker_search_hits,
 };
 use crate::input::{PromptEditor, key::KeyShortcut, line_editor::LineEditOutcome};
 use crate::media::{
@@ -440,6 +440,7 @@ struct UiState {
     transcript_media: MediaSnapshot,
     agent_pane: AgentPaneController,
     agent_detail: Option<AgentItemId>,
+    child_transcript: Option<ChildTranscriptView>,
     last_agent_item_click: Option<(Instant, AgentItemId)>,
     dashboard: DashboardModel,
     workspace_tree: WorkspaceTreeController,
@@ -1829,7 +1830,14 @@ impl UiState {
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
             let agent = snapshot.agent.clone();
             if let Some(id) = self.agent_detail.as_ref() {
-                render_agent_detail_content(buf, content.content, &agent, id, theme);
+                render_agent_detail_content(
+                    buf,
+                    content.content,
+                    &agent,
+                    id,
+                    self.child_transcript.as_ref(),
+                    theme,
+                );
             } else {
                 render_agent_tasks_content(buf, content.content, &agent, &self.agent_pane, theme);
             }
@@ -2029,6 +2037,7 @@ impl UiState {
             ShellAction::OpenAgentTasks => {
                 self.agent_pane.clear();
                 self.agent_detail = None;
+                self.child_transcript = None;
                 self.refresh_agent_subagents(transport, session, true);
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
@@ -2556,6 +2565,7 @@ impl UiState {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.agent_detail = None;
+                    self.child_transcript = None;
                     self.shell.close_overlay();
                     self.status = Some("Agent detail closed".into());
                 }
@@ -2581,7 +2591,7 @@ impl UiState {
             KeyCode::Down => self.agent_pane.move_selection(1),
             KeyCode::Enter => {
                 if let Some(id) = self.agent_pane.selected().cloned() {
-                    self.agent_detail = Some(id);
+                    self.open_agent_detail(transport, session, &agent, id);
                 }
             }
             KeyCode::Char('x') => {
@@ -2614,8 +2624,8 @@ impl UiState {
     fn handle_agent_item_mouse(
         &mut self,
         id: AgentItemId,
-        _transport: &mut RpcTransport,
-        _session: &SessionState,
+        transport: &mut RpcTransport,
+        session: &SessionState,
     ) {
         self.agent_pane.select(id.clone());
         let now = Instant::now();
@@ -2627,11 +2637,62 @@ impl UiState {
             });
         self.last_agent_item_click = Some((now, id.clone()));
         if double_click {
-            self.agent_detail = Some(id);
+            let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                session,
+                Some(transport.control_plane()),
+            );
+            self.open_agent_detail(transport, session, &snapshot.agent, id);
             self.shell.open_agent_tasks();
-            self.status = Some("Agent detail opened".into());
         } else {
             self.status = Some("Agent item selected · double-click to open".into());
+        }
+    }
+
+    fn open_agent_detail(
+        &mut self,
+        transport: &mut RpcTransport,
+        _session: &SessionState,
+        agent: &AgentSnapshot,
+        id: AgentItemId,
+    ) {
+        self.agent_detail = Some(id.clone());
+        self.child_transcript = None;
+        let AgentItemId::Subagent(child_id) = &id else {
+            self.status = Some("Agent detail opened".into());
+            return;
+        };
+        let Some(row) = agent.subagents.iter().find(|row| row.id == *child_id) else {
+            self.status = Some("Subagent no longer exists".into());
+            return;
+        };
+        let Some(address) = row.address() else {
+            self.child_transcript = Some(ChildTranscriptView {
+                child_id: child_id.clone(),
+                rows: Vec::new(),
+                error: Some("no durable child session for this job yet".into()),
+            });
+            self.status = Some("Subagent job has no child session yet".into());
+            return;
+        };
+        match dsh_pager::peek_subagent_history(transport, &address, 100) {
+            Ok(history) => {
+                let rows = child_transcript_from_history(&history.events);
+                let count = rows.len();
+                self.child_transcript = Some(ChildTranscriptView {
+                    child_id: child_id.clone(),
+                    rows,
+                    error: None,
+                });
+                self.status = Some(format!("Opened child transcript ({count} entries)"));
+            }
+            Err(error) => {
+                self.child_transcript = Some(ChildTranscriptView {
+                    child_id: child_id.clone(),
+                    rows: Vec::new(),
+                    error: Some(error.to_string()),
+                });
+                self.status = Some(format!("Child history unavailable: {error}"));
+            }
         }
     }
 
