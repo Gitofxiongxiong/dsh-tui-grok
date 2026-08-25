@@ -9,7 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dsh_pager_protocol::{JsonRpcNotification, SessionListValue, SessionQueueItem};
+use dsh_pager_protocol::{
+    JsonRpcNotification, SessionListValue, SessionQueueItem, SubagentListValue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -207,6 +209,57 @@ impl SubagentListEntry {
     }
 }
 
+/// Parent-addressed durable catalog, filled by `subagent.list` and kept live
+/// with host session frames. The list RPC is still the classification
+/// authority; host frames only mark stale, overlay running/inactive, and
+/// insert a creation-window placeholder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentCatalog {
+    pub parent_session_id: String,
+    pub parent_available: bool,
+    pub entries: Vec<SubagentListEntry>,
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default)]
+    pub initialized: bool,
+    #[serde(default)]
+    pub unsupported: bool,
+}
+
+impl SubagentCatalog {
+    fn new(parent_session_id: impl Into<String>) -> Self {
+        Self {
+            parent_session_id: parent_session_id.into(),
+            parent_available: true,
+            entries: Vec::new(),
+            stale: true,
+            initialized: false,
+            unsupported: false,
+        }
+    }
+}
+
+enum SubagentHostEvent {
+    ChildPublished {
+        parent_session_id: String,
+        child_session_id: String,
+        running: bool,
+    },
+    ChildActivity {
+        parent_session_id: String,
+        child_session_id: String,
+        running: bool,
+    },
+    ChildDetached {
+        parent_session_id: String,
+        child_session_id: String,
+    },
+    ParentUnavailable {
+        session_id: String,
+    },
+}
+
 /// Connection state exposed to model/view code. `phase` mirrors the existing
 /// session lifecycle enum while generation and last error remain explicit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +409,7 @@ pub struct ControlPlaneStore {
     request_ids: BTreeMap<String, String>,
     host_fingerprints: BTreeSet<String>,
     fingerprint_order: VecDeque<String>,
+    subagent_catalogs: BTreeMap<String, SubagentCatalog>,
     connection: ConnectionState,
     revision: u64,
 }
@@ -384,6 +438,7 @@ impl ControlPlaneStore {
             request_ids: BTreeMap::new(),
             host_fingerprints: BTreeSet::new(),
             fingerprint_order: VecDeque::new(),
+            subagent_catalogs: BTreeMap::new(),
             connection: ConnectionState::new(0),
             revision: 0,
         }
@@ -422,6 +477,7 @@ impl ControlPlaneStore {
         self.request_ids.clear();
         self.host_fingerprints.clear();
         self.fingerprint_order.clear();
+        self.subagent_catalogs.clear();
         self.connection = ConnectionState::new(generation);
         self.revision = self.revision.saturating_add(1);
         true
@@ -488,6 +544,29 @@ impl ControlPlaneStore {
             }
             snapshot.last_activity_ms = now;
         }
+        let published_children = list
+            .items
+            .iter()
+            .filter_map(|summary| {
+                let parent = summary.parent_session_id.as_deref()?;
+                summary
+                    .origin
+                    .as_deref()
+                    .is_some_and(|origin| origin.eq_ignore_ascii_case("subagent"))
+                    .then_some((
+                        parent.to_string(),
+                        summary.session_id.clone(),
+                        summary.running,
+                    ))
+            })
+            .collect::<Vec<_>>();
+        for (parent_session_id, child_session_id, running) in published_children {
+            self.apply_subagent_host_event(SubagentHostEvent::ChildPublished {
+                parent_session_id,
+                child_session_id,
+                running,
+            });
+        }
         self.revision = self.revision.saturating_add(1);
         self.prune(now);
     }
@@ -548,6 +627,114 @@ impl ControlPlaneStore {
 
     pub fn snapshot(&self, session_id: &str) -> Option<&SessionControlSnapshot> {
         self.sessions.get(session_id)
+    }
+
+    /// Direct-child catalog for one parent. Absent means it has never been
+    /// observed and still needs a first `subagent.list`.
+    pub fn subagent_catalog(&self, parent_session_id: &str) -> Option<&SubagentCatalog> {
+        self.subagent_catalogs.get(parent_session_id)
+    }
+
+    pub fn subagent_catalog_needs_refresh(&self, parent_session_id: &str) -> bool {
+        match self.subagent_catalogs.get(parent_session_id) {
+            Some(catalog) if catalog.unsupported => false,
+            Some(catalog) => catalog.stale || !catalog.initialized,
+            None => true,
+        }
+    }
+
+    pub fn apply_subagent_list(&mut self, parent_session_id: &str, value: &SubagentListValue) {
+        let mut catalog = SubagentCatalog::new(parent_session_id);
+        catalog.parent_available = value.parent_available;
+        catalog.entries = value
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                serde_json::to_value(entry)
+                    .ok()
+                    .map(SubagentListEntry::from_value)
+            })
+            .collect();
+        catalog.stale = false;
+        catalog.initialized = true;
+        catalog.unsupported = false;
+        overlay_catalog_activity(&mut catalog, &self.sessions);
+        self.subagent_catalogs
+            .insert(parent_session_id.to_string(), catalog);
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    pub fn mark_subagent_catalog_unsupported(&mut self, parent_session_id: &str) {
+        let catalog = self.ensure_subagent_catalog(parent_session_id);
+        catalog.unsupported = true;
+        catalog.stale = false;
+        catalog.initialized = true;
+        catalog.entries.clear();
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    pub fn mark_subagent_catalog_stale(&mut self, parent_session_id: &str) {
+        let catalog = self.ensure_subagent_catalog(parent_session_id);
+        if catalog.unsupported {
+            return;
+        }
+        catalog.stale = true;
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    fn ensure_subagent_catalog(&mut self, parent_session_id: &str) -> &mut SubagentCatalog {
+        self.subagent_catalogs
+            .entry(parent_session_id.to_string())
+            .or_insert_with(|| SubagentCatalog::new(parent_session_id))
+    }
+
+    fn apply_subagent_host_event(&mut self, event: SubagentHostEvent) {
+        match event {
+            SubagentHostEvent::ChildPublished {
+                parent_session_id,
+                child_session_id,
+                running,
+            } => {
+                let catalog = self.ensure_subagent_catalog(&parent_session_id);
+                if catalog.unsupported {
+                    return;
+                }
+                catalog.stale = true;
+                upsert_catalog_placeholder(catalog, &child_session_id, running);
+            }
+            SubagentHostEvent::ChildActivity {
+                parent_session_id,
+                child_session_id,
+                running,
+            } => {
+                let catalog = self.ensure_subagent_catalog(&parent_session_id);
+                if catalog.unsupported {
+                    return;
+                }
+                if catalog
+                    .entries
+                    .iter()
+                    .any(|entry| entry.id == child_session_id)
+                {
+                    set_catalog_activity(catalog, &child_session_id, running);
+                } else {
+                    catalog.stale = true;
+                    upsert_catalog_placeholder(catalog, &child_session_id, running);
+                }
+            }
+            SubagentHostEvent::ChildDetached {
+                parent_session_id,
+                child_session_id,
+            } => {
+                let catalog = self.ensure_subagent_catalog(&parent_session_id);
+                set_catalog_activity(catalog, &child_session_id, false);
+            }
+            SubagentHostEvent::ParentUnavailable { session_id } => {
+                if let Some(catalog) = self.subagent_catalogs.get_mut(&session_id) {
+                    catalog.parent_available = false;
+                }
+            }
+        }
     }
 
     pub fn snapshots(&self) -> impl Iterator<Item = &SessionControlSnapshot> {
@@ -716,6 +903,7 @@ impl ControlPlaneStore {
             if !keep {
                 self.records.remove(id);
                 self.seen_sequences.remove(id);
+                self.subagent_catalogs.remove(id);
             }
             keep
         });
@@ -733,6 +921,7 @@ impl ControlPlaneStore {
                 self.sessions.remove(&id);
                 self.records.remove(&id);
                 self.seen_sequences.remove(&id);
+                self.subagent_catalogs.remove(&id);
             }
         }
     }
@@ -1005,6 +1194,7 @@ impl ControlPlaneStore {
                 .to_string();
             self.mark_phase(ConnectionPhase::Reconnecting, Some(message));
         }
+        let mut catalog_event = None;
         if let Some(session_id) = id.clone() {
             let snapshot = self.ensure_session(session_id.clone(), now);
             match frame_type {
@@ -1039,6 +1229,7 @@ impl ControlPlaneStore {
             }
             snapshot.last_activity_ms = now;
             snapshot.updated_at_ms = Some(now);
+            catalog_event = subagent_host_event(frame_type, snapshot);
         }
         match frame_type {
             "host/workspace-changed" => {
@@ -1096,6 +1287,9 @@ impl ControlPlaneStore {
                 }
             }
             _ => {}
+        }
+        if let Some(event) = catalog_event {
+            self.apply_subagent_host_event(event);
         }
         self.record("host", id.clone(), sequence(&frame), frame, now);
         self.revision = self.revision.saturating_add(1);
@@ -1309,6 +1503,30 @@ impl ControlPlaneStore {
             }
         }
         self.mark_phase(ConnectionPhase::Connected, None);
+        self.subagent_catalogs.clear();
+        let published_children = self
+            .sessions
+            .values()
+            .filter_map(|snapshot| {
+                let parent = snapshot.parent_session_id.as_deref()?;
+                snapshot
+                    .origin
+                    .as_deref()
+                    .is_some_and(|origin| origin.eq_ignore_ascii_case("subagent"))
+                    .then_some((
+                        parent.to_string(),
+                        snapshot.session_id.clone(),
+                        snapshot.running.unwrap_or(false),
+                    ))
+            })
+            .collect::<Vec<_>>();
+        for (parent_session_id, child_session_id, running) in published_children {
+            self.apply_subagent_host_event(SubagentHostEvent::ChildPublished {
+                parent_session_id,
+                child_session_id,
+                running,
+            });
+        }
         self.revision = self.revision.saturating_add(1);
         Ok(ControlPlaneUpdate {
             accepted: true,
@@ -1483,6 +1701,92 @@ fn sequence(frame: &Value) -> Option<i64> {
         .and_then(Value::as_i64)
         .or_else(|| frame.get("seq").and_then(Value::as_i64))
         .or_else(|| frame.get("lastSeq").and_then(Value::as_i64))
+}
+
+fn subagent_host_event(
+    frame_type: &str,
+    snapshot: &SessionControlSnapshot,
+) -> Option<SubagentHostEvent> {
+    let is_subagent = snapshot
+        .origin
+        .as_deref()
+        .is_some_and(|origin| origin.eq_ignore_ascii_case("subagent"));
+    match frame_type {
+        "host/session-added" if is_subagent => Some(SubagentHostEvent::ChildPublished {
+            parent_session_id: snapshot.parent_session_id.clone()?,
+            child_session_id: snapshot.session_id.clone(),
+            running: snapshot.running.unwrap_or(true),
+        }),
+        "host/session-status" if is_subagent => Some(SubagentHostEvent::ChildActivity {
+            parent_session_id: snapshot.parent_session_id.clone()?,
+            child_session_id: snapshot.session_id.clone(),
+            running: snapshot.running.unwrap_or(false),
+        }),
+        "host/session-removed" if is_subagent => Some(SubagentHostEvent::ChildDetached {
+            parent_session_id: snapshot.parent_session_id.clone()?,
+            child_session_id: snapshot.session_id.clone(),
+        }),
+        "host/session-removed" => Some(SubagentHostEvent::ParentUnavailable {
+            session_id: snapshot.session_id.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn catalog_activity(running: bool) -> String {
+    if running {
+        "running".into()
+    } else {
+        "inactive".into()
+    }
+}
+
+fn upsert_catalog_placeholder(
+    catalog: &mut SubagentCatalog,
+    child_session_id: &str,
+    running: bool,
+) {
+    if let Some(entry) = catalog
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == child_session_id)
+    {
+        entry.activity = Some(catalog_activity(running));
+        return;
+    }
+    catalog.entries.push(SubagentListEntry {
+        kind: "child".into(),
+        id: child_session_id.to_string(),
+        activity: Some(catalog_activity(running)),
+        ..SubagentListEntry::from_value(Value::Null)
+    });
+}
+
+fn set_catalog_activity(catalog: &mut SubagentCatalog, child_session_id: &str, running: bool) {
+    if let Some(entry) = catalog
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == child_session_id)
+    {
+        entry.activity = Some(catalog_activity(running));
+    }
+}
+
+fn overlay_catalog_activity(
+    catalog: &mut SubagentCatalog,
+    sessions: &BTreeMap<String, SessionControlSnapshot>,
+) {
+    for entry in &mut catalog.entries {
+        if entry.kind != "child" {
+            continue;
+        }
+        let Some(child) = sessions.get(&entry.id) else {
+            continue;
+        };
+        if let Some(running) = child.running {
+            entry.activity = Some(catalog_activity(running));
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -1845,5 +2149,134 @@ mod tests {
         let snapshot = store.snapshot("s").unwrap();
         assert_eq!(snapshot.updated_at_ms, Some(7));
         assert!(snapshot.last_activity_ms >= 7);
+    }
+
+    #[test]
+    fn host_subagent_frames_mark_parent_catalog_stale_and_keep_child_on_detach() {
+        let mut store = ControlPlaneStore::default();
+        store.set_generation(1);
+        assert!(store.subagent_catalog_needs_refresh("parent"));
+        store
+            .apply_notification(&note(
+                "events.host",
+                json!({
+                    "generation": 1,
+                    "type": "host/session-added",
+                    "sessionId": "child",
+                    "parentSessionId": "parent",
+                    "origin": "subagent",
+                    "blank": false
+                }),
+            ))
+            .unwrap();
+        let catalog = store
+            .subagent_catalog("parent")
+            .expect("placeholder catalog");
+        assert!(catalog.stale);
+        assert!(!catalog.initialized);
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].id, "child");
+        assert_eq!(catalog.entries[0].activity.as_deref(), Some("running"));
+
+        let listed: SubagentListValue = serde_json::from_value(json!({
+            "parentAvailable": true,
+            "entries": [{
+                "kind": "child",
+                "id": "child",
+                "mode": "continuable",
+                "activity": "running",
+                "hasChildren": false,
+                "label": "research"
+            }]
+        }))
+        .unwrap();
+        store.apply_subagent_list("parent", &listed);
+        assert!(!store.subagent_catalog_needs_refresh("parent"));
+        assert_eq!(
+            store.subagent_catalog("parent").unwrap().entries[0]
+                .label
+                .as_deref(),
+            Some("research")
+        );
+
+        store
+            .apply_notification(&note(
+                "events.host",
+                json!({
+                    "generation": 1,
+                    "type": "host/session-status",
+                    "sessionId": "child",
+                    "running": false
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            store.subagent_catalog("parent").unwrap().entries[0]
+                .activity
+                .as_deref(),
+            Some("inactive")
+        );
+        assert!(!store.subagent_catalog_needs_refresh("parent"));
+
+        store
+            .apply_notification(&note(
+                "events.host",
+                json!({
+                    "generation": 1,
+                    "type": "host/session-removed",
+                    "sessionId": "child"
+                }),
+            ))
+            .unwrap();
+        let catalog = store.subagent_catalog("parent").unwrap();
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].activity.as_deref(), Some("inactive"));
+    }
+
+    #[test]
+    fn list_result_overlays_live_child_running_bit() {
+        let mut store = ControlPlaneStore::default();
+        store.set_generation(1);
+        store
+            .apply_notification(&note(
+                "events.host",
+                json!({
+                    "generation": 1,
+                    "type": "host/session-added",
+                    "sessionId": "child",
+                    "parentSessionId": "parent",
+                    "origin": "subagent"
+                }),
+            ))
+            .unwrap();
+        store
+            .apply_notification(&note(
+                "events.host",
+                json!({
+                    "generation": 1,
+                    "type": "host/session-status",
+                    "sessionId": "child",
+                    "running": true
+                }),
+            ))
+            .unwrap();
+        let listed: SubagentListValue = serde_json::from_value(json!({
+            "parentAvailable": true,
+            "entries": [{
+                "kind": "child",
+                "id": "child",
+                "mode": "one-shot",
+                "activity": "inactive",
+                "hasChildren": false
+            }]
+        }))
+        .unwrap();
+        store.apply_subagent_list("parent", &listed);
+        assert_eq!(
+            store.subagent_catalog("parent").unwrap().entries[0]
+                .activity
+                .as_deref(),
+            Some("running")
+        );
     }
 }

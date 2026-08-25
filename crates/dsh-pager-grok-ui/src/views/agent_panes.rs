@@ -782,6 +782,27 @@ mod tests {
             watcher_label(&snapshot).as_deref(),
             Some("1 background task · 1 subagent still running")
         );
+        let settled = AgentSnapshot {
+            status: FeatureStatus::Available,
+            tasks: vec![TaskRow {
+                id: "done".into(),
+                kind: "bash".into(),
+                label: "done".into(),
+                status: "completed".into(),
+                ..Default::default()
+            }],
+            subagents: vec![SubagentRow {
+                id: "child-b".into(),
+                parent_id: "parent".into(),
+                label: "settled".into(),
+                mode: Some("one-shot".into()),
+                status: Some("inactive".into()),
+                activity: Some("inactive".into()),
+                running: false,
+                ..Default::default()
+            }],
+        };
+        assert_eq!(watcher_label(&settled), None);
     }
 
     #[test]

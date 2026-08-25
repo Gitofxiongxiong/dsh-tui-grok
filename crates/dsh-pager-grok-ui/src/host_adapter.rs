@@ -7,8 +7,8 @@
 use dsh_pager::{
     ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
     DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
-    DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, SessionState,
-    event_time_epoch_ms,
+    DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, JobView,
+    SessionControlSnapshot, SessionState, SubagentCatalog, SubagentListEntry, event_time_epoch_ms,
 };
 use dsh_pager_protocol::{
     PromptMode, SessionEvent, SessionListValue, SessionModeId, SessionSearchValue, SessionSummary,
@@ -236,6 +236,12 @@ pub struct SubagentRow {
     pub context_pct: Option<u8>,
     #[serde(default)]
     pub running: bool,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub parent_available: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,12 +350,236 @@ impl TaskRow {
 impl SubagentRow {
     pub fn is_running(&self) -> bool {
         self.running
-            || self.status.as_deref().is_some_and(|status| {
-                matches!(
-                    status.trim().to_ascii_lowercase().as_str(),
-                    "running" | "active" | "thinking" | "working" | "waiting"
-                )
-            })
+            || catalog_activity_is_running(self.activity.as_deref())
+            || catalog_activity_is_running(self.status.as_deref())
+    }
+}
+
+fn catalog_activity_is_running(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("running")
+    )
+}
+
+fn job_is_subagent(job: &JobView) -> bool {
+    job.kind.eq_ignore_ascii_case("subagent")
+}
+
+fn job_is_live(job: &JobView) -> bool {
+    matches!(
+        job.status.trim().to_ascii_lowercase().as_str(),
+        "running" | "stopping"
+    )
+}
+
+fn origin_is_subagent(origin: Option<&str>) -> bool {
+    origin.is_some_and(|value| value.eq_ignore_ascii_case("subagent"))
+}
+
+fn project_agent_snapshot(
+    parent_session_id: &str,
+    control_plane: Option<&ControlPlaneStore>,
+    jobs: &[JobView],
+) -> AgentSnapshot {
+    let Some(store) = control_plane else {
+        return AgentSnapshot {
+            status: FeatureStatus::Unsupported,
+            tasks: Vec::new(),
+            subagents: Vec::new(),
+        };
+    };
+    let tasks = jobs
+        .iter()
+        .filter(|job| !job_is_subagent(job))
+        .map(task_row_from_job)
+        .collect::<Vec<_>>();
+    let catalog = store.subagent_catalog(parent_session_id);
+    let subagents = project_subagent_rows(parent_session_id, store, catalog, jobs);
+    let status = if catalog.is_some_and(|catalog| catalog.unsupported)
+        && tasks.is_empty()
+        && subagents.is_empty()
+    {
+        FeatureStatus::Unsupported
+    } else if catalog.is_none_or(|catalog| !catalog.initialized && catalog.stale)
+        && tasks.is_empty()
+        && subagents.is_empty()
+    {
+        FeatureStatus::Pending
+    } else {
+        FeatureStatus::Available
+    };
+    AgentSnapshot {
+        status,
+        tasks,
+        subagents,
+    }
+}
+
+fn task_row_from_job(job: &JobView) -> TaskRow {
+    TaskRow {
+        id: job.id.clone(),
+        kind: job.kind.clone(),
+        label: job.label.clone(),
+        status: job.status.clone(),
+        detail: job.detail.clone(),
+        started_at_ms: job.started_at.and_then(|value| u64::try_from(value).ok()),
+        finished_at_ms: job.finished_at.and_then(|value| u64::try_from(value).ok()),
+    }
+}
+
+fn project_subagent_rows(
+    parent_session_id: &str,
+    store: &ControlPlaneStore,
+    catalog: Option<&SubagentCatalog>,
+    jobs: &[JobView],
+) -> Vec<SubagentRow> {
+    let mut rows = Vec::new();
+    let mut used_job_ids = std::collections::BTreeSet::new();
+    let parent_available = catalog
+        .map(|catalog| catalog.parent_available)
+        .unwrap_or(true);
+    if let Some(catalog) = catalog {
+        for entry in &catalog.entries {
+            if entry.kind.eq_ignore_ascii_case("diagnostic") {
+                rows.push(SubagentRow {
+                    id: entry.id.clone(),
+                    parent_id: parent_session_id.to_string(),
+                    label: entry.label.clone().unwrap_or_else(|| entry.id.clone()),
+                    mode: entry.mode.clone(),
+                    status: entry.reason.clone(),
+                    activity: Some("inactive".into()),
+                    running: false,
+                    parent_available,
+                    reason: entry.reason.clone(),
+                    ..Default::default()
+                });
+                continue;
+            }
+            if !entry.kind.is_empty() && !entry.kind.eq_ignore_ascii_case("child") {
+                continue;
+            }
+            let child = store.snapshot(&entry.id);
+            let running = child
+                .and_then(|snapshot| snapshot.running)
+                .unwrap_or_else(|| catalog_activity_is_running(entry.activity.as_deref()));
+            let activity = if running { "running" } else { "inactive" };
+            let matched_job = match_subagent_job(jobs, &used_job_ids, entry, running);
+            if let Some(job) = matched_job {
+                used_job_ids.insert(job.id.clone());
+            }
+            rows.push(subagent_row_from_catalog(
+                parent_session_id,
+                entry,
+                child,
+                matched_job,
+                running,
+                activity,
+                parent_available,
+            ));
+        }
+    }
+    for job in jobs.iter().filter(|job| job_is_subagent(job)) {
+        if used_job_ids.contains(&job.id) {
+            continue;
+        }
+        rows.push(SubagentRow {
+            id: job.id.clone(),
+            parent_id: parent_session_id.to_string(),
+            label: job.label.clone(),
+            mode: Some("one-shot".into()),
+            status: Some(job.status.clone()),
+            activity: Some(if job_is_live(job) {
+                "running".into()
+            } else {
+                "inactive".into()
+            }),
+            running: job_is_live(job),
+            started_at_ms: job.started_at.and_then(|value| u64::try_from(value).ok()),
+            finished_at_ms: job.finished_at.and_then(|value| u64::try_from(value).ok()),
+            job_id: Some(job.id.clone()),
+            parent_available,
+            ..Default::default()
+        });
+    }
+    for snapshot in store.snapshots() {
+        if !origin_is_subagent(snapshot.origin.as_deref()) {
+            continue;
+        }
+        if snapshot.parent_session_id.as_deref() != Some(parent_session_id) {
+            continue;
+        }
+        if rows.iter().any(|row| row.id == snapshot.session_id) {
+            continue;
+        }
+        rows.push(SubagentRow {
+            id: snapshot.session_id.clone(),
+            parent_id: parent_session_id.to_string(),
+            label: snapshot.session_id.clone(),
+            activity: Some(if snapshot.running.unwrap_or(true) {
+                "running".into()
+            } else {
+                "inactive".into()
+            }),
+            running: snapshot.running.unwrap_or(true),
+            parent_available,
+            ..Default::default()
+        });
+    }
+    rows
+}
+
+fn match_subagent_job<'a>(
+    jobs: &'a [JobView],
+    used_job_ids: &std::collections::BTreeSet<String>,
+    entry: &SubagentListEntry,
+    running: bool,
+) -> Option<&'a JobView> {
+    let label = entry.label.as_deref().unwrap_or("");
+    if label.is_empty() {
+        return None;
+    }
+    let candidates = jobs
+        .iter()
+        .filter(|job| {
+            job_is_subagent(job)
+                && !used_job_ids.contains(&job.id)
+                && job.label == label
+                && job_is_live(job) == running
+        })
+        .collect::<Vec<_>>();
+    (candidates.len() == 1).then_some(candidates[0])
+}
+
+fn subagent_row_from_catalog(
+    parent_session_id: &str,
+    entry: &SubagentListEntry,
+    child: Option<&SessionControlSnapshot>,
+    job: Option<&JobView>,
+    running: bool,
+    activity: &str,
+    parent_available: bool,
+) -> SubagentRow {
+    SubagentRow {
+        id: entry.id.clone(),
+        parent_id: parent_session_id.to_string(),
+        label: entry
+            .label
+            .clone()
+            .or_else(|| job.map(|job| job.label.clone()))
+            .unwrap_or_else(|| entry.id.clone()),
+        mode: entry.mode.clone(),
+        status: Some(activity.to_string()),
+        activity: Some(activity.to_string()),
+        model: child.and_then(|snapshot| snapshot.agent_preset.clone()),
+        running,
+        started_at_ms: job
+            .and_then(|job| job.started_at.and_then(|value| u64::try_from(value).ok())),
+        finished_at_ms: job
+            .and_then(|job| job.finished_at.and_then(|value| u64::try_from(value).ok())),
+        job_id: job.map(|job| job.id.clone()),
+        parent_available,
+        ..Default::default()
     }
 }
 
@@ -669,24 +899,12 @@ impl GrokHostSnapshot {
         );
         let queue = presentation.queue.clone();
         let queue_revision = presentation.queue_revision;
-        let tasks = control_plane
+        let jobs = control_plane
             .and_then(|store| store.snapshot(session.session_id()))
-            .map(|snapshot| {
-                snapshot
-                    .jobs
-                    .iter()
-                    .map(|job| TaskRow {
-                        id: job.id.clone(),
-                        kind: job.kind.clone(),
-                        label: job.label.clone(),
-                        status: job.status.clone(),
-                        detail: job.detail.clone(),
-                        started_at_ms: job.started_at.and_then(|value| u64::try_from(value).ok()),
-                        finished_at_ms: job.finished_at.and_then(|value| u64::try_from(value).ok()),
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(|snapshot| snapshot.jobs.clone())
             .unwrap_or_default();
+        let agent = project_agent_snapshot(session.session_id(), control_plane, &jobs);
+        let tasks = agent.tasks.clone();
         let file_search = file_search_snapshot(session, capabilities.file_search);
         let suggestion_snapshot = SuggestionSnapshot {
             status: feature_status(capabilities.prompt_suggestions),
@@ -696,11 +914,6 @@ impl GrokHostSnapshot {
         };
         let media = media_snapshot(&transcript, capabilities.image);
         let workspace = workspace_snapshot(control_plane, capabilities.workspace_actions);
-        let agent = AgentSnapshot {
-            status: feature_status(control_plane.is_some() || !tasks.is_empty()),
-            tasks: tasks.clone(),
-            subagents: Vec::new(),
-        };
         let session_header = SessionHeader {
             id: DshSessionId::new(session.session_id()),
             generation: DshGeneration::new(session.generation()),
@@ -1960,5 +2173,85 @@ mod tests {
         assert!(entries.iter().any(|entry| entry.id == "session-1"));
         assert!(!entries.iter().any(|entry| entry.id == "blank"));
         assert!(!entries.iter().any(|entry| entry.id == "child"));
+    }
+
+    #[test]
+    fn agent_snapshot_projects_catalog_and_keeps_subagent_jobs_out_of_tasks() {
+        let mut store = ControlPlaneStore::default();
+        store.set_generation(1);
+        store
+            .apply_notification(&JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.host".into(),
+                params: Some(json!({
+                    "generation": 1,
+                    "type": "host/session-added",
+                    "sessionId": "child",
+                    "parentSessionId": "session-1",
+                    "origin": "subagent"
+                })),
+            })
+            .unwrap();
+        store
+            .apply_notification(&JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "generation": 1,
+                    "type": "session/jobs",
+                    "sessionId": "session-1",
+                    "jobs": [
+                        {
+                            "id": "bash-1",
+                            "kind": "bash",
+                            "label": "sleep 20",
+                            "status": "running",
+                            "startedAt": 10
+                        },
+                        {
+                            "id": "subagent-1",
+                            "kind": "subagent",
+                            "label": "research",
+                            "status": "running",
+                            "startedAt": 11
+                        }
+                    ]
+                })),
+            })
+            .unwrap();
+        store.apply_subagent_list(
+            "session-1",
+            &serde_json::from_value(json!({
+                "parentAvailable": true,
+                "entries": [{
+                    "kind": "child",
+                    "id": "child",
+                    "mode": "continuable",
+                    "activity": "running",
+                    "hasChildren": false,
+                    "label": "research"
+                }]
+            }))
+            .unwrap(),
+        );
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(&state(), Some(&store));
+        assert_eq!(snapshot.agent.status, FeatureStatus::Available);
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.tasks[0].id, "bash-1");
+        assert_eq!(snapshot.agent.subagents.len(), 1);
+        assert_eq!(snapshot.agent.subagents[0].id, "child");
+        assert_eq!(
+            snapshot.agent.subagents[0].job_id.as_deref(),
+            Some("subagent-1")
+        );
+        assert!(snapshot.agent.subagents[0].running);
+        assert_eq!(
+            snapshot.agent.subagents[0].mode.as_deref(),
+            Some("continuable")
+        );
+        assert_eq!(
+            snapshot.agent.subagents[0].activity.as_deref(),
+            Some("running")
+        );
     }
 }

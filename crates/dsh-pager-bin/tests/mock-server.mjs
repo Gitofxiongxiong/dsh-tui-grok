@@ -219,6 +219,28 @@ function emitTailOnce() {
   })
   write({
     jsonrpc: '2.0',
+    method: 'events.host',
+    params: {
+      generation: 1,
+      type: 'host/session-added',
+      sessionId: 'child-mock',
+      parentSessionId: sessionId,
+      origin: 'subagent',
+      blank: false,
+    },
+  })
+  write({
+    jsonrpc: '2.0',
+    method: 'events.host',
+    params: {
+      generation: 1,
+      type: 'host/session-status',
+      sessionId: 'child-mock',
+      running: true,
+    },
+  })
+  write({
+    jsonrpc: '2.0',
     method: 'events.mux',
     params: {
       type: 'session/jobs',
@@ -357,14 +379,24 @@ rl.on('line', (line) => {
   }
   if (message?.method === 'subagent.list') {
     success(message.id, {
-      entries: [{
-        kind: 'child',
-        id: 'child-mock',
-        activity: 'sleeping for 90 seconds',
-        mode: 'continuable',
-        label: 'mock child',
-        hasChildren: false,
-      }],
+      entries: [
+        {
+          kind: 'child',
+          id: 'child-mock',
+          activity: 'running',
+          mode: 'continuable',
+          label: 'mock child',
+          hasChildren: false,
+        },
+        {
+          kind: 'child',
+          id: 'child-settled',
+          activity: 'inactive',
+          mode: 'one-shot',
+          label: 'settled one-shot',
+          hasChildren: false,
+        },
+      ],
       parentAvailable: true,
     })
     return

@@ -125,19 +125,25 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn is_live_activity(activity: &str) -> bool {
-    !matches!(
-        activity.trim().to_ascii_lowercase().as_str(),
-        "inactive"
-            | "completed"
-            | "complete"
-            | "done"
-            | "failed"
-            | "error"
-            | "cancelled"
-            | "canceled"
-            | "finished"
-    )
+fn subagent_catalog_unsupported(error: &PagerError) -> bool {
+    match error.code().map(str::to_ascii_lowercase) {
+        Some(code)
+            if matches!(
+                code.as_str(),
+                "method-not-found"
+                    | "method_not_found"
+                    | "not-found"
+                    | "unsupported"
+                    | "capability-denied"
+            ) =>
+        {
+            true
+        }
+        _ => {
+            let message = error.to_string().to_ascii_lowercase();
+            message.contains("unknown method") || message.contains("method not found")
+        }
+    }
 }
 
 fn agent_item_key(id: &AgentItemId) -> String {
@@ -433,10 +439,8 @@ struct UiState {
     transcript_media_enabled: Option<bool>,
     transcript_media: MediaSnapshot,
     agent_pane: AgentPaneController,
-    agent_subagents: Vec<crate::host_adapter::SubagentRow>,
     agent_detail: Option<AgentItemId>,
     last_agent_item_click: Option<(Instant, AgentItemId)>,
-    last_subagent_refresh_seq: Option<i64>,
     dashboard: DashboardModel,
     workspace_tree: WorkspaceTreeController,
     dashboard_revision: Option<u64>,
@@ -473,46 +477,35 @@ struct UiState {
 }
 
 impl UiState {
-    /// Refresh the child catalog outside rendering.  Views only consume the
-    /// resulting `SubagentRow` projection; RPC and protocol details stay here.
+    /// Refresh the child catalog outside rendering. Views only consume the
+    /// `AgentSnapshot` projection; RPC and protocol details stay here.
     fn refresh_agent_subagents(
         &mut self,
         transport: &mut RpcTransport,
         session: &SessionState,
         force: bool,
     ) {
-        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-            session,
-            Some(transport.control_plane()),
-        );
-        if !snapshot.capabilities.subagents {
+        let parent = session.session_id();
+        if !force
+            && !transport
+                .control_plane()
+                .subagent_catalog_needs_refresh(parent)
+        {
             return;
         }
-        let seq = session.tail_seq();
-        if !force && seq == self.last_subagent_refresh_seq {
-            return;
-        }
-        self.last_subagent_refresh_seq = seq;
-        match dsh_pager::list_subagents(transport, session.session_id()) {
+        match dsh_pager::list_subagents(transport, parent) {
             Ok(catalog) => {
-                self.agent_subagents = catalog
-                    .entries
-                    .into_iter()
-                    .map(|entry| {
-                        let activity = entry.activity.or(entry.reason);
-                        let running = activity.as_deref().is_some_and(is_live_activity);
-                        crate::host_adapter::SubagentRow {
-                            id: entry.id,
-                            parent_id: session.session_id().to_string(),
-                            label: entry.label.unwrap_or_else(|| entry.kind.clone()),
-                            mode: entry.mode.map(|mode| format!("{mode:?}").to_lowercase()),
-                            status: activity.clone(),
-                            activity,
-                            running,
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
+                transport
+                    .control_plane_mut()
+                    .store
+                    .apply_subagent_list(parent, &catalog);
+            }
+            Err(error) if subagent_catalog_unsupported(&error) => {
+                transport
+                    .control_plane_mut()
+                    .store
+                    .mark_subagent_catalog_unsupported(parent);
+                self.status = Some(format!("Subagent catalog unavailable: {error}"));
             }
             Err(error) => {
                 self.status = Some(format!("Subagent list failed: {error}"));
@@ -734,10 +727,6 @@ impl UiState {
         snapshot.media = self.transcript_media.clone();
         self.apply_file_search_result(&mut snapshot);
         self.sync_dashboard(control_plane);
-        // Subagent catalog responses are host-authoritative but arrive through
-        // the effect reducer after the base session projection. Fold the
-        // latest stable-ID result into this frame's single render snapshot.
-        snapshot.agent.subagents = self.agent_subagents.clone();
         self.agent_pane.sync(&snapshot.agent);
         self.reconcile_snapshot(&snapshot);
         self.reconcile_session_mode(&snapshot);
@@ -1838,8 +1827,7 @@ impl UiState {
         };
         let buf = frame.buffer_mut();
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
-            let mut agent = snapshot.agent.clone();
-            agent.subagents = self.agent_subagents.clone();
+            let agent = snapshot.agent.clone();
             if let Some(id) = self.agent_detail.as_ref() {
                 render_agent_detail_content(buf, content.content, &agent, id, theme);
             } else {
@@ -2041,17 +2029,15 @@ impl UiState {
             ShellAction::OpenAgentTasks => {
                 self.agent_pane.clear();
                 self.agent_detail = None;
+                self.refresh_agent_subagents(transport, session, true);
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
                     Some(transport.control_plane()),
                 );
-                self.refresh_agent_subagents(transport, session, true);
-                let mut agent_snapshot = snapshot.agent.clone();
-                agent_snapshot.subagents = self.agent_subagents.clone();
-                self.agent_pane.sync(&agent_snapshot);
+                self.agent_pane.sync(&snapshot.agent);
                 self.status = Some(agent_status_message_with_subagents(
-                    &agent_snapshot,
-                    self.agent_subagents.len(),
+                    &snapshot.agent,
+                    snapshot.agent.subagents.len(),
                 ));
                 Ok(false)
             }
@@ -2584,9 +2570,11 @@ impl UiState {
             self.status = Some("Agent tasks closed".into());
             return;
         }
-        let snapshot = GrokHostSnapshot::from_session(session);
-        let mut agent = snapshot.agent.clone();
-        agent.subagents = self.agent_subagents.clone();
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        let agent = snapshot.agent.clone();
         self.agent_pane.sync(&agent);
         match key.code {
             KeyCode::Up => self.agent_pane.move_selection(-1),

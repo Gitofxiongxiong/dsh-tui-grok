@@ -17,7 +17,7 @@ pub mod transport;
 pub use control_plane::{
     ConnectionState, ControlPlaneApplyResult, ControlPlaneRecord, ControlPlaneRouter,
     ControlPlaneStore, ControlPlaneStoreOptions, ControlPlaneUpdate, JobView,
-    SessionControlSnapshot, SessionProjection, SubagentListEntry, WorkspaceView,
+    SessionControlSnapshot, SessionProjection, SubagentCatalog, SubagentListEntry, WorkspaceView,
 };
 pub use dashboard::{
     DashboardActionKind, DashboardActionState, DashboardModel, DashboardRow, DashboardStatus,
