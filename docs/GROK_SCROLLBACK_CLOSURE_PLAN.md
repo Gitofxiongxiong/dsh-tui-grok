@@ -430,6 +430,16 @@ S1 可以单独先做，因为它删除的是已经被证伪的模型，且不�
 > `docs/开发进度记录/2026-08-25_16-18-28_S6A2增量revision同步.md`。这关闭了此前
 > “partial 每次全表扫描”的 S6A2 缺口；topology revision 的全量语义重建是当前保守
 > 合同，sticky production、host pane 改名、S7/浏览器像素门禁仍开放。
+>
+> 执行状态续（2026-08-25 16:28 +0800）：S6B host 边界已拆分。Production
+> `DshScrollbackHost`、`ProjectionInfo`、revision sync、fold/group/pending state、Fenwick
+> viewport/materialization、visible-line loop 与 direct-Buffer painter 已整体迁入
+> `scrollback_adapter/host_pane.rs`；runtime 直接依赖该 adapter，不再从
+> `views::transcript` 取得 pane。原 DSH `ScrollbackPane` 类型名已删除，避免和 Grok 主
+> widget 碰撞；`transcript.rs` 从 3722 行降至 2841 行，目前只通过 crate-private seam
+> 提供 semantic materializer，并保留 legacy `RichTranscript` oracle/测试。UI 452/452
+> 在迁移后通过。sticky production 与 S7 semantic/oracle 删除仍是下一批，不把本次
+> 纯结构迁移记作 pixel parity。
 
 禁止的顺序：先把 `transcript.rs` 拆成 `wave.rs` `tools.rs` `thinking.rs` 三个
 本地文件再谈 vendor。那是把平行宇宙正规化，漂移不会减。
@@ -495,6 +505,6 @@ Grok 全部功能」，这是已经写在 N2 里、现在必须当真执行的�
 
 | 项 | 现在位置 | 删除切片 |
 |---|---|---|
-| DSH `ScrollbackPane` 这个名字 | `transcript.rs` | S6 改名 |
+| semantic materializer + legacy `RichTranscript` oracle | `transcript.rs` | S7 删除/迁出 |
 
 新增 TEMPORARY 必须改本表，不能只在 PR 描述里写「以后再迁」。

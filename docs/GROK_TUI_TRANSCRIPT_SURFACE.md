@@ -271,7 +271,10 @@ viewport/overscan，并由 `EntryRenderer` 直接写 `Buffer`；旧 `Paragraph<V
 历史上连续 `assistant/chunk` 原位更新只重投影变化 entry，8 次 revision 合计扫描
 8 个 metadata、0 个新 rich materialization；追加/删除/重排或 tool/thinking/context/
 pending 等邻接敏感变化仍显式回退全量语义同步。sticky 目前只有已测试的纯坐标闭包，
-尚未接入 production；最终 `RichTranscript` 收尾仍属于 S6–S7，不能据此宣称整个
+尚未接入 production。Production pane/revision/window/Buffer painter 已从
+`views/transcript.rs` 整体迁到 `scrollback_adapter/host_pane.rs`，并改名为
+`DshScrollbackHost`；`transcript.rs` 现仅保留过渡 semantic materializer 与 legacy
+`RichTranscript` oracle。最终 semantic/oracle 收尾仍属于 S7，不能据此宣称整个
 N2/pixel parity 已闭包。
 
 特殊态：

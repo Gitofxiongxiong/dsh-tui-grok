@@ -52,7 +52,7 @@ use crate::media::{
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
-use crate::scrollback_adapter::tick::animation_tick;
+use crate::scrollback_adapter::{host_pane::DshScrollbackHost, tick::animation_tick};
 use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
@@ -90,7 +90,6 @@ use crate::views::{
     status_bar::StatusBar,
     suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
-    transcript::ScrollbackPane,
     turn_status::{MouseButtons as TurnStatusMouseButtons, TurnStatusArgs, render_turn_status},
     welcome::{WelcomeAnimation, format_cwd, render_welcome},
     workspace::WorkspaceTreeController,
@@ -324,7 +323,7 @@ struct UiState {
     scroll: usize,
     transcript_width: Option<u16>,
     scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
-    scrollback_pane: ScrollbackPane,
+    scrollback_pane: DshScrollbackHost,
     resume_picker: ResumePickerState,
     modal: ModalWindowState,
     prompt: PromptEditor,
