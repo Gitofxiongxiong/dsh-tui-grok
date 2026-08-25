@@ -20,6 +20,7 @@ pub mod terminal;
 pub mod theme;
 pub mod views;
 
+pub mod diag;
 pub mod effects;
 pub mod geometry;
 pub mod host_adapter;

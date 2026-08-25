@@ -312,6 +312,17 @@ impl DshScrollbackHost {
         }
         self.host_revision = Some(revision);
         self.semantic_dirty = false;
+        crate::diag::log(
+            "scrollback",
+            format!(
+                "full-sync entries={} revision={revision} groups={}",
+                scrollback.entries().len(),
+                self.projections
+                    .values()
+                    .filter(|projection| projection.group_header)
+                    .count()
+            ),
+        );
         self.stats.revision_syncs = self.stats.revision_syncs.saturating_add(1);
         self.stats.scanned_entries = self
             .stats
@@ -769,10 +780,13 @@ impl DshScrollbackHost {
                     .insert(entry_id, CachedPaneEntry { entry, lines });
                 self.stats.materialized_entries = self.stats.materialized_entries.saturating_add(1);
             }
-            let cached = self
-                .entries
-                .get(&entry_id)
-                .expect("materialized entry inserted");
+            let cached = self.entries.get(&entry_id).unwrap_or_else(|| {
+                crate::diag::log_always(
+                    "scrollback",
+                    format!("materialize miss entry={entry_id:?} idx={entry_idx}"),
+                );
+                panic!("materialized entry inserted: {entry_id:?} at {entry_idx}");
+            });
             let height = cached
                 .lines
                 .len()
@@ -1153,9 +1167,13 @@ fn entry_projections(
         pending_entry,
         theme,
     ) {
-        let projection = projections
-            .get_mut(&id)
-            .expect("group projection references a canonical entry");
+        let projection = projections.get_mut(&id).unwrap_or_else(|| {
+            crate::diag::log_always(
+                "scrollback",
+                format!("group id missing from canonical entries: {id:?}"),
+            );
+            panic!("group projection references a canonical entry: {id:?}");
+        });
         projection.group_anchor = Some(group.anchor);
         projection.group_header = group.header;
         projection.group_hidden = group.hidden;
@@ -1402,5 +1420,89 @@ mod tests {
         assert!(selected.line.spans[0].content.starts_with('┃'));
         assert_eq!(selected.line.spans[0].style.fg, Some(theme.accent_success));
         assert_eq!(host.stats().materialized_entries, 1);
+    }
+
+    #[test]
+    fn four_parallel_subagent_tools_group_and_materialize() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&history(
+            0,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "分析项目架构，使用子agent" }]
+            }),
+        ));
+        let children = [
+            ("call-host", "分析 Rust host runtime 层", "child-host"),
+            ("call-ui", "分析 grok-ui 前端层", "child-ui"),
+            ("call-plugin", "深度分析 DSH 插件包", "child-plugin"),
+            ("call-docs", "分析治理文档与验证体系", "child-docs"),
+        ];
+        for (index, (call_id, title, child_id)) in children.iter().enumerate() {
+            let seq = i64::try_from(index).expect("index") + 1;
+            let prompt = format!(
+                "# {title}\n\n只读分析。\n\n```rust\nfn sample() {{}}\n```\n\n- crates\n- docs\n"
+            );
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "tool/call".into(),
+                    seq,
+                    time: 2.0,
+                    data: json!({
+                        "turn": 1,
+                        "step": 7,
+                        "callId": call_id,
+                        "name": "subagent",
+                        "arguments": json!({
+                            "description": title,
+                            "prompt": prompt
+                        }).to_string()
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: Some(json!({
+                    "for": "call",
+                    "view": { "card": "generic", "title": title, "kind": "other" }
+                })),
+            });
+            scrollback.apply_event(&history(
+                seq + 4,
+                "tool/result",
+                json!({
+                    "turn": 1,
+                    "step": 7,
+                    "message": {
+                        "source": { "kind": "tool", "callId": call_id },
+                        "content": [{
+                            "type": "tool-result",
+                            "toolCallId": call_id,
+                            "content": [{
+                                "type": "text",
+                                "text": format!("started subagent {child_id}")
+                            }],
+                            "isError": false
+                        }]
+                    }
+                }),
+            ));
+        }
+        let theme = *Theme::current();
+        let mut host = DshScrollbackHost::default();
+        host.sync(&mut scrollback, 80, theme);
+        let lines = host.visible_lines(&mut scrollback, 0, 24);
+        let text = lines
+            .iter()
+            .map(|line| line.copy_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("subagent") || text.contains("Ran") || text.contains("分析"),
+            "grouped four subagent tools should paint: {text}"
+        );
+        assert!(host.stats().revision_syncs >= 1);
+        assert!(!host.is_empty());
     }
 }

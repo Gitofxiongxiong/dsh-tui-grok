@@ -594,7 +594,8 @@ fn match_subagent_job<'a>(
                 && job_is_live(job) == running
         })
         .collect::<Vec<_>>();
-    (candidates.len() == 1).then_some(candidates[0])
+    // `then_some(candidates[0])` indexes before the length check.
+    (candidates.len() == 1).then(|| candidates[0])
 }
 
 fn subagent_row_from_catalog(
@@ -2306,6 +2307,75 @@ mod tests {
                 .child_session_id,
             "child"
         );
+    }
+
+    #[test]
+    fn four_unmatched_subagent_jobs_do_not_index_empty_candidates() {
+        let mut store = ControlPlaneStore::default();
+        store.set_generation(1);
+        let children = [
+            "1f07b684-99a2-4215-bcd4-6b055a052726",
+            "c38bbc5f-79af-4546-8d90-caf5136a7823",
+            "f025ea7a-a3b3-4a1e-b105-d2630c6196cd",
+            "06f12c70-6573-4765-aa0e-f897159ad248",
+        ];
+        for child in children {
+            store
+                .apply_notification(&JsonRpcNotification {
+                    jsonrpc: "2.0".into(),
+                    method: "events.host".into(),
+                    params: Some(json!({
+                        "generation": 1,
+                        "type": "host/session-added",
+                        "sessionId": child,
+                        "parentSessionId": "session-1",
+                        "origin": "subagent",
+                        "running": true
+                    })),
+                })
+                .unwrap();
+        }
+        store
+            .apply_notification(&JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "generation": 1,
+                    "type": "session/jobs",
+                    "sessionId": "session-1",
+                    "jobs": (0..4).map(|index| {
+                        json!({
+                            "id": format!("subagent-{index}"),
+                            "kind": "subagent",
+                            "label": format!("分析任务 {index}"),
+                            "status": "running",
+                            "startedAt": 10 + index
+                        })
+                    }).collect::<Vec<_>>()
+                })),
+            })
+            .unwrap();
+        store.apply_subagent_list(
+            "session-1",
+            &serde_json::from_value(json!({
+                "parentAvailable": true,
+                "entries": children.iter().map(|child| {
+                    json!({
+                        "kind": "child",
+                        "id": child,
+                        "mode": "one-shot",
+                        "activity": "running",
+                        "hasChildren": false,
+                        "label": child
+                    })
+                }).collect::<Vec<_>>()
+            }))
+            .unwrap(),
+        );
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(&state(), Some(&store));
+        assert_eq!(snapshot.agent.status, FeatureStatus::Available);
+        assert_eq!(snapshot.agent.subagents.len(), 8);
+        assert!(snapshot.agent.subagents.iter().all(|row| row.running));
     }
 
     #[test]

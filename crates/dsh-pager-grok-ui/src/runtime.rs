@@ -9,6 +9,7 @@
 //! a second layout or dispatch system here. Removal exits when M3 production
 //! shell and its focus/dispatch fixtures replace this entry path.
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
@@ -32,6 +33,7 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::app::{AppShell, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard::{self, ClipboardBackend};
+use crate::diag;
 use crate::effects::{
     AsyncEffectExecutor, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectCompletion,
     UiEffectStatus, UiIntent, compile_intent, receipt_status_message,
@@ -170,17 +172,39 @@ struct PendingQueueMutation {
 
 /// Run the default Grok-derived UI until the user closes it.
 pub fn run_interactive(mut transport: RpcTransport, mut session: SessionState) -> PagerResult<()> {
+    diag::install_panic_hook();
+    diag::log(
+        "interactive",
+        format!(
+            "enter session={} generation={} history={}",
+            session.session_id(),
+            session.generation(),
+            session.history().len()
+        ),
+    );
     let mut terminal = TerminalSurface::enter()?;
     let mut ui = UiState {
         capabilities: terminal.capabilities(),
         ..UiState::default()
     };
     ui.refresh_agent_subagents(&mut transport, &session, true);
-    let result = run_loop(&mut terminal, &mut transport, &mut session, &mut ui);
-    // Restore explicitly so an error from the loop does not leave raw mode
-    // enabled before the `Drop` fallback runs.
+    // Restore the terminal before resuming a panic so the payload is not
+    // trapped on the alternate screen.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        run_loop(&mut terminal, &mut transport, &mut session, &mut ui)
+    }));
     let restore_result = terminal.restore();
-    result.and(restore_result.map_err(PagerError::from))
+    match result {
+        Ok(loop_result) => {
+            diag::log("interactive", "exit restored");
+            loop_result.and(restore_result.map_err(PagerError::from))
+        }
+        Err(payload) => {
+            diag::log_always("interactive", "panic after restore");
+            let _ = restore_result;
+            resume_unwind(payload)
+        }
+    }
 }
 
 fn run_loop(
@@ -238,13 +262,17 @@ fn run_loop(
                 ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
             }
             Err(error) => {
+                diag::log("notify", format!("error {error}"));
                 ui.status = Some(format!("notification error: {error}"));
             }
         }
         let frame_links = ui.frame_links.clone();
-        terminal.draw_with_links(&frame_links, |frame| {
+        if let Err(error) = terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
-        })?;
+        }) {
+            diag::log_always("draw", format!("{error}"));
+            return Err(PagerError::from(error));
+        }
         let welcome_animating =
             ui.scrollback_pane.is_empty() && ui.welcome_animation.is_animating(Instant::now());
         let poll_interval =
@@ -253,10 +281,21 @@ fn run_loop(
             } else {
                 POLL_INTERVAL
             };
-        if !event::poll(poll_interval)? {
-            continue;
+        match event::poll(poll_interval) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(error) => {
+                diag::log_always("input", format!("poll {error}"));
+                return Err(PagerError::from(error));
+            }
         }
-        let event = event::read()?;
+        let event = match event::read() {
+            Ok(event) => event,
+            Err(error) => {
+                diag::log_always("input", format!("read {error}"));
+                return Err(PagerError::from(error));
+            }
+        };
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 let quit = ui.dispatch_event(ShellEvent::Key(key), transport, session)?;
@@ -494,14 +533,24 @@ impl UiState {
         {
             return;
         }
+        diag::log("catalog", format!("refresh parent={parent} force={force}"));
         match dsh_pager::list_subagents(transport, parent) {
             Ok(catalog) => {
+                diag::log(
+                    "catalog",
+                    format!(
+                        "ok parent={parent} entries={} available={}",
+                        catalog.entries.len(),
+                        catalog.parent_available
+                    ),
+                );
                 transport
                     .control_plane_mut()
                     .store
                     .apply_subagent_list(parent, &catalog);
             }
             Err(error) if subagent_catalog_unsupported(&error) => {
+                diag::log("catalog", format!("unsupported parent={parent} {error}"));
                 transport
                     .control_plane_mut()
                     .store
@@ -509,6 +558,7 @@ impl UiState {
                 self.status = Some(format!("Subagent catalog unavailable: {error}"));
             }
             Err(error) => {
+                diag::log("catalog", format!("err parent={parent} {error}"));
                 self.status = Some(format!("Subagent list failed: {error}"));
             }
         }
@@ -1975,7 +2025,16 @@ impl UiState {
         let prompt_empty = self.prompt.is_empty();
         let action = self.shell.dispatch(event, prompt_empty);
         match action {
-            ShellAction::Quit => Ok(true),
+            ShellAction::Quit => {
+                diag::log(
+                    "input",
+                    format!(
+                        "quit prompt_empty={prompt_empty} owner={:?}",
+                        self.shell.owner()
+                    ),
+                );
+                Ok(true)
+            }
             ShellAction::OpenQueue => {
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
@@ -4903,6 +4962,216 @@ mod tests {
         assert_eq!(
             format_file_reference("docs/my file.md"),
             "@\"docs/my file.md\""
+        );
+    }
+
+    fn four_subagent_history() -> Vec<HistoryEntry> {
+        let mut events = vec![HistoryEntry {
+            event: SessionEvent {
+                event_type: "user/message".into(),
+                seq: 0,
+                time: 1.0,
+                data: json!({
+                    "source": { "kind": "user" },
+                    "content": [{
+                        "type": "text",
+                        "text": "分析一下项目架构，最终给我一个 html，重点分析 dsh 插件，使用子agent"
+                    }]
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        }];
+        let children = [
+            (
+                "call_00_ENGpqIy3Lh6Rcf0CDW279308",
+                "分析 Rust host runtime 层",
+                "1f07b684-99a2-4215-bcd4-6b055a052726",
+            ),
+            (
+                "call_01_1UrVFLY5LO6Qdb2y2mtD4417",
+                "分析 grok-ui 前端层",
+                "c38bbc5f-79af-4546-8d90-caf5136a7823",
+            ),
+            (
+                "call_02_rU562acst7I26wccGsea6685",
+                "深度分析 DSH 插件包",
+                "f025ea7a-a3b3-4a1e-b105-d2630c6196cd",
+            ),
+            (
+                "call_03_JzgljJkw8y5C9pdy3QFm0707",
+                "分析治理文档与验证体系",
+                "06f12c70-6573-4765-aa0e-f897159ad248",
+            ),
+        ];
+        for (index, (call_id, title, child_id)) in children.iter().enumerate() {
+            let seq = i64::try_from(index).expect("index") + 1;
+            let prompt = format!(
+                "{title}\n\n【约束】只能 read/glob/grep。\n\n```md\n## 报告\n- 结论\n```\n"
+            );
+            events.push(HistoryEntry {
+                event: SessionEvent {
+                    event_type: "tool/call".into(),
+                    seq,
+                    time: 2.0,
+                    data: json!({
+                        "turn": 1,
+                        "step": 7,
+                        "callId": call_id,
+                        "name": "subagent",
+                        "arguments": json!({
+                            "description": title,
+                            "prompt": prompt
+                        })
+                        .to_string()
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: Some(json!({
+                    "for": "call",
+                    "view": { "card": "generic", "title": title, "kind": "other" }
+                })),
+            });
+            events.push(HistoryEntry {
+                event: SessionEvent {
+                    event_type: "tool/result".into(),
+                    seq: seq + 4,
+                    time: 3.0,
+                    data: json!({
+                        "turn": 1,
+                        "step": 7,
+                        "message": {
+                            "source": { "kind": "tool", "callId": call_id },
+                            "content": [{
+                                "type": "tool-result",
+                                "toolCallId": call_id,
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!("started subagent {child_id}")
+                                }],
+                                "isError": false
+                            }]
+                        }
+                    }),
+                    source_event_seqs: Some(vec![seq]),
+                    surface_op: Some("append".into()),
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+        events.sort_by_key(|entry| entry.event.seq);
+        events
+    }
+
+    #[test]
+    fn four_parallel_subagent_burst_renders_catalog_and_transcript() {
+        crate::diag::install_panic_hook();
+        let mut session =
+            SessionState::new("session-d0b39f12-2b2d-49d3-a745-0093f5a68c85".into(), 1);
+        session
+            .install_initial(SessionHistoryValue {
+                events: four_subagent_history(),
+                has_more: false,
+                projections: None,
+            })
+            .expect("four-subagent history");
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.host".into(),
+                params: Some(json!({
+                    "type": "host/session-status",
+                    "sessionId": session.session_id(),
+                    "generation": 1,
+                    "running": true
+                })),
+            })
+            .expect("parent running");
+
+        let mut store = ControlPlaneStore::default();
+        store.set_generation(1);
+        let children = [
+            "1f07b684-99a2-4215-bcd4-6b055a052726",
+            "c38bbc5f-79af-4546-8d90-caf5136a7823",
+            "f025ea7a-a3b3-4a1e-b105-d2630c6196cd",
+            "06f12c70-6573-4765-aa0e-f897159ad248",
+        ];
+        for child in children {
+            store
+                .apply_notification(&JsonRpcNotification {
+                    jsonrpc: "2.0".into(),
+                    method: "events.host".into(),
+                    params: Some(json!({
+                        "generation": 1,
+                        "type": "host/session-added",
+                        "sessionId": child,
+                        "parentSessionId": session.session_id(),
+                        "origin": "subagent",
+                        "running": true
+                    })),
+                })
+                .expect("child published");
+        }
+        store
+            .apply_notification(&JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "generation": 1,
+                    "type": "session/jobs",
+                    "sessionId": session.session_id(),
+                    "jobs": children.iter().enumerate().map(|(index, _child)| {
+                        json!({
+                            "id": format!("subagent-{index}"),
+                            "kind": "subagent",
+                            "label": format!("child {index}"),
+                            "status": "running",
+                            "startedAt": 20
+                        })
+                    }).collect::<Vec<_>>()
+                })),
+            })
+            .expect("jobs");
+        store.apply_subagent_list(
+            session.session_id(),
+            &serde_json::from_value(json!({
+                "parentAvailable": true,
+                "entries": children.iter().map(|child| {
+                    json!({
+                        "kind": "child",
+                        "id": child,
+                        "mode": "one-shot",
+                        "activity": "running",
+                        "hasChildren": false,
+                        "label": child
+                    })
+                }).collect::<Vec<_>>()
+            }))
+            .expect("catalog"),
+        );
+
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(&session, Some(&store));
+        assert!(snapshot.agent.subagents.len() >= 4, "{:?}", snapshot.agent);
+        assert!(snapshot.agent.subagents.iter().all(|row| row.running));
+
+        let mut ui = UiState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &store))
+            .expect("render four-subagent burst");
+        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        assert!(
+            screen.contains("Subagents") || screen.to_ascii_lowercase().contains("subagent"),
+            "top pane should show spawned subagents: {screen}"
+        );
+        assert!(
+            ui.scrollback_pane.total_height(&mut session.scrollback) > 0,
+            "transcript must keep the four tool calls"
         );
     }
 }
