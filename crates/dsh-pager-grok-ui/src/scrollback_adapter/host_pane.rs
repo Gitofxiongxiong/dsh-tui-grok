@@ -364,7 +364,7 @@ impl DshScrollbackHost {
         }
 
         for entry_idx in delta.entries.clone() {
-            let (entry_id, projection, height, foldable, foldable_blocks) = {
+            let (entry_id, projection, visible, foldable, foldable_blocks) = {
                 let Some(entry) = scrollback.render_entry_ref(entry_idx) else {
                     return false;
                 };
@@ -381,8 +381,9 @@ impl DshScrollbackHost {
                     .filter(|(_, block)| is_local_foldable_block(block))
                     .map(|(index, _)| index)
                     .collect::<HashSet<_>>();
-                let height = estimated_projected_height(entry, &projection, self.width);
-                (entry.id, projection, height, foldable, foldable_blocks)
+                let visible =
+                    entry.visibility != DshRenderVisibility::Hidden && !projection.group_hidden;
+                (entry.id, projection, visible, foldable, foldable_blocks)
             };
 
             self.entries.remove(&entry_id);
@@ -405,8 +406,9 @@ impl DshScrollbackHost {
             });
             self.foldable_blocks
                 .extend(foldable_blocks.into_iter().map(|index| (entry_id, index)));
-            scrollback.set_projected_height(self.width, entry_idx, height);
-            self.has_visible_entries |= height > 0;
+            // Keep the previous Fenwick height. Writing `estimated_projected_height`
+            // here dips max_scroll until prepare_viewport rematerializes.
+            self.has_visible_entries |= visible;
         }
 
         self.host_revision = Some(delta.to_revision);
@@ -1504,5 +1506,67 @@ mod tests {
         );
         assert!(host.stats().revision_syncs >= 1);
         assert!(!host.is_empty());
+    }
+
+    #[test]
+    fn streaming_sync_does_not_dip_measured_height_or_manual_top() {
+        let mut scrollback = Scrollback::default();
+        for seq in 0..20 {
+            scrollback.apply_event(&history(
+                seq,
+                "user/message",
+                json!({
+                    "source": { "kind": "user" },
+                    "content": [{
+                        "type": "text",
+                        "text": format!("history {seq} words words words words words words")
+                    }]
+                }),
+            ));
+        }
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa \
+                    lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega";
+        scrollback.apply_event(&history(
+            20,
+            "assistant/chunk",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "chunk": { "type": "text-delta", "index": 0, "text": long }
+            }),
+        ));
+
+        let theme = *Theme::current();
+        let mut host = DshScrollbackHost::default();
+        let width = 40;
+        host.sync(&mut scrollback, width, theme);
+        let viewport = 10;
+        let _ = host.prepare_viewport(&mut scrollback, 0, viewport, true);
+        let measured_total = host.total_height(&mut scrollback);
+        let max_scroll = measured_total.saturating_sub(viewport as usize);
+        let parked = max_scroll.saturating_sub(5);
+        let scrolled = parked.saturating_add(3);
+
+        scrollback.apply_event(&history(
+            21,
+            "assistant/chunk",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "chunk": { "type": "text-delta", "index": 0, "text": " more words" }
+            }),
+        ));
+        host.sync(&mut scrollback, width, theme);
+        let after_sync = host.total_height(&mut scrollback);
+        assert!(
+            after_sync >= measured_total,
+            "incremental stream sync dipped Fenwick {measured_total} -> {after_sync}"
+        );
+
+        let rematerialized = host.prepare_viewport(&mut scrollback, scrolled, viewport, false);
+        assert!(
+            rematerialized >= scrolled,
+            "manual downward offset bounced up: {scrolled} -> {rematerialized}"
+        );
     }
 }

@@ -197,12 +197,14 @@ fn paint_child_scrollback(
     if *follow {
         *scroll_top = max_scroll;
     }
-    *scroll_top = (*scroll_top).min(max_scroll);
     let next_top = pane.prepare_viewport(scrollback, *scroll_top, area.height, *follow);
-    *scroll_top = next_top.min(max_scroll);
-    if *scroll_top >= max_scroll {
-        *follow = true;
-    }
+    let total_height = pane.total_height(scrollback);
+    let max_scroll = total_height.saturating_sub(area.height as usize);
+    *scroll_top = if *follow {
+        max_scroll
+    } else {
+        next_top.min(max_scroll)
+    };
     for paint in pane.visible_lines(scrollback, *scroll_top, area.height) {
         let _ = pane.paint_buffer_line(buf, area, &paint, None);
     }
@@ -478,9 +480,10 @@ impl TranscriptViewportState {
         } else if !self.explicit_navigation
             && let Some(restored) = restored_anchor
         {
-            self.scroll_top = restored.min(max_scroll);
-        } else {
-            self.scroll_top = self.scroll_top.min(max_scroll);
+            // Streaming frames may report a transient underestimate of
+            // `max_scroll` before rich materialization. Clamping the restored
+            // row here is what bounced wheel-down back toward the top.
+            self.scroll_top = restored;
         }
         self.explicit_navigation = false;
         self.scroll_top
@@ -1534,8 +1537,6 @@ impl UiState {
             scroll_top = self
                 .transcript_viewport
                 .begin_frame(max_scroll, restored_anchor);
-            max_scroll = total_height.saturating_sub(content.height as usize);
-            scroll_top = scroll_top.min(max_scroll);
             let following = self.transcript_viewport.is_following();
             scroll_top = self.scrollback_pane.prepare_viewport(
                 scrollback,
@@ -4553,6 +4554,39 @@ mod tests {
         viewport.scroll_down(3);
         assert!(viewport.is_following());
         assert_eq!(viewport.begin_frame(125, None), 125);
+    }
+
+    #[test]
+    fn transcript_viewport_keeps_downward_offset_across_transient_max_dip() {
+        let mut viewport = TranscriptViewportState::default();
+        assert_eq!(viewport.begin_frame(185, None), 185);
+        viewport.scroll_up(5);
+        viewport.settle_frame(185, 180);
+        assert_eq!(viewport.scroll_top, 180);
+        assert!(!viewport.is_following());
+
+        viewport.scroll_down(3);
+        assert_eq!(viewport.scroll_top, 183);
+        // Streaming frame reports a cheaper estimate before rematerialize.
+        assert_eq!(viewport.begin_frame(180, None), 183);
+        viewport.settle_frame(185, 183);
+        assert_eq!(viewport.scroll_top, 183);
+        assert!(!viewport.is_following());
+
+        viewport.settle_frame(170, 183);
+        assert_eq!(viewport.scroll_top, 170);
+    }
+
+    #[test]
+    fn transcript_viewport_up_is_not_pushed_down_by_transient_max() {
+        let mut viewport = TranscriptViewportState::default();
+        viewport.begin_frame(185, None);
+        viewport.scroll_up(5);
+        viewport.settle_frame(185, 180);
+        viewport.scroll_up(3);
+        assert_eq!(viewport.begin_frame(180, None), 177);
+        viewport.settle_frame(185, 177);
+        assert_eq!(viewport.scroll_top, 177);
     }
 
     #[test]

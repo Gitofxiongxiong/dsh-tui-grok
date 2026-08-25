@@ -420,6 +420,9 @@ Btw（`/btw`）与 Agent 正文同类，走同一套 overlay 资格；触发仍�
 - 鼠标滚轮或键盘向上移动后立刻退出 follow；后续 token/工具状态增长不改变当前首行。
 - 手工向下落到当时的底部仍保持 manual，避免同一滚轮事件刚到边界就被流式增长重新吸走。
 - 已在底部时再向下 overscroll 一次才恢复 follow；此后新内容继续贴底。
+- 流式 in-place 更新不得把上一帧 rich 高度打回 cheap estimate。`begin_frame` 在
+  `prepare_viewport` 之前不得用可能偏小的 transient `max_scroll` clamp 手工 `scroll_top`；
+  真实变矮只在物化后的 `settle_frame` 钳到底。
 - resize、估算高度收敛或 fold 改变仍用稳定 entry/block anchor 恢复；同一帧有明确滚动输入时，
   输入优先，不能再用旧 anchor 覆盖它。
 

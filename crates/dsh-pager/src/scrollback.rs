@@ -1101,8 +1101,9 @@ impl Scrollback {
                 && self.dirty_from.is_none()
                 && self.heights.values.len() == self.entries.len()
             {
-                let height = self.entries[index].estimated_height(self.layout_width);
-                self.heights.set(index, height);
+                // Keep the previous Fenwick height. A cheap estimate is often
+                // shorter than the last rich measurement and would dip
+                // max_scroll before the viewer rematerializes.
                 self.layout_snapshot_dirty = true;
             } else {
                 self.mark_dirty(index);
@@ -1716,6 +1717,40 @@ mod tests {
         assert!(scrollback.entries[0].cache.is_none());
         assert!(scrollback.entries[500].cache.is_none());
         assert!(scrollback.materialized_entry_count(32) < 64);
+    }
+
+    #[test]
+    fn in_place_stream_update_keeps_previous_fenwick_height() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&history(
+            0,
+            "assistant/chunk",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "chunk": { "type": "text-delta", "index": 0, "text": "short" }
+            }),
+        ));
+        let width = 80;
+        let _ = scrollback.total_height(width);
+        assert!(scrollback.set_rendered_height(width, 0, 40));
+        assert_eq!(scrollback.total_height(width), 40);
+
+        scrollback.apply_event(&history(
+            1,
+            "assistant/chunk",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "chunk": { "type": "text-delta", "index": 0, "text": " more" }
+            }),
+        ));
+        assert_eq!(
+            scrollback.total_height(width),
+            40,
+            "in-place stream upsert must not replace a measured height with a cheap estimate"
+        );
+        assert_eq!(scrollback.entries().len(), 1);
     }
 
     #[test]
