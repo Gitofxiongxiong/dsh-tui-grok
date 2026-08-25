@@ -1,8 +1,7 @@
 //! Pure sticky-prompt layout adapted from Grok's AllTurns scrollback.
 //!
-//! The DSH runtime does not enable sticky prompts yet. Keeping the pure
-//! coordinate contract here lets S6 wire it without importing Grok storage,
-//! selection, media, or process state.
+//! DSH drives this coordinate contract from its host pane while keeping Grok
+//! storage, selection, media, and process state outside the vendored core.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptDescriptor {

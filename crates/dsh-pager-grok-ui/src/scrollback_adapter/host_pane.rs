@@ -20,6 +20,7 @@ use crate::{
     scrollback::{
         entry_renderer::{DynamicAccentSpec, EntryRenderer, RenderedEntryLine, TimestampPaint},
         render::RenderWindow,
+        sticky::{PromptDescriptor, RenderedPrompt, StickyHeaderLayout, compute_sticky_layout},
         types::DisplayMode,
     },
     scrollback_adapter::{project_groups::project_groups, tick::GROK_WAVE_SPEED},
@@ -113,6 +114,7 @@ pub struct DshScrollbackHost {
     foldable_entries: HashSet<DshRenderEntryId>,
     foldable_blocks: HashSet<(DshRenderEntryId, usize)>,
     expanded_groups: HashSet<DshRenderEntryId>,
+    prompt_entries: Vec<usize>,
     projections: HashMap<DshRenderEntryId, ProjectionInfo>,
     selected_target: Option<HitTarget>,
     pending_user_input: bool,
@@ -139,6 +141,7 @@ impl Default for DshScrollbackHost {
             foldable_entries: HashSet::new(),
             foldable_blocks: HashSet::new(),
             expanded_groups: HashSet::new(),
+            prompt_entries: Vec::new(),
             projections: HashMap::new(),
             selected_target: None,
             pending_user_input: false,
@@ -164,6 +167,7 @@ impl DshScrollbackHost {
         self.foldable_entries.clear();
         self.foldable_blocks.clear();
         self.expanded_groups.clear();
+        self.prompt_entries.clear();
         self.projections.clear();
         self.selected_target = None;
         self.pending_user_input = false;
@@ -251,6 +255,13 @@ impl DshScrollbackHost {
 
         self.entries.clear();
         let entries = scrollback.render_entry_refs().collect::<Vec<_>>();
+        self.prompt_entries = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(entry_idx, entry)| {
+                (entry.kind == DshRenderKind::User).then_some(entry_idx)
+            })
+            .collect();
         self.prune_local_state(&entries);
         self.foldable_entries = entries
             .iter()
@@ -362,6 +373,12 @@ impl DshScrollbackHost {
 
             self.entries.remove(&entry_id);
             self.projections.insert(entry_id, projection);
+            self.set_prompt_entry(
+                entry_idx,
+                scrollback
+                    .render_entry_ref(entry_idx)
+                    .is_some_and(|entry| entry.kind == DshRenderKind::User),
+            );
             if foldable {
                 self.foldable_entries.insert(entry_id);
             } else {
@@ -385,6 +402,16 @@ impl DshScrollbackHost {
             .scanned_entries
             .saturating_add(delta.entries.len());
         true
+    }
+
+    fn set_prompt_entry(&mut self, entry_idx: usize, is_prompt: bool) {
+        match self.prompt_entries.binary_search(&entry_idx) {
+            Ok(position) if !is_prompt => {
+                self.prompt_entries.remove(position);
+            }
+            Err(position) if is_prompt => self.prompt_entries.insert(position, entry_idx),
+            _ => {}
+        }
     }
 
     fn prune_local_state(&mut self, entries: &[DshRenderEntryRef<'_>]) {
@@ -532,7 +559,8 @@ impl DshScrollbackHost {
 
     /// Materialize only the viewport and one viewport of overscan on either
     /// side. Height corrections preserve a stable top entry, while follow
-    /// mode re-pins to the final row after every correction.
+    /// mode re-pins to the final row after every correction. Sticky headers
+    /// consume screen rows but keep the same virtual bottom row visible.
     pub fn prepare_viewport(
         &mut self,
         scrollback: &mut Scrollback,
@@ -540,7 +568,41 @@ impl DshScrollbackHost {
         viewport_height: u16,
         follow: bool,
     ) -> usize {
-        let viewport_height = viewport_height as usize;
+        if viewport_height == 0 || self.is_empty() {
+            self.entries.clear();
+            return scroll_top;
+        }
+        let mut top =
+            self.prepare_body_viewport(scrollback, scroll_top, viewport_height as usize, follow);
+        for _ in 0..3 {
+            let sticky = self.sticky_layout(scrollback, top, viewport_height);
+            let header_rows = sticky.header_screen_rows();
+            if header_rows == 0 {
+                break;
+            }
+            let body_height = sticky.content_height(viewport_height) as usize;
+            let body_top = sticky.scroll_for_content(top);
+            let next_body_top =
+                self.prepare_body_viewport(scrollback, body_top, body_height, follow);
+            let next_top = next_body_top.saturating_sub(header_rows as usize);
+            if next_top == top {
+                break;
+            }
+            top = next_top;
+        }
+        // `prepare_body_viewport` retains only body/overscan entries. Restore
+        // the off-screen prompt cache needed by the final sticky composition.
+        let _ = self.sticky_layout(scrollback, top, viewport_height);
+        top
+    }
+
+    fn prepare_body_viewport(
+        &mut self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+        viewport_height: usize,
+        follow: bool,
+    ) -> usize {
         if viewport_height == 0 || self.is_empty() {
             self.entries.clear();
             return scroll_top;
@@ -581,6 +643,88 @@ impl DshScrollbackHost {
         }
         self.entries.retain(|id, _| keep_ids.contains(id));
         top
+    }
+
+    fn sticky_layout(
+        &mut self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+        viewport_height: u16,
+    ) -> StickyHeaderLayout {
+        if !self.appearance.scrollback.display.sticky_headers
+            || scroll_top == 0
+            || viewport_height == 0
+            || self.prompt_entries.is_empty()
+        {
+            return StickyHeaderLayout::default();
+        }
+        let top_entry = scrollback
+            .paint_window(self.width.max(1), scroll_top, 1, 0)
+            .entries
+            .start;
+        let mut position = self
+            .prompt_entries
+            .partition_point(|entry_idx| *entry_idx <= top_entry);
+        let mut pinned_position = None;
+        while position > 0 {
+            position -= 1;
+            let entry_idx = self.prompt_entries[position];
+            let Some(layout) = scrollback.entry_layout(self.width.max(1), entry_idx) else {
+                continue;
+            };
+            if layout.start_y >= scroll_top {
+                continue;
+            }
+            let Some(entry_id) = scrollback.render_entry_ref(entry_idx).map(|entry| entry.id)
+            else {
+                continue;
+            };
+            if !self.expanded_entries.contains(&entry_id) {
+                pinned_position = Some(position);
+                break;
+            }
+        }
+        let Some(pinned_position) = pinned_position else {
+            return StickyHeaderLayout::default();
+        };
+
+        let descriptor_end = pinned_position
+            .saturating_add(2)
+            .min(self.prompt_entries.len());
+        let descriptor_indices = self.prompt_entries[pinned_position..descriptor_end].to_vec();
+        for entry_idx in descriptor_indices.iter().copied() {
+            let _ = self.materialize_range(scrollback, entry_idx..entry_idx.saturating_add(1));
+        }
+        let prompts = descriptor_indices
+            .into_iter()
+            .filter_map(|entry_idx| self.prompt_descriptor(scrollback, entry_idx))
+            .collect::<Vec<_>>();
+        compute_sticky_layout(scroll_top, viewport_height, &prompts)
+    }
+
+    fn prompt_descriptor(
+        &mut self,
+        scrollback: &mut Scrollback,
+        entry_idx: usize,
+    ) -> Option<PromptDescriptor> {
+        let layout = scrollback.entry_layout(self.width.max(1), entry_idx)?;
+        let entry_id = scrollback.render_entry_ref(entry_idx)?.id;
+        let full_height = self
+            .entries
+            .get(&entry_id)
+            .map(|entry| entry.lines.len())
+            .unwrap_or_else(|| layout.height.saturating_sub(1))
+            .min(u16::MAX as usize) as u16;
+        if full_height == 0 {
+            return None;
+        }
+        Some(PromptDescriptor {
+            entry_idx,
+            y_virtual: layout.start_y,
+            full_height,
+            min_height: full_height.clamp(1, 4),
+            sticky: !self.expanded_entries.contains(&entry_id),
+        })
     }
 
     fn materialize_range(
@@ -646,13 +790,86 @@ impl DshScrollbackHost {
             return Vec::new();
         }
         let top = self.prepare_viewport(scrollback, scroll_top, viewport_height, false);
+        let sticky = self.sticky_layout(scrollback, top, viewport_height);
+        let header_rows = sticky.header_screen_rows();
+        let mut painted = self.visible_sticky_lines(scrollback, &sticky);
+        painted.extend(self.visible_body_lines(
+            scrollback,
+            sticky.scroll_for_content(top),
+            sticky.content_height(viewport_height),
+            header_rows,
+        ));
+        self.stats.painted_lines = self.stats.painted_lines.saturating_add(painted.len());
+        painted
+    }
+
+    fn visible_sticky_lines(
+        &self,
+        scrollback: &Scrollback,
+        sticky: &StickyHeaderLayout,
+    ) -> Vec<RichPaintLine> {
+        let mut painted = Vec::new();
+        if let Some(pushed) = sticky.pushed {
+            painted.extend(self.rendered_prompt_lines(scrollback, pushed, 0));
+        }
+        if let Some(pinned) = sticky.pinned
+            && let Some(screen_row) = sticky.pinned_screen_row()
+        {
+            painted.extend(self.rendered_prompt_lines(scrollback, pinned, screen_row));
+        }
+        painted
+    }
+
+    fn rendered_prompt_lines(
+        &self,
+        scrollback: &Scrollback,
+        prompt: RenderedPrompt,
+        screen_row: u16,
+    ) -> Vec<RichPaintLine> {
+        let Some(entry_id) = scrollback
+            .render_entry_ref(prompt.entry_idx)
+            .map(|entry| entry.id)
+        else {
+            return Vec::new();
+        };
+        let Some(cached) = self.entries.get(&entry_id) else {
+            return Vec::new();
+        };
+        let render_end = cached.lines.len().min(prompt.render_height as usize);
+        let clip_top = (prompt.clip_top as usize).min(render_end);
+        cached.lines[..render_end]
+            .iter()
+            .skip(clip_top)
+            .take(prompt.visible_height() as usize)
+            .enumerate()
+            .map(|(row, line)| {
+                self.paint_line_for_screen(
+                    entry_id,
+                    cached,
+                    line,
+                    screen_row.saturating_add(row as u16),
+                )
+            })
+            .collect()
+    }
+
+    fn visible_body_lines(
+        &self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+        viewport_height: u16,
+        screen_row_offset: u16,
+    ) -> Vec<RichPaintLine> {
+        if viewport_height == 0 {
+            return Vec::new();
+        }
         let host_window =
-            scrollback.paint_window(self.width.max(1), top, viewport_height as usize, 0);
+            scrollback.paint_window(self.width.max(1), scroll_top, viewport_height as usize, 0);
         let window = RenderWindow::new(
             host_window.entries,
             host_window.content_y0,
             host_window.total_height,
-            top,
+            scroll_top,
         );
         let mut painted = Vec::new();
         for entry_idx in window.entries {
@@ -679,37 +896,51 @@ impl DshScrollbackHost {
                 if screen_y >= viewport_height as usize {
                     break;
                 }
-                let mut line = line.clone();
-                line.screen_y = screen_y as u16;
-                line.pending_user_input = self.pending_entry == Some(entry_id);
-                let selected = self
-                    .selected_target
-                    .as_ref()
-                    .is_some_and(|target| line_matches_target(&line, target));
-                let flashing = line.accent_flash
-                    && finish_flash_active(cached.entry.finished_at_ms, now_epoch_ms());
-                EntryRenderer::paint_dynamic(
-                    &mut line.line,
-                    DynamicAccentSpec {
-                        tick: self.wave_tick,
-                        logical_row: line.accent_wave_row,
-                        wave_rows: self.appearance.animation.wave_rows,
-                        wave_speed: GROK_WAVE_SPEED,
-                        background: line.background.unwrap_or(Theme::current().bg_base),
-                        accent: line.accent,
-                        flash_accent: line.flash_accent,
-                        bullet: line.bullet,
-                        bullet_span: line.bullet_span,
-                        selected,
-                        flash: flashing,
-                        pending_user_input: line.pending_user_input,
-                    },
-                );
-                painted.push(line);
+                painted.push(self.paint_line_for_screen(
+                    entry_id,
+                    cached,
+                    line,
+                    screen_row_offset.saturating_add(screen_y as u16),
+                ));
             }
         }
-        self.stats.painted_lines = self.stats.painted_lines.saturating_add(painted.len());
         painted
+    }
+
+    fn paint_line_for_screen(
+        &self,
+        entry_id: DshRenderEntryId,
+        cached: &CachedPaneEntry,
+        source: &RichPaintLine,
+        screen_y: u16,
+    ) -> RichPaintLine {
+        let mut line = source.clone();
+        line.screen_y = screen_y;
+        line.pending_user_input = self.pending_entry == Some(entry_id);
+        let selected = self
+            .selected_target
+            .as_ref()
+            .is_some_and(|target| line_matches_target(&line, target));
+        let flashing =
+            line.accent_flash && finish_flash_active(cached.entry.finished_at_ms, now_epoch_ms());
+        EntryRenderer::paint_dynamic(
+            &mut line.line,
+            DynamicAccentSpec {
+                tick: self.wave_tick,
+                logical_row: line.accent_wave_row,
+                wave_rows: self.appearance.animation.wave_rows,
+                wave_speed: GROK_WAVE_SPEED,
+                background: line.background.unwrap_or(Theme::current().bg_base),
+                accent: line.accent,
+                flash_accent: line.flash_accent,
+                bullet: line.bullet,
+                bullet_span: line.bullet_span,
+                selected,
+                flash: flashing,
+                pending_user_input: line.pending_user_input,
+            },
+        );
+        line
     }
 
     pub fn paint_buffer_line(
@@ -919,4 +1150,170 @@ fn entry_projections(
         projection.rail = true;
     }
     projections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{HitMap, insert_text_line};
+    use dsh_pager_protocol::{HistoryEntry, SessionEvent};
+    use serde_json::{Value, json};
+
+    fn history(seq: i64, event_type: &str, data: Value) -> HistoryEntry {
+        HistoryEntry {
+            event: SessionEvent {
+                event_type: event_type.into(),
+                seq,
+                time: 1.0,
+                data,
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        }
+    }
+
+    fn sticky_fixture() -> (Scrollback, DshScrollbackHost) {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&history(
+            0,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "first prompt\nline two\nline three\nline four" }]
+            }),
+        ));
+        scrollback.apply_event(&history(
+            1,
+            "assistant/message",
+            json!({
+                "turn": 1,
+                "step": 0,
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": "answer 1\nanswer 2\nanswer 3\nanswer 4\nanswer 5\nanswer 6"
+                    }]
+                }
+            }),
+        ));
+        scrollback.apply_event(&history(
+            2,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "second prompt" }]
+            }),
+        ));
+        let mut host = DshScrollbackHost::default();
+        host.sync(&mut scrollback, 40, *Theme::current());
+        (scrollback, host)
+    }
+
+    #[test]
+    fn production_sticky_header_offsets_body_without_duplicate_rows() {
+        let (mut scrollback, mut host) = sticky_fixture();
+        let layout = host.sticky_layout(&mut scrollback, 2, 10);
+        let pinned = layout.pinned.expect("first user prompt is pinned");
+        assert_eq!(pinned.entry_idx, 0);
+        assert!(layout.header_screen_rows() > 0);
+        assert_eq!(
+            layout
+                .scroll_for_content(2)
+                .saturating_add(layout.content_height(10) as usize)
+                .saturating_sub(1),
+            11
+        );
+
+        let lines = host.visible_lines(&mut scrollback, 2, 10);
+        assert!(!lines.is_empty());
+        assert_eq!(lines[0].entry_id, DshRenderEntryId::Event { seq: 0 });
+        assert_eq!(lines[0].screen_y, 0);
+        let mut rows = lines.iter().map(|line| line.screen_y).collect::<Vec<_>>();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows.len(), lines.len());
+        assert!(lines.iter().all(|line| line.screen_y < 10));
+    }
+
+    #[test]
+    fn pushed_sticky_header_clips_top_rows_and_tiny_viewports_are_safe() {
+        let (mut scrollback, mut host) = sticky_fixture();
+        let _ = host.visible_lines(&mut scrollback, 0, 100);
+        let second_start = scrollback
+            .entry_layout(40, 2)
+            .expect("second prompt layout")
+            .start_y;
+        let scroll_top = second_start.saturating_sub(2);
+        let layout = host.sticky_layout(&mut scrollback, scroll_top, 10);
+        let pushed = layout.pushed.expect("next prompt pushes the first");
+        assert!(pushed.clip_top > 0);
+        let lines = host.visible_lines(&mut scrollback, scroll_top, 10);
+        let pushed_lines = lines
+            .iter()
+            .filter(|line| line.entry_id == DshRenderEntryId::Event { seq: 0 })
+            .collect::<Vec<_>>();
+        assert_eq!(pushed_lines.len(), pushed.visible_height() as usize);
+        assert!(pushed_lines.iter().all(|line| line.screen_y == 0));
+
+        let tiny = host.visible_lines(&mut scrollback, scroll_top, 1);
+        assert!(tiny.len() <= 1);
+        assert!(tiny.iter().all(|line| line.screen_y == 0));
+    }
+
+    #[test]
+    fn explicitly_expanded_prompt_does_not_become_sticky() {
+        let (mut scrollback, mut host) = sticky_fixture();
+        let first_id = DshRenderEntryId::Event { seq: 0 };
+        assert!(host.toggle_fold_or_group(first_id));
+        host.sync(&mut scrollback, 40, *Theme::current());
+        let second_start = scrollback
+            .entry_layout(40, 2)
+            .expect("second prompt layout")
+            .start_y;
+        let layout = host.sticky_layout(&mut scrollback, second_start.saturating_sub(2), 10);
+        assert!(!layout.has_header());
+    }
+
+    #[test]
+    fn sticky_header_buffer_and_hit_map_share_visible_screen_rows() {
+        let (mut scrollback, mut host) = sticky_fixture();
+        let area = Rect::new(0, 0, 40, 10);
+        let lines = host.visible_lines(&mut scrollback, 2, area.height);
+        let mut buffer = Buffer::empty(area);
+        let mut hit_map = HitMap::new(area);
+        for line in &lines {
+            let _ = host.paint_buffer_line(&mut buffer, area, line, None);
+            if line.selectable {
+                insert_text_line(
+                    &mut hit_map,
+                    HitTarget::TranscriptEntry(line.entry_id),
+                    line.line_index,
+                    line.content_offset,
+                    line.screen_y,
+                    line.content_width,
+                    &line.copy_text,
+                    line.joiner_to_previous.clone(),
+                    None,
+                );
+            }
+        }
+
+        let prompt_line = lines
+            .iter()
+            .find(|line| line.copy_text.contains("first prompt"))
+            .expect("visible sticky prompt content line");
+        let painted_row = (0..area.width)
+            .map(|x| buffer[(x, prompt_line.screen_y)].symbol())
+            .collect::<String>();
+        assert!(painted_row.contains("first prompt"));
+        let hit = hit_map
+            .hit_test(prompt_line.content_offset, prompt_line.screen_y)
+            .expect("sticky prompt hit region");
+        assert_eq!(
+            hit.target,
+            HitTarget::TranscriptEntry(DshRenderEntryId::Event { seq: 0 })
+        );
+    }
 }

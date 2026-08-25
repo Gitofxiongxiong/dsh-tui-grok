@@ -79,6 +79,7 @@ impl GrokAppearanceSnapshot {
         scrollback.layout.outer_hpad_left = self.outer_hpad;
         scrollback.layout.outer_hpad_right = self.outer_hpad;
         scrollback.scrollbar.enabled = self.scrollbar_enabled;
+        scrollback.display.sticky_headers = true;
 
         scrollback.blocks.thinking.accent = theme.gray_dim;
         scrollback.blocks.prompt.vpad = !self.compact;
@@ -118,6 +119,7 @@ pub mod cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
 
     #[test]
     fn snapshot_matches_grok_short_terminal_breakpoint() {
@@ -125,6 +127,13 @@ mod tests {
         assert!(compact.compact);
         assert_eq!(compact.outer_hpad, 1);
         assert_eq!(compact.outer_vpad, 0);
+        assert!(
+            compact
+                .scrollback(*Theme::current())
+                .scrollback
+                .display
+                .sticky_headers
+        );
         assert_eq!(compact.scrollback_min_rows, 5);
     }
 
@@ -136,6 +145,13 @@ mod tests {
         assert_eq!(desktop.outer_vpad, 1);
         assert!(desktop.prompt_show_borders);
         assert!(desktop.scrollbar_enabled);
+        assert!(
+            desktop
+                .scrollback(*Theme::current())
+                .scrollback
+                .display
+                .sticky_headers
+        );
         assert!(!desktop.show_timeline, "Grok timeline is opt-in by default");
     }
 

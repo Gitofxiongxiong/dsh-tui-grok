@@ -440,6 +440,18 @@ S1 可以单独先做，因为它删除的是已经被证伪的模型，且不�
 > 提供 semantic materializer，并保留 legacy `RichTranscript` oracle/测试。UI 452/452
 > 在迁移后通过。sticky production 与 S7 semantic/oracle 删除仍是下一批，不把本次
 > 纯结构迁移记作 pixel parity。
+>
+> 执行状态续（2026-08-25 16:46 +0800）：S6C sticky 已接入 production。
+> `DshScrollbackHost` 维护 canonical user-entry 索引，从 Fenwick layout 构造
+> `PromptDescriptor`，用上游 B 坐标合同组合 pinned/pushed header 与 body viewport；两者
+> 共用 `RichPaintLine`、dynamic accent、`EntryRenderer::paint_buffer_line` 和 HitMap，不引入
+> scratch buffer 或第二条 painter。header 消耗的 screen rows 会补偿 body scroll offset，
+> 保持虚拟底行连续；显式展开 prompt 不 pin，zero/tiny viewport 安全退化。浏览器门禁在
+> 1200×800 验证 follow/PageUp/next-prompt push，在 1200×400 compact 终端发现并修复了
+> DSH 错误禁用 sticky 的缺陷；修复后 DSH 与隔离 Grok 会话都在滚动时保留顶部 user
+> prompt 视觉角色。UI 456/456、workspace、Clippy、source 72 rows/0 drift、full PTY 均通过。
+> S7 的 legacy `RichTranscript`/semantic oracle 收尾仍开放，因此仍不声明整套 scrollback
+> pixel parity。
 
 禁止的顺序：先把 `transcript.rs` 拆成 `wave.rs` `tools.rs` `thinking.rs` 三个
 本地文件再谈 vendor。那是把平行宇宙正规化，漂移不会减。
