@@ -767,6 +767,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_tasks_overlay_owns_esc_q_and_mouse() {
+        let mut shell = AppShell::default();
+        shell.open_agent_tasks();
+        assert_eq!(shell.overlay(), Overlay::AgentTasks);
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
+            ShellAction::AgentTasksKey(_)
+        ));
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Char('q'))), true),
+            ShellAction::AgentTasksKey(_)
+        ));
+        assert!(matches!(
+            shell.dispatch(
+                ShellEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                    column: 80,
+                    row: 4,
+                    modifiers: KeyModifiers::NONE
+                }),
+                true
+            ),
+            ShellAction::AgentTasksMouse(_)
+        ));
+        shell.close_overlay();
+        assert_eq!(shell.overlay(), Overlay::None);
+    }
+
+    #[test]
     fn media_and_agent_task_overlays_have_explicit_ctrl_shortcuts() {
         let mut shell = AppShell::default();
         let ctrl_i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);

@@ -127,6 +127,53 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn agent_overlay_key_closes(key: crossterm::event::KeyEvent) -> bool {
+    if key.code == KeyCode::Esc {
+        return true;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('q' | 'Q') if !ctrl => true,
+        KeyCode::Char('g' | 'G' | 't' | 'T') if ctrl => true,
+        _ => false,
+    }
+}
+
+fn agent_overlay_close_click(modal: &ModalWindowState, mouse: &MouseEvent) -> bool {
+    let is_press = matches!(
+        mouse.kind,
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+    );
+    if !is_press {
+        return false;
+    }
+    let in_rect = |rect: Rect| {
+        mouse.column >= rect.x
+            && mouse.column < rect.x.saturating_add(rect.width)
+            && mouse.row >= rect.y
+            && mouse.row < rect.y.saturating_add(rect.height)
+    };
+    if modal.close_button_rect.is_some_and(in_rect) {
+        return true;
+    }
+    let Some(popup) = modal.popup_area else {
+        return false;
+    };
+    let corner_width = 12.min(popup.width);
+    let corner = Rect::new(
+        popup
+            .x
+            .saturating_add(popup.width.saturating_sub(corner_width)),
+        popup.y,
+        corner_width,
+        1,
+    );
+    if in_rect(corner) {
+        return true;
+    }
+    matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && !in_rect(popup)
+}
+
 fn paint_child_scrollback(
     pane: &mut DshScrollbackHost,
     scroll_top: &mut usize,
@@ -299,9 +346,6 @@ fn run_loop(
                 diag::log("notify", format!("error {error}"));
                 ui.status = Some(format!("notification error: {error}"));
             }
-        }
-        if ui.shell.overlay() == Overlay::AgentTasks {
-            ui.refresh_open_child_transcript(transport, session);
         }
         let frame_links = ui.frame_links.clone();
         if let Err(error) = terminal.draw_with_links(&frame_links, |frame| {
@@ -2704,23 +2748,19 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &SessionState,
     ) {
+        if agent_overlay_key_closes(key) {
+            self.close_agent_overlay();
+            self.status = Some("Agent detail closed".into());
+            return;
+        }
         if self.agent_detail.is_some() {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.close_agent_overlay();
-                    self.status = Some("Agent detail closed".into());
-                }
                 KeyCode::Up | KeyCode::Char('k') => self.scroll_child_transcript(-3),
                 KeyCode::Down | KeyCode::Char('j') => self.scroll_child_transcript(3),
                 KeyCode::PageUp => self.scroll_child_transcript(-12),
                 KeyCode::PageDown => self.scroll_child_transcript(12),
                 _ => {}
             }
-            return;
-        }
-        if key.code == KeyCode::Esc {
-            self.close_agent_overlay();
-            self.status = Some("Agent tasks closed".into());
             return;
         }
         let snapshot = GrokHostSnapshot::from_session_with_control_plane(
@@ -2812,6 +2852,7 @@ impl UiState {
         self.load_child_transcript(transport, session, agent, true);
     }
 
+    #[allow(dead_code)]
     fn refresh_open_child_transcript(
         &mut self,
         transport: &mut RpcTransport,
@@ -2896,15 +2937,15 @@ impl UiState {
         _transport: &mut RpcTransport,
         _session: &SessionState,
     ) {
+        if agent_overlay_close_click(&self.modal, &mouse) {
+            self.close_agent_overlay();
+            self.status = Some("Agent detail closed".into());
+            return;
+        }
         match handle_modal_mouse(&mut self.modal, mouse.kind, mouse.column, mouse.row) {
-            ModalWindowOutcome::CloseRequested => {
+            ModalWindowOutcome::CloseRequested | ModalWindowOutcome::ShortcutActivated(_) => {
                 self.close_agent_overlay();
                 self.status = Some("Agent detail closed".into());
-                return;
-            }
-            ModalWindowOutcome::ShortcutActivated(_) => {
-                self.close_agent_overlay();
-                self.status = Some("Agent tasks closed".into());
                 return;
             }
             _ => {}
@@ -4389,9 +4430,10 @@ mod tests {
     use super::render_transcript_selection_box;
     use super::steer_capability_available;
     use super::{
-        MediaPreviewBuffer, TranscriptViewportState, UiState, render_agent_tasks_content,
-        render_image_preview_content,
+        MediaPreviewBuffer, TranscriptViewportState, UiState, agent_overlay_close_click,
+        agent_overlay_key_closes, render_agent_tasks_content, render_image_preview_content,
     };
+    use crate::app::Overlay;
     use crate::effects::UiEffectStatus;
     use crate::geometry::{GeometryLine, HitMap, HitRegion, HitTarget};
     use crate::host_adapter::{
@@ -4400,18 +4442,87 @@ mod tests {
     };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
-    use crate::views::agent_panes::AgentPaneController;
+    use crate::views::agent_panes::{AgentItemId, AgentPaneController};
     use crate::views::modal_window::{
         ModalSizing, ModalWindowConfig, Shortcut, render_modal_window,
     };
     use crate::views::picker::{PickerState, render_picker_in_modal};
-    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use dsh_pager::{ControlPlaneStore, DshRenderEntryId, SessionState, scrollback::Scrollback};
     use dsh_pager_protocol::{
         HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
     };
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
     use serde_json::json;
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn agent_overlay_keys_close_without_waiting_on_rpc() {
+        assert!(agent_overlay_key_closes(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(agent_overlay_key_closes(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        )));
+        assert!(agent_overlay_key_closes(KeyEvent::new(
+            KeyCode::Char('Q'),
+            KeyModifiers::NONE
+        )));
+        assert!(agent_overlay_key_closes(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!agent_overlay_key_closes(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE
+        )));
+        let mut ui = UiState::default();
+        ui.shell.open_agent_tasks();
+        ui.agent_detail = Some(AgentItemId::Subagent("child".into()));
+        ui.close_agent_overlay();
+        assert_eq!(ui.shell.overlay(), Overlay::None);
+        assert!(ui.agent_detail.is_none());
+        assert!(ui.child_scrollback.is_none());
+    }
+
+    #[test]
+    fn agent_overlay_close_click_accepts_button_and_title_corner() {
+        let mut modal = ModalWindowState::default();
+        modal.popup_area = Some(Rect::new(10, 4, 60, 20));
+        modal.close_button_rect = Some(Rect::new(63, 4, 5, 1));
+        assert!(agent_overlay_close_click(
+            &modal,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 65, 4)
+        ));
+        assert!(agent_overlay_close_click(
+            &modal,
+            &mouse(MouseEventKind::Up(MouseButton::Left), 65, 4)
+        ));
+        assert!(agent_overlay_close_click(
+            &modal,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 69, 4)
+        ));
+        assert!(agent_overlay_close_click(
+            &modal,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 2, 2)
+        ));
+        assert!(!agent_overlay_close_click(
+            &modal,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 30, 12)
+        ));
+    }
 
     #[test]
     fn transcript_viewport_stays_on_absolute_row_while_streaming_grows() {
