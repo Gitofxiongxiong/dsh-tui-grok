@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 
 use dsh_pager_protocol::HistoryEntry;
@@ -474,6 +474,34 @@ pub struct PaintWindow {
     pub total_height: usize,
 }
 
+/// Aggregated canonical content changes after a viewer's known revision.
+///
+/// `entries` is meaningful only when `topology_changed` is false. A topology
+/// change can shift indexes or alter adjacency-sensitive projections, so rich
+/// viewers must rebuild their complete semantic index in that case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollbackRevisionDelta {
+    pub from_revision: u64,
+    pub to_revision: u64,
+    pub entries: Range<usize>,
+    pub topology_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentChange {
+    revision: u64,
+    entries: Range<usize>,
+    topology_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingContentChange {
+    entries: Range<usize>,
+    topology_changed: bool,
+}
+
+const CONTENT_CHANGE_LOG_CAPACITY: usize = 256;
+
 /// Entry-based scrollback projection with width-sensitive line/layout caches.
 #[derive(Debug, Default)]
 pub struct Scrollback {
@@ -486,6 +514,8 @@ pub struct Scrollback {
     layout_width: usize,
     dirty_from: Option<usize>,
     content_revision: u64,
+    content_changes: VecDeque<ContentChange>,
+    pending_content_change: Option<PendingContentChange>,
     layout_revision: u64,
 }
 
@@ -497,6 +527,55 @@ impl Scrollback {
     /// Monotonic revision of canonical entry content and topology.
     pub fn revision(&self) -> u64 {
         self.content_revision
+    }
+
+    /// Return the complete change set after `known_revision`, when it is
+    /// still covered by the bounded host log. `None` means the caller must
+    /// perform a full semantic resync (future revision, evicted history, or a
+    /// discontinuity). Topology changes are returned explicitly for the same
+    /// reason: their entry indexes cannot be consumed incrementally.
+    pub fn content_delta_since(&self, known_revision: u64) -> Option<ScrollbackRevisionDelta> {
+        if known_revision > self.content_revision {
+            return None;
+        }
+        if known_revision == self.content_revision {
+            return Some(ScrollbackRevisionDelta {
+                from_revision: known_revision,
+                to_revision: self.content_revision,
+                entries: 0..0,
+                topology_changed: false,
+            });
+        }
+
+        let mut changes = self
+            .content_changes
+            .iter()
+            .filter(|change| change.revision > known_revision);
+        let first = changes.next()?;
+        if first.revision != known_revision.saturating_add(1) {
+            return None;
+        }
+        let mut expected_revision = first.revision;
+        let mut entries = first.entries.clone();
+        let mut topology_changed = first.topology_changed;
+        for change in changes {
+            expected_revision = expected_revision.saturating_add(1);
+            if change.revision != expected_revision {
+                return None;
+            }
+            entries.start = entries.start.min(change.entries.start);
+            entries.end = entries.end.max(change.entries.end);
+            topology_changed |= change.topology_changed;
+        }
+        if expected_revision != self.content_revision {
+            return None;
+        }
+        Some(ScrollbackRevisionDelta {
+            from_revision: known_revision,
+            to_revision: self.content_revision,
+            entries,
+            topology_changed,
+        })
     }
 
     /// Monotonic revision of width-specific height geometry. Rich viewers may
@@ -525,6 +604,7 @@ impl Scrollback {
 
     pub fn rebuild(&mut self, history: &[HistoryEntry]) {
         let revision = self.content_revision;
+        self.pending_content_change = None;
         let previous = std::mem::take(&mut self.entries);
         self.positions.clear();
         let updates = self.adapter.adapt_history(history);
@@ -541,10 +621,16 @@ impl Scrollback {
                 .zip(&self.entries)
                 .any(|(left, right)| !left.semantic_eq(right));
         self.content_revision = revision.saturating_add(u64::from(changed));
+        if changed {
+            self.commit_content_change(0..self.entries.len(), true);
+        } else {
+            self.pending_content_change = None;
+        }
     }
 
     pub fn apply_event(&mut self, entry: &HistoryEntry) {
         let before = self.content_revision;
+        self.pending_content_change = None;
         for update in self.adapter.adapt_event(entry) {
             self.apply_update(update);
         }
@@ -552,6 +638,9 @@ impl Scrollback {
             // `apply_update` already advanced the revision; coalesce multiple
             // adapter updates produced by one authoritative event.
             self.content_revision = before.saturating_add(1);
+            self.commit_content_change(0..self.entries.len(), true);
+        } else {
+            self.pending_content_change = None;
         }
     }
 
@@ -567,11 +656,15 @@ impl Scrollback {
         let updates = self.adapter.finalize_all(seq, finish, reason);
         let changed = !updates.is_empty();
         let before = self.content_revision;
+        self.pending_content_change = None;
         for update in updates {
             self.apply_update(update);
         }
         if self.content_revision != before {
             self.content_revision = before.saturating_add(1);
+            self.commit_content_change(0..self.entries.len(), true);
+        } else {
+            self.pending_content_change = None;
         }
         changed
     }
@@ -985,6 +1078,7 @@ impl Scrollback {
             if !self.entries[index].set(entry) {
                 return;
             }
+            self.record_content_change(index..index.saturating_add(1), false);
             self.bump_content_revision();
             if self.layout_width > 0
                 && self.dirty_from.is_none()
@@ -1001,6 +1095,7 @@ impl Scrollback {
         let index = self.entries.len();
         self.positions.insert(entry.id, index);
         self.entries.push(entry);
+        self.record_content_change(index..index.saturating_add(1), true);
         self.bump_content_revision();
         if self.layout_width > 0 && self.dirty_from.is_none() && self.heights.values.len() == index
         {
@@ -1017,6 +1112,7 @@ impl Scrollback {
             return;
         };
         self.entries.remove(index);
+        self.record_content_change(index..self.entries.len(), true);
         self.bump_content_revision();
         self.reindex_from(index);
         self.mark_dirty(index);
@@ -1024,11 +1120,16 @@ impl Scrollback {
 
     fn remove_seq_range(&mut self, start: i64, end: i64) {
         let before = self.entries.len();
+        let first_removed = self
+            .entries
+            .iter()
+            .position(|entry| entry.source_seq >= start && entry.source_seq <= end);
         self.entries
             .retain(|entry| entry.source_seq < start || entry.source_seq > end);
         if self.entries.len() == before {
             return;
         }
+        self.record_content_change(first_removed.unwrap_or(0)..self.entries.len(), true);
         self.bump_content_revision();
         self.positions.clear();
         for (index, entry) in self.entries.iter().enumerate() {
@@ -1050,6 +1151,37 @@ impl Scrollback {
 
     fn bump_content_revision(&mut self) {
         self.content_revision = self.content_revision.saturating_add(1);
+    }
+
+    fn record_content_change(&mut self, entries: Range<usize>, topology_changed: bool) {
+        if let Some(pending) = self.pending_content_change.as_mut() {
+            pending.entries.start = pending.entries.start.min(entries.start);
+            pending.entries.end = pending.entries.end.max(entries.end);
+            pending.topology_changed |= topology_changed;
+        } else {
+            self.pending_content_change = Some(PendingContentChange {
+                entries,
+                topology_changed,
+            });
+        }
+    }
+
+    fn commit_content_change(&mut self, fallback: Range<usize>, topology_changed: bool) {
+        let pending = self
+            .pending_content_change
+            .take()
+            .unwrap_or(PendingContentChange {
+                entries: fallback,
+                topology_changed,
+            });
+        if self.content_changes.len() == CONTENT_CHANGE_LOG_CAPACITY {
+            self.content_changes.pop_front();
+        }
+        self.content_changes.push_back(ContentChange {
+            revision: self.content_revision,
+            entries: pending.entries,
+            topology_changed: pending.topology_changed,
+        });
     }
 
     fn bump_layout_revision(&mut self) {
@@ -1179,6 +1311,84 @@ mod tests {
         assert!(scrollback.set_projected_height(80, 0, 9));
         assert_eq!(scrollback.revision(), revision);
         assert!(scrollback.layout_revision() > layout_revision);
+    }
+
+    #[test]
+    fn content_delta_distinguishes_in_place_updates_from_topology_changes() {
+        let mut scrollback = Scrollback::default();
+        scrollback.apply_event(&history(
+            1,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "first" }]
+            }),
+        ));
+        let appended = scrollback
+            .content_delta_since(0)
+            .expect("initial append remains in the change log");
+        assert_eq!(appended.entries, 0..1);
+        assert!(appended.topology_changed);
+
+        let known_revision = scrollback.revision();
+        scrollback.apply_event(&history(
+            1,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "updated" }]
+            }),
+        ));
+        let updated = scrollback
+            .content_delta_since(known_revision)
+            .expect("in-place update remains in the change log");
+        assert_eq!(updated.from_revision, known_revision);
+        assert_eq!(updated.to_revision, scrollback.revision());
+        assert_eq!(updated.entries, 0..1);
+        assert!(!updated.topology_changed);
+
+        let unchanged_revision = scrollback.revision();
+        scrollback.apply_event(&history(
+            1,
+            "user/message",
+            json!({
+                "source": { "kind": "user" },
+                "content": [{ "type": "text", "text": "updated" }]
+            }),
+        ));
+        assert_eq!(scrollback.revision(), unchanged_revision);
+        assert_eq!(
+            scrollback.content_delta_since(unchanged_revision),
+            Some(ScrollbackRevisionDelta {
+                from_revision: unchanged_revision,
+                to_revision: unchanged_revision,
+                entries: 0..0,
+                topology_changed: false,
+            })
+        );
+        assert!(scrollback
+            .content_delta_since(scrollback.revision().saturating_add(1))
+            .is_none());
+    }
+
+    #[test]
+    fn content_delta_requires_full_resync_after_log_eviction() {
+        let mut scrollback = Scrollback::default();
+        for seq in 0..=CONTENT_CHANGE_LOG_CAPACITY as i64 {
+            scrollback.apply_event(&history(
+                seq,
+                "user/message",
+                json!({
+                    "source": { "kind": "user" },
+                    "content": [{ "type": "text", "text": format!("entry {seq}") }]
+                }),
+            ));
+        }
+        assert!(scrollback.content_delta_since(0).is_none());
+        let recent = scrollback
+            .content_delta_since(scrollback.revision().saturating_sub(1))
+            .expect("newest revision remains covered");
+        assert!(recent.topology_changed);
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub use presentation::{
 };
 pub use scrollback::{
     DshRenderEntryRef, EntryId, EntryLayout, PaintWindow, ScrollAnchor, ScrollbackLayout,
+    ScrollbackRevisionDelta,
 };
 pub use session::{
     ConnectionPhase, Diagnostic, DiagnosticLevel, InteractionKind, OperationToken,

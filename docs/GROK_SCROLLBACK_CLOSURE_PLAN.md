@@ -418,6 +418,18 @@ S1 可以单独先做，因为它删除的是已经被证伪的模型，且不�
 > `content_y0/entry-base/skip_rows` 及 `sticky.rs` 的纯坐标算法已复制/适配；sticky 尚未
 > 接入 production，S7 的 legacy `RichTranscript` 删除、browser pixel gate 也仍开放，
 > 因而这里只记为 **S6 启动并完成第一条生产纵切**，不宣称 S6/S7 全部闭包。
+>
+> 执行状态续（2026-08-25 16:23 +0800）：S6A2 补上 content revision 的增量范围。
+> Host 以 256 条有界日志发布 `(known_revision, current_revision]` 的 entry delta；日志
+> 缺口、未来 revision、追加/删除/重排均显式要求 full resync。UI 只对前后都属于
+> group `Break`、且无 pending 依赖的原位 entry 更新局部失效 projection、foldable block、
+> owned cache 与 Fenwick height；tool/thinking/context/hidden 等邻接敏感变化继续走全扫。
+> 50,000 entries 测试现覆盖 8 个真实 `assistant/chunk` 连续尾部 revision：合计只扫描
+> 8 个 metadata、0 个新 rich materialization，paint 仍受 24-row viewport 限制；另有
+> group-classification 反例证明会回退全量投影。证据见
+> `docs/开发进度记录/2026-08-25_16-18-28_S6A2增量revision同步.md`。这关闭了此前
+> “partial 每次全表扫描”的 S6A2 缺口；topology revision 的全量语义重建是当前保守
+> 合同，sticky production、host pane 改名、S7/浏览器像素门禁仍开放。
 
 禁止的顺序：先把 `transcript.rs` 拆成 `wave.rs` `tools.rs` `thinking.rs` 三个
 本地文件再谈 vendor。那是把平行宇宙正规化，漂移不会减。
@@ -470,8 +482,10 @@ Grok 全部功能」，这是已经写在 N2 里、现在必须当真执行的�
    reserve、clipped `skip_rows`、group header、bullet/accent 分支和对应测试矩阵；
 8. 任一 B 文件都附保留/排除能力矩阵。不能再以“本地文件也叫 EntryRenderer”或
    happy-path 截图通过来代替原文件结构、行为分支和测试的闭包证据；
-9. 50k entries 的窗口测试证明同步/绘制只物化 viewport + overscan；不得在每次
-   content revision 后先 clone 全历史再裁窗口。
+9. 50k entries 的窗口测试证明同步/绘制只物化 viewport + overscan；连续
+   `assistant/chunk` 原位 revision 只扫描 host 报告的 delta，不得在每次 content
+   revision 后先 clone 或扫描全历史再裁窗口。追加/删除/重排可保守 full resync，
+   但必须由 topology 标记显式触发。
 
 未完成 S7 不得写「pixel parity 完成」。
 

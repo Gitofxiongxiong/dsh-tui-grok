@@ -328,6 +328,13 @@ impl ScrollbackPane {
         if !options_changed && !self.semantic_dirty && self.host_revision == Some(revision) {
             return;
         }
+        if !options_changed
+            && !self.semantic_dirty
+            && let Some(known_revision) = self.host_revision
+            && self.try_incremental_revision_sync(scrollback, known_revision)
+        {
+            return;
+        }
 
         self.entries.clear();
         let entries = scrollback.render_entry_refs().collect::<Vec<_>>();
@@ -383,6 +390,88 @@ impl ScrollbackPane {
             .stats
             .scanned_entries
             .saturating_add(scrollback.entries().len());
+    }
+
+    /// Consume a host-reported in-place change without rescanning unrelated
+    /// history. Adjacency-sensitive group/pending entries deliberately fall
+    /// back to the complete projection path above.
+    fn try_incremental_revision_sync(
+        &mut self,
+        scrollback: &mut Scrollback,
+        known_revision: u64,
+    ) -> bool {
+        let Some(delta) = scrollback.content_delta_since(known_revision) else {
+            return false;
+        };
+        if delta.topology_changed
+            || delta.entries.is_empty()
+            || delta.entries.end > scrollback.entries().len()
+            || self.pending_user_input
+        {
+            return false;
+        }
+
+        for entry_idx in delta.entries.clone() {
+            let Some(entry) = scrollback.render_entry_ref(entry_idx) else {
+                return false;
+            };
+            if self
+                .projections
+                .get(&entry.id)
+                .is_none_or(|projection| projection.group_anchor.is_some())
+                || !is_group_break_ref(entry)
+            {
+                return false;
+            }
+        }
+
+        for entry_idx in delta.entries.clone() {
+            let (entry_id, projection, height, foldable, foldable_blocks) = {
+                let Some(entry) = scrollback.render_entry_ref(entry_idx) else {
+                    return false;
+                };
+                let mut projection = ProjectionInfo::plain_ref(entry, self.width, self.theme);
+                let foldable = is_foldable_ref(entry);
+                if foldable && self.expanded_entries.contains(&entry.id) {
+                    projection.mode = DisplayMode::Expanded;
+                }
+                let foldable_blocks = entry
+                    .content
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| is_local_foldable_block(block))
+                    .map(|(index, _)| index)
+                    .collect::<HashSet<_>>();
+                let height = estimated_projected_height(entry, &projection, self.width);
+                (entry.id, projection, height, foldable, foldable_blocks)
+            };
+
+            self.entries.remove(&entry_id);
+            self.projections.insert(entry_id, projection);
+            if foldable {
+                self.foldable_entries.insert(entry_id);
+            } else {
+                self.foldable_entries.remove(&entry_id);
+            }
+            self.foldable_blocks
+                .retain(|(candidate, _)| *candidate != entry_id);
+            self.expanded_blocks.retain(|(candidate, index)| {
+                *candidate != entry_id || foldable_blocks.contains(index)
+            });
+            self.foldable_blocks
+                .extend(foldable_blocks.into_iter().map(|index| (entry_id, index)));
+            scrollback.set_projected_height(self.width, entry_idx, height);
+            self.has_visible_entries |= height > 0;
+        }
+
+        self.host_revision = Some(delta.to_revision);
+        self.stats.revision_syncs = self.stats.revision_syncs.saturating_add(1);
+        self.stats.scanned_entries = self
+            .stats
+            .scanned_entries
+            .saturating_add(delta.entries.len());
+        true
     }
 
     fn prune_local_state(&mut self, entries: &[DshRenderEntryRef<'_>]) {
@@ -1710,6 +1799,25 @@ fn is_foldable_ref(entry: DshRenderEntryRef<'_>) -> bool {
             | DshRenderKind::ToolResult
             | DshRenderKind::Error
     ) && !entry.text.trim().is_empty()
+}
+
+/// A `Break` entry cannot join or split Grok context/verb spans. Combined
+/// with the previous projection having no group anchor, an in-place update to
+/// this class is safe to reproject independently.
+fn is_group_break_ref(entry: DshRenderEntryRef<'_>) -> bool {
+    entry.visibility != DshRenderVisibility::Hidden
+        && !matches!(
+            entry.kind,
+            DshRenderKind::AgentContext
+                | DshRenderKind::Context
+                | DshRenderKind::Compaction
+                | DshRenderKind::Thinking
+        )
+        && !entry
+            .content
+            .blocks
+            .iter()
+            .any(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
 }
 
 fn estimated_projected_height(
@@ -3463,7 +3571,7 @@ mod tests {
     #[test]
     fn fifty_thousand_entry_hot_frames_are_viewport_bounded() {
         let mut scrollback = Scrollback::default();
-        for seq in 0..50_000 {
+        for seq in 0..49_999 {
             scrollback.apply_event(&HistoryEntry {
                 event: SessionEvent {
                     event_type: "user/message".into(),
@@ -3480,6 +3588,27 @@ mod tests {
                 view: None,
             });
         }
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "assistant/chunk".into(),
+                seq: 49_999,
+                time: 1.0,
+                data: json!({
+                    "turn": 1,
+                    "step": 0,
+                    "chunk": {
+                        "type": "text-delta",
+                        "index": 0,
+                        "text": "streaming tail"
+                    }
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        });
+        assert_eq!(scrollback.entries().len(), 50_000);
 
         let theme = *Theme::current();
         let mut pane = ScrollbackPane::default();
@@ -3508,5 +3637,86 @@ mod tests {
         assert_eq!(hot.materialized_entries, 0);
         assert!(hot.painted_lines <= viewport as usize * 8);
         assert!(pane.entries.len() < 100);
+
+        pane.reset_stats();
+        for update in 1..=8 {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "assistant/chunk".into(),
+                    seq: 49_999 + update,
+                    time: 1.0,
+                    data: json!({
+                        "turn": 1,
+                        "step": 0,
+                        "chunk": {
+                            "type": "text-delta",
+                            "index": 0,
+                            "text": format!(" revision {update}")
+                        }
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+            pane.sync(&mut scrollback, 80, theme);
+            let lines = pane.visible_lines(&mut scrollback, 0, viewport);
+            assert!(lines.len() <= viewport as usize);
+        }
+        let streaming = pane.stats();
+        assert_eq!(streaming.revision_syncs, 8);
+        assert_eq!(streaming.scanned_entries, 8);
+        assert_eq!(streaming.materialized_entries, 0);
+        assert!(streaming.painted_lines <= viewport as usize * 8);
+        assert!(pane.entries.len() < 100);
+    }
+
+    #[test]
+    fn incremental_sync_falls_back_when_group_classification_can_change() {
+        let mut scrollback = Scrollback::default();
+        for seq in 0..2 {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "user/message".into(),
+                    seq,
+                    time: 1.0,
+                    data: json!({
+                        "source": { "kind": "user" },
+                        "content": [{ "type": "text", "text": format!("entry {seq}") }]
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+
+        let theme = *Theme::current();
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, theme);
+        pane.reset_stats();
+
+        scrollback.apply_event(&HistoryEntry {
+            event: SessionEvent {
+                event_type: "user/message".into(),
+                seq: 1,
+                time: 1.0,
+                data: json!({
+                    "source": { "kind": "system" },
+                    "content": [{ "type": "text", "text": "hidden context" }]
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        });
+        pane.sync(&mut scrollback, 80, theme);
+
+        assert_eq!(pane.stats().revision_syncs, 1);
+        assert_eq!(pane.stats().scanned_entries, 2);
+        assert!(!pane.is_empty());
     }
 }

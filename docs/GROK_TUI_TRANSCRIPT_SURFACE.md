@@ -267,9 +267,12 @@ tool family 与 verb-group 接入同一 chrome。accent 列、`◆` bullet、pro
 截断及 user/agent/tool 输出来自 vendor B 闭包。S6 第一条生产纵切现已用 host
 content revision + borrowed entry + Fenwick paint window 把 hot frame 限制到
 viewport/overscan，并由 `EntryRenderer` 直接写 `Buffer`；旧 `Paragraph<Vec<Line>>`
-和 runtime timestamp 双路径已删除。sticky 目前只有已测试的纯坐标闭包，尚未接入
-production；最终 `RichTranscript` 收尾仍属于 S6–S7，不能据此宣称整个 N2/pixel
-parity 已闭包。
+和 runtime timestamp 双路径已删除。S6A2 又让 host 发布有界 content delta：50k
+历史上连续 `assistant/chunk` 原位更新只重投影变化 entry，8 次 revision 合计扫描
+8 个 metadata、0 个新 rich materialization；追加/删除/重排或 tool/thinking/context/
+pending 等邻接敏感变化仍显式回退全量语义同步。sticky 目前只有已测试的纯坐标闭包，
+尚未接入 production；最终 `RichTranscript` 收尾仍属于 S6–S7，不能据此宣称整个
+N2/pixel parity 已闭包。
 
 特殊态：
 
