@@ -24,8 +24,8 @@ use crate::views::execute_tool::{
 };
 use crate::views::execute_tool_adapter::project_execute_tool;
 use crate::{
-    geometry::HitTarget, host_adapter::TranscriptRow, render::wrapping::word_wrap_line,
-    theme::Theme,
+    geometry::HitTarget, glyphs, host_adapter::TranscriptRow,
+    render::wrapping::word_wrap_line, theme::Theme,
 };
 
 /// A rich line after semantic block rendering and terminal-width wrapping.
@@ -1092,7 +1092,7 @@ pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: The
     }
     let color = if text.starts_with("▸ ")
         || text.starts_with("› ")
-        || text.starts_with("⌄ ")
+        || text.starts_with(glyphs::disclosure_open())
         || text.starts_with("◆ ")
         || text.starts_with('✓')
     {
@@ -1396,7 +1396,7 @@ fn decorate_line(
     line
 }
 
-const WAVE_ROWS_PER_SECOND: f64 = 8.0;
+const WAVE_ROWS_PER_SECOND: f64 = 4.0;
 const WAVE_BAND_ROWS: f64 = 4.0;
 const WAVE_GAP_ROWS: f64 = 6.0;
 const FINISH_FLASH_DURATION_MS: u64 = 400;
@@ -1914,7 +1914,7 @@ fn paint_execute_component_line(
     }
     if first {
         spans.push(Span::styled(
-            "⌄ ",
+            format!("{} ", glyphs::disclosure_open()),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
     } else if let Some(background) = component_line.panel_background {
@@ -2018,7 +2018,7 @@ fn render_tool_call(
     };
     lines.push(tool_summary_line(
         &prefix,
-        "⌄",
+        glyphs::disclosure_open(),
         &tool_header_text(block),
         tool_accent(block, finish, theme),
         theme,
@@ -2789,15 +2789,15 @@ mod tests {
 
     #[test]
     fn rail_wave_cycle_scales_with_length_at_fixed_row_speed() {
-        assert!((wave_cycle_seconds(1) - 1.375).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(4) - 1.75).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(12) - 2.75).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(24) - 4.25).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(1) - 2.75).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(4) - 3.5).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(12) - 5.5).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(24) - 8.5).abs() < f64::EPSILON);
 
-        let row_zero_peak = wave_brightness(313, 0, 24);
-        let row_eight_peak_one_second_later = wave_brightness(1_313, 8, 24);
+        let row_zero_peak = wave_brightness(625, 0, 24);
+        let row_eight_peak_two_seconds_later = wave_brightness(2_625, 8, 24);
         assert!(row_zero_peak > 0.999);
-        assert!(row_eight_peak_one_second_later > 0.999);
+        assert!(row_eight_peak_two_seconds_later > 0.999);
     }
 
     #[test]
@@ -3213,7 +3213,7 @@ mod tests {
         for expected in [
             "markdown",
             "thinking",
-            "⌄ shell",
+            "▾ shell",
             "✗ result",
             "output",
             "[image: image/png]",
@@ -3279,7 +3279,8 @@ mod tests {
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(terminal_text.contains("⌄ Run show workspace"));
+        assert!(terminal_text.contains("▾ Run show workspace"));
+        assert!(!terminal_text.contains('⌄'));
         assert!(terminal_text.contains("$ pwd"));
         assert!(terminal_text.contains("/work"));
         assert!(!terminal_text.contains("exit 0"));
@@ -3756,7 +3757,8 @@ mod tests {
             .map(|line| line.copy_text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(expanded_text.contains("⌄ Run retry jobs and inspect recent worker logs"));
+        assert!(expanded_text.contains("▾ Run retry jobs and inspect recent worker logs"));
+        assert!(!expanded_text.contains('⌄'));
         assert!(expanded_text.contains("$ node worker.js"));
         assert_eq!(
             expanded_text
