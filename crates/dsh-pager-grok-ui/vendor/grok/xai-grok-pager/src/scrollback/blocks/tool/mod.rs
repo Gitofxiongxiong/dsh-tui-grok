@@ -89,6 +89,9 @@ impl VerbGroupKind {
 pub struct ToolBlockContext<'a> {
     pub mode: DisplayMode,
     pub is_running: bool,
+    /// Grok lifts collapsed tool text from muted gray to the primary
+    /// foreground while the entry/block is selected.
+    pub is_selected: bool,
     pub width: usize,
     pub appearance: &'a ScrollbackAppearance,
     pub theme: Theme,
@@ -118,32 +121,85 @@ impl ToolCallBlock {
             Self::WebSearch(block) => (block.output(ctx), !block.is_success()),
             Self::Other(block) => (block.output(ctx), !block.is_success()),
         };
-        let accent = if failed {
-            AccentStyle::static_color(ctx.theme.accent_error)
-        } else if ctx.is_running {
-            AccentStyle::animated(ctx.appearance.scrollback.blocks.execute.running_accent)
-        } else if matches!(self, Self::Execute(_)) {
-            AccentStyle::static_color(ctx.theme.accent_success)
-        } else {
-            AccentStyle::static_color(ctx.theme.gray)
+        // Keep the upstream per-tool accent contract. Read/Search/ListDir
+        // deliberately have no rail; action/preview tools opt in according to
+        // their mode and Execute owns its success/running/error rail.
+        let accent = match self {
+            Self::Execute(_) => ctx
+                .appearance
+                .scrollback
+                .blocks
+                .execute
+                .accent_enabled
+                .then(|| {
+                    if failed {
+                        AccentStyle::static_color(ctx.theme.accent_error)
+                    } else if ctx.is_running {
+                        AccentStyle::animated(
+                            ctx.appearance.scrollback.blocks.execute.running_accent,
+                        )
+                    } else {
+                        AccentStyle::static_color(ctx.theme.accent_success)
+                    }
+                }),
+            Self::Edit(_) => ctx
+                .appearance
+                .scrollback
+                .blocks
+                .edit
+                .accent
+                .map(AccentStyle::static_color),
+            Self::Read(_) | Self::ListDir(_) | Self::Search(_) => None,
+            Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_)
+                if ctx.mode == DisplayMode::Collapsed =>
+            {
+                None
+            }
+            Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_) => Some(if failed {
+                AccentStyle::static_color(ctx.theme.accent_error)
+            } else if ctx.is_running {
+                AccentStyle::animated(ctx.theme.accent_running)
+            } else {
+                AccentStyle::static_color(ctx.theme.accent_tool)
+            }),
+        };
+        let bullet = match self {
+            Self::Execute(_) => accent,
+            Self::Read(_) | Self::Edit(_) | Self::ListDir(_) | Self::Search(_) => {
+                failed.then(|| AccentStyle::static_color(ctx.theme.accent_error))
+            }
+            Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_) if failed => {
+                Some(AccentStyle::static_color(ctx.theme.accent_error))
+            }
+            Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_)
+                if ctx.mode == DisplayMode::Collapsed =>
+            {
+                None
+            }
+            Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_) => accent,
         };
         if let Some(header) = output.lines.first_mut()
             && let Some(marker) = ctx.appearance.scrollback.blocks.tool.bullet.char()
         {
+            let bullet_color = bullet.map_or_else(
+                || {
+                    if ctx.mode == DisplayMode::Collapsed {
+                        ctx.theme.gray
+                    } else {
+                        ctx.theme.gray_bright
+                    }
+                },
+                |style| style.color,
+            );
             header.content.spans.insert(
                 0,
-                Span::styled(
-                    format!("{marker} "),
-                    Style::default()
-                        .fg(accent.color)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!("{marker} "), Style::default().fg(bullet_color)),
             );
         }
         RenderedBlock {
             output,
-            accent: Some(accent),
-            bullet: Some(accent),
+            accent,
+            bullet,
             background: None,
             accent_background: false,
             vpad: false,
@@ -205,7 +261,8 @@ fn render_execute(block: &ExecuteToolCallBlock, ctx: ToolBlockContext<'_>) -> (B
     };
     let mut execute_ctx = ExecuteBlockContext::new(mode, ctx.is_running, ctx.width, &ctx.theme);
     let config = &ctx.appearance.scrollback.blocks.execute;
-    execute_ctx.muted_command_collapsed = config.muted_command_collapsed;
+    execute_ctx.muted_command_collapsed =
+        config.muted_command_collapsed && !ctx.is_running && !ctx.is_selected;
     execute_ctx.first_lines = usize::from(config.first_lines);
     execute_ctx.last_lines = usize::from(config.last_lines);
     let lines = block
@@ -241,7 +298,8 @@ pub(super) fn header_line(
 ) -> BlockLine {
     let muted = ctx.mode == DisplayMode::Collapsed
         && ctx.appearance.scrollback.blocks.tool.muted_collapsed
-        && !ctx.is_running;
+        && !ctx.is_running
+        && !ctx.is_selected;
     let primary = if muted {
         ctx.theme.gray
     } else {
@@ -291,6 +349,7 @@ mod tests {
         ToolBlockContext {
             mode,
             is_running: running,
+            is_selected: false,
             width: 80,
             appearance,
             theme,
@@ -322,16 +381,55 @@ mod tests {
     }
 
     #[test]
-    fn running_and_failed_tools_own_dynamic_and_error_accents() {
-        let running = ToolCallBlock::Read(ReadToolCallBlock::new("a.rs"))
+    fn tool_accents_follow_upstream_per_variant_contract() {
+        let running_read = ToolCallBlock::Read(ReadToolCallBlock::new("a.rs"))
             .render(context(DisplayMode::Collapsed, true));
-        assert!(running.accent.is_some_and(|accent| accent.animated));
+        assert_eq!(running_read.accent, None);
 
         let failed = ToolCallBlock::Read(ReadToolCallBlock::new("gone.rs").with_error("not found"))
             .render(context(DisplayMode::Expanded, false));
+        assert_eq!(failed.accent, None);
         assert_eq!(
-            failed.accent.map(|accent| accent.color),
+            failed.bullet.map(|accent| accent.color),
             Some(Theme::current().accent_error)
+        );
+
+        let execute = ToolCallBlock::Execute(ExecuteToolCallBlock::new("pwd"))
+            .render(context(DisplayMode::Collapsed, true));
+        assert!(execute.accent.is_some_and(|accent| accent.animated));
+
+        let collapsed_web =
+            ToolCallBlock::WebFetch(WebFetchToolCallBlock::new("https://example.test"))
+                .render(context(DisplayMode::Collapsed, true));
+        assert_eq!(collapsed_web.accent, None);
+
+        let expanded_web =
+            ToolCallBlock::WebFetch(WebFetchToolCallBlock::new("https://example.test"))
+                .render(context(DisplayMode::Expanded, true));
+        assert!(expanded_web.accent.is_some_and(|accent| accent.animated));
+    }
+
+    #[test]
+    fn running_or_selected_collapsed_tool_text_is_not_muted() {
+        let block = ToolCallBlock::Read(ReadToolCallBlock::new("src/lib.rs"));
+        let completed = block.render(context(DisplayMode::Collapsed, false));
+        assert_eq!(
+            completed.output.lines[0].content.spans[1].style.fg,
+            Some(Theme::current().gray)
+        );
+
+        let running = block.render(context(DisplayMode::Collapsed, true));
+        assert_eq!(
+            running.output.lines[0].content.spans[1].style.fg,
+            Some(Theme::current().text_primary)
+        );
+
+        let mut selected_ctx = context(DisplayMode::Collapsed, false);
+        selected_ctx.is_selected = true;
+        let selected = block.render(selected_ctx);
+        assert_eq!(
+            selected.output.lines[0].content.spans[1].style.fg,
+            Some(Theme::current().text_primary)
         );
     }
 

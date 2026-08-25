@@ -29,6 +29,7 @@ pub struct EntryRenderSpec {
     pub layout: LayoutConfig,
     pub accent: Option<AccentStyle>,
     pub collapsed_accent: bool,
+    pub dim_accent: f32,
     pub background: Option<Color>,
     pub accent_background: bool,
     pub base_background: Color,
@@ -85,6 +86,7 @@ pub struct EntryLayoutSpec {
     pub layout: LayoutConfig,
     pub fallback_accent: AccentStyle,
     pub collapsed_accent: bool,
+    pub dim_accent: f32,
     pub fallback_background: Option<Color>,
     pub base_background: Color,
     pub flash_accent: Option<Color>,
@@ -127,6 +129,7 @@ pub struct DynamicAccentSpec {
     pub wave_rows: u16,
     pub wave_speed: f32,
     pub background: Color,
+    pub dim_accent: f32,
     pub accent: Option<AccentStyle>,
     pub flash_accent: Option<Color>,
     pub bullet: Option<AccentStyle>,
@@ -186,9 +189,7 @@ impl EntryRenderer {
             let accent = source_line
                 .accent
                 .or_else(|| source_line.rail.then_some(spec.fallback_accent));
-            let bullet = source_line.bullet.or_else(|| {
-                (source_line.rail && source_line.header).then_some(spec.fallback_accent)
-            });
+            let bullet = source_line.bullet;
             let background = source_line.background.or(spec.fallback_background);
             let attach_timestamp = timestamp_pending.is_some() && source_line.selectable;
             let (wrapped, joiners) = crate::render::wrapping::word_wrap_line_with_joiners(
@@ -218,6 +219,7 @@ impl EntryRenderer {
                         layout: spec.layout,
                         accent: accent.or(spec.flash_accent.map(AccentStyle::static_color)),
                         collapsed_accent: spec.collapsed_accent,
+                        dim_accent: spec.dim_accent,
                         background,
                         accent_background: source_line.accent_background,
                         base_background: spec.base_background,
@@ -271,7 +273,7 @@ impl EntryRenderer {
         } else if spec.running {
             AccentStyle::animated(spec.tool_accent)
         } else {
-            AccentStyle::static_color(spec.muted)
+            AccentStyle::static_color(spec.tool_accent)
         };
         let glyph_color = if spec.failed {
             spec.error_accent
@@ -302,7 +304,13 @@ impl EntryRenderer {
             header: true,
             selectable: true,
             accent: Some(accent),
-            bullet: None,
+            bullet: if spec.failed {
+                Some(AccentStyle::static_color(spec.error_accent))
+            } else if spec.running {
+                Some(AccentStyle::animated(spec.tool_accent))
+            } else {
+                None
+            },
             background: None,
             accent_background: false,
             joiner: None,
@@ -322,9 +330,11 @@ impl EntryRenderer {
             spec.base_background
         };
         let (glyph, color) = match spec.accent {
-            Some(accent) if spec.collapsed_accent => {
-                (crate::glyphs::collapsed_accent(), accent.color)
-            }
+            Some(accent) if spec.collapsed_accent => (
+                crate::glyphs::collapsed_accent(),
+                blend_color(accent_background, accent.color, spec.dim_accent)
+                    .unwrap_or(accent.color),
+            ),
             Some(accent) => (crate::glyphs::accent_bar(), accent.color),
             None => (" ", spec.base_background),
         };
@@ -425,6 +435,11 @@ impl EntryRenderer {
     }
 
     pub fn paint_dynamic(line: &mut Line<'static>, spec: DynamicAccentSpec) {
+        let collapsed = line.spans.first().is_some_and(|prefix| {
+            prefix
+                .content
+                .starts_with(crate::glyphs::collapsed_accent())
+        });
         if let Some(prefix) = line.spans.first_mut() {
             let accent = if spec.flash {
                 spec.flash_accent
@@ -437,36 +452,39 @@ impl EntryRenderer {
                 prefix.style = prefix.style.fg(spec.background);
                 return;
             };
-            let color = if spec.flash
-                || spec.selected
-                || spec.pending_user_input
-                || !accent.animated
-            {
+            let color = if spec.flash || spec.selected || spec.pending_user_input {
                 accent.color
-            } else {
+            } else if accent.animated {
                 blend_color(
                     spec.background,
                     accent.color,
                     wave_brightness(spec.tick, spec.logical_row, spec.wave_rows, spec.wave_speed),
                 )
                 .unwrap_or(accent.color)
+            } else if collapsed {
+                blend_color(spec.background, accent.color, spec.dim_accent).unwrap_or(accent.color)
+            } else {
+                accent.color
             };
             prefix.style = prefix.style.fg(color);
         }
         if let (Some(bullet), Some(index)) = (spec.bullet, spec.bullet_span)
             && let Some(span) = line.spans.get_mut(index)
         {
-            let color =
-                if spec.flash || spec.selected || spec.pending_user_input || !bullet.animated {
-                    bullet.color
-                } else {
-                    blend_color(
-                        spec.background,
-                        bullet.color,
-                        wave_brightness(spec.tick, 0, spec.wave_rows, spec.wave_speed),
-                    )
-                    .unwrap_or(bullet.color)
-                };
+            let color = if spec.flash || spec.selected || spec.pending_user_input {
+                bullet.color
+            } else if bullet.animated {
+                blend_color(
+                    spec.background,
+                    bullet.color,
+                    wave_brightness(spec.tick, 0, spec.wave_rows, spec.wave_speed),
+                )
+                .unwrap_or(bullet.color)
+            } else if collapsed {
+                blend_color(spec.background, bullet.color, spec.dim_accent).unwrap_or(bullet.color)
+            } else {
+                bullet.color
+            };
             span.style = span.style.fg(color);
         }
     }
@@ -474,7 +492,7 @@ impl EntryRenderer {
 
 fn is_bullet_span(content: &str) -> bool {
     let trimmed = content.trim_start();
-    trimmed.starts_with('◆') || trimmed.starts_with('♦')
+    trimmed.starts_with('◆') || trimmed.starts_with('♦') || trimmed.starts_with('◈')
 }
 
 #[cfg(test)]
@@ -494,6 +512,7 @@ mod tests {
                 layout: LayoutConfig::default(),
                 accent: Some(accent),
                 collapsed_accent: false,
+                dim_accent: 0.5,
                 background: None,
                 accent_background: false,
                 base_background: Color::Black,
@@ -509,6 +528,7 @@ mod tests {
                 wave_rows: 32,
                 wave_speed: 0.15,
                 background: Color::Black,
+                dim_accent: 0.5,
                 accent: Some(accent),
                 flash_accent: None,
                 bullet: Some(accent),
@@ -532,6 +552,7 @@ mod tests {
                 layout: LayoutConfig::default(),
                 accent: Some(accent),
                 collapsed_accent: false,
+                dim_accent: 0.5,
                 background: None,
                 accent_background: false,
                 base_background: Color::Black,
@@ -545,6 +566,7 @@ mod tests {
                 wave_rows: 32,
                 wave_speed: 0.15,
                 background: Color::Black,
+                dim_accent: 0.5,
                 accent: Some(accent),
                 flash_accent: None,
                 bullet: Some(accent),
@@ -590,6 +612,7 @@ mod tests {
             layout: LayoutConfig::default(),
             fallback_accent: AccentStyle::static_color(Color::Blue),
             collapsed_accent: false,
+            dim_accent: 0.5,
             fallback_background: None,
             base_background: Color::Black,
             flash_accent: None,
@@ -679,6 +702,7 @@ mod tests {
                 wave_rows: 32,
                 wave_speed: 0.15,
                 background: Color::Black,
+                dim_accent: 0.5,
                 accent: rendered[0].accent,
                 flash_accent: None,
                 bullet: None,
@@ -721,6 +745,7 @@ mod tests {
                 wave_rows: 32,
                 wave_speed: 0.15,
                 background: Color::Black,
+                dim_accent: 0.5,
                 accent: rendered[0].accent,
                 flash_accent: None,
                 bullet: None,

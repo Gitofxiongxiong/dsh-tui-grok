@@ -22,6 +22,7 @@ use ratatui::{
 
 use crate::{
     appearance::{GrokAppearanceSnapshot, ScrollbackAppearance},
+    geometry::HitTarget,
     glyphs,
     host_adapter::TranscriptRow,
     render::wrapping::word_wrap_line,
@@ -48,7 +49,6 @@ use crate::{
 
 #[cfg(test)]
 use crate::{
-    geometry::HitTarget,
     scrollback::entry_renderer::DynamicAccentSpec,
     scrollback_adapter::{host_pane::DshScrollbackHost as ScrollbackPane, tick::GROK_WAVE_SPEED},
 };
@@ -101,14 +101,35 @@ pub struct RichPaintLine {
     pub line: Line<'static>,
 }
 
+pub(crate) struct MaterializeContext<'a> {
+    expanded_blocks: &'a HashSet<(DshRenderEntryId, usize)>,
+    show_timestamps: bool,
+    appearance: &'a ScrollbackAppearance,
+    selected_target: Option<&'a HitTarget>,
+}
+
+impl<'a> MaterializeContext<'a> {
+    pub(crate) fn new(
+        expanded_blocks: &'a HashSet<(DshRenderEntryId, usize)>,
+        show_timestamps: bool,
+        appearance: &'a ScrollbackAppearance,
+        selected_target: Option<&'a HitTarget>,
+    ) -> Self {
+        Self {
+            expanded_blocks,
+            show_timestamps,
+            appearance,
+            selected_target,
+        }
+    }
+}
+
 pub(crate) fn semantic_lines(
     entry: &DshRenderEntry,
     width: usize,
     theme: Theme,
     projection: &ProjectionInfo,
-    expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
-    show_timestamps: bool,
-    appearance: &ScrollbackAppearance,
+    context: &MaterializeContext<'_>,
 ) -> Vec<RichPaintLine> {
     if projection.group_hidden {
         return Vec::new();
@@ -121,7 +142,7 @@ pub(crate) fn semantic_lines(
     let Some(row) = projected_row(entry, effective_mode, width) else {
         return Vec::new();
     };
-    let timestamp = if show_timestamps
+    let timestamp = if context.show_timestamps
         && matches!(entry.kind, DshRenderKind::User | DshRenderKind::Assistant)
         && !projection.group_header
     {
@@ -134,14 +155,13 @@ pub(crate) fn semantic_lines(
         &row,
         theme,
         width.saturating_sub(usize::from(timestamp.is_some()) * TIMESTAMP_RESERVED_WIDTH),
-        expanded_blocks,
-        appearance,
         effective_mode,
+        context,
     );
     let fallback_color = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
         theme.accent_error
     } else if projection.group_running || entry.finish == DshRenderFinish::Running {
-        appearance.scrollback.blocks.execute.running_accent
+        context.appearance.scrollback.blocks.execute.running_accent
     } else {
         theme.gray
     };
@@ -159,10 +179,15 @@ pub(crate) fn semantic_lines(
         DshRenderKind::ToolCall => theme.accent_success,
         _ => fallback_color,
     });
-    let collapsed_rail = !fallback_animated
-        && ((projection.group_header && !projection.group_expanded)
-            || (entry.kind == DshRenderKind::ToolCall
-                && projection.mode == DisplayMode::Collapsed));
+    let selected_content = !projection.group_header
+        && target_selects_entry(context.selected_target, entry.id)
+        && entry.kind == DshRenderKind::ToolCall;
+    let collapsed_group_rail =
+        projection.group_header && !projection.group_running && !projection.group_failed;
+    let collapsed_tool_rail = !fallback_animated
+        && entry.kind == DshRenderKind::ToolCall
+        && effective_mode == DisplayMode::Collapsed;
+    let collapsed_rail = !selected_content && (collapsed_group_rail || collapsed_tool_rail);
     let fallback_accent = if fallback_animated {
         AccentStyle::animated(fallback_color)
     } else {
@@ -173,7 +198,7 @@ pub(crate) fn semantic_lines(
         .map(|line| EntrySourceLine {
             content: line.line,
             block_index: line.block_index,
-            rail: projection.rail || line.rail,
+            rail: line.rail,
             header: line.header,
             selectable: line.selectable,
             accent: line.accent,
@@ -191,7 +216,7 @@ pub(crate) fn semantic_lines(
         expanded: projection.group_expanded,
         running: projection.group_running,
         failed: projection.group_failed,
-        tool_accent: appearance.scrollback.blocks.execute.running_accent,
+        tool_accent: theme.accent_tool,
         error_accent: theme.accent_error,
         muted: theme.gray,
         text: theme.gray_bright,
@@ -200,9 +225,10 @@ pub(crate) fn semantic_lines(
         source,
         EntryLayoutSpec {
             width,
-            layout: appearance.scrollback.layout,
+            layout: context.appearance.scrollback.layout,
             fallback_accent,
             collapsed_accent: collapsed_rail,
+            dim_accent: context.appearance.scrollback.display.dim_accent,
             fallback_background: projection.background,
             base_background: theme.bg_base,
             flash_accent,
@@ -266,6 +292,7 @@ fn collapsed_operational_line(
                 tool.render(ToolBlockContext {
                     mode: DisplayMode::Collapsed,
                     is_running: entry.finish == DshRenderFinish::Running,
+                    is_selected: false,
                     width: 120,
                     appearance: &appearance,
                     theme,
@@ -333,10 +360,12 @@ fn render_semantic_lines(
     row: &TranscriptRow,
     theme: Theme,
     width: usize,
-    expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
-    appearance: &ScrollbackAppearance,
     entry_mode: DisplayMode,
+    context: &MaterializeContext<'_>,
 ) -> Vec<SemanticLine> {
+    let appearance = context.appearance;
+    let expanded_blocks = context.expanded_blocks;
+    let selected_target = context.selected_target;
     let content_width = width
         .saturating_sub(EntryRenderer::chrome_width(&appearance.scrollback.layout))
         .max(1);
@@ -425,6 +454,11 @@ fn render_semantic_lines(
                     let rendered = tool.render(ToolBlockContext {
                         mode: projected_entry.display_mode,
                         is_running: projected_entry.is_running,
+                        is_selected: target_selects_block(
+                            selected_target,
+                            entry.id,
+                            projected_block.source_index,
+                        ),
                         width: content_width,
                         appearance,
                         theme,
@@ -543,6 +577,11 @@ fn render_semantic_lines(
                         tool.render(ToolBlockContext {
                             mode,
                             is_running: projected_entry.is_running,
+                            is_selected: target_selects_block(
+                                selected_target,
+                                entry.id,
+                                block_index,
+                            ),
                             width: content_width,
                             appearance,
                             theme,
@@ -605,6 +644,31 @@ fn render_semantic_lines(
         }
     }
     semantic
+}
+
+fn target_selects_block(
+    target: Option<&HitTarget>,
+    entry_id: DshRenderEntryId,
+    block_index: Option<usize>,
+) -> bool {
+    target.is_some_and(|target| match target {
+        HitTarget::TranscriptEntry(selected) => *selected == entry_id,
+        HitTarget::TranscriptBlock {
+            entry_id: selected,
+            block_index: selected_block,
+        } => *selected == entry_id && block_index == Some(*selected_block),
+        _ => false,
+    })
+}
+
+fn target_selects_entry(target: Option<&HitTarget>, entry_id: DshRenderEntryId) -> bool {
+    target.is_some_and(|target| match target {
+        HitTarget::TranscriptEntry(selected)
+        | HitTarget::TranscriptBlock {
+            entry_id: selected, ..
+        } => *selected == entry_id,
+        _ => false,
+    })
 }
 
 fn render_markdown_body(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
@@ -796,6 +860,7 @@ fn render_projected_tool_lines(
     let rendered = tool.render(ToolBlockContext {
         mode: DisplayMode::Expanded,
         is_running,
+        is_selected: false,
         width: width.saturating_sub(indent.saturating_mul(2)).max(1),
         appearance: &appearance,
         theme,
@@ -992,9 +1057,7 @@ mod tests {
                 width.max(1),
                 theme,
                 &projection,
-                &HashSet::new(),
-                true,
-                &appearance,
+                &MaterializeContext::new(&HashSet::new(), true, &appearance, None),
             ));
         }
         lines
@@ -1045,9 +1108,7 @@ mod tests {
             width.max(1),
             theme,
             &projection,
-            &expanded_blocks,
-            true,
-            &appearance,
+            &MaterializeContext::new(&expanded_blocks, true, &appearance, None),
         )
     }
 
@@ -1256,15 +1317,16 @@ mod tests {
                 .any(|line| line.copy_text.contains("hidden thought"))
         );
         assert!(!initial.iter().any(|line| line.copy_text.contains("cmd")));
-        assert!(
-            initial
-                .iter()
-                .filter(|line| line.block_index.is_some())
-                .filter(|line| {
-                    line.copy_text == "◆ Thinking…" || line.copy_text == "◆ shell"
-                })
-                .all(|line| line.rail)
-        );
+        let thinking_header = initial
+            .iter()
+            .find(|line| line.copy_text == "◆ Thinking…")
+            .expect("running thinking header");
+        let shell_header = initial
+            .iter()
+            .find(|line| line.copy_text == "◆ shell")
+            .expect("collapsed generic tool header");
+        assert!(thinking_header.rail);
+        assert!(!shell_header.rail);
         let final_line = initial
             .iter()
             .find(|line| line.copy_text == "final answer")
@@ -1598,6 +1660,7 @@ mod tests {
                 wave_rows: DEFAULT_WAVE_ROWS,
                 wave_speed: GROK_WAVE_SPEED,
                 background: theme.bg_base,
+                dim_accent: 0.5,
                 accent: failed.accent,
                 flash_accent: failed.flash_accent,
                 bullet: None,
@@ -2249,6 +2312,16 @@ mod tests {
         assert!(collapsed.iter().any(|line| line.group_header
             && line.copy_text.contains("Reading 1 file")
             && line.copy_text.contains("Searching 1 pattern")));
+        let collapsed_header = collapsed
+            .iter()
+            .find(|line| line.group_header)
+            .expect("collapsed group header");
+        assert!(collapsed_header.line.spans[0].content.starts_with('┃'));
+        assert!(
+            collapsed_header
+                .accent
+                .is_some_and(|accent| accent.animated && accent.color == theme.accent_tool)
+        );
         assert!(
             !collapsed
                 .iter()
@@ -2269,7 +2342,22 @@ mod tests {
                 .iter()
                 .any(|line| line.copy_text.contains("Search TODO"))
         );
-        assert!(expanded.iter().all(|line| line.rail));
+        let group_header = expanded
+            .iter()
+            .find(|line| line.group_header)
+            .expect("expanded group header");
+        let read_member = expanded
+            .iter()
+            .find(|line| line.copy_text.contains("Read src/a.rs"))
+            .expect("expanded read member");
+        let search_member = expanded
+            .iter()
+            .find(|line| line.copy_text.contains("Search TODO"))
+            .expect("expanded search member");
+        assert!(group_header.rail);
+        assert!(group_header.line.spans[0].content.starts_with('┃'));
+        assert!(!read_member.rail);
+        assert!(!search_member.rail);
         assert!(scrollback.layout(80).entries[1].height > 0);
     }
 

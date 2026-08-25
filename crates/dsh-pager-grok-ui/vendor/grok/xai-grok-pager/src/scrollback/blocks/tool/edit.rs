@@ -177,6 +177,7 @@ mod tests {
         ToolBlockContext {
             mode,
             is_running: false,
+            is_selected: false,
             width: 80,
             appearance,
             theme,

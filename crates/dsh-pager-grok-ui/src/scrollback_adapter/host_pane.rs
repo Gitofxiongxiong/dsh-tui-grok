@@ -25,8 +25,8 @@ use crate::{
     },
     scrollback_adapter::{
         materialize_entry::{
-            RichPaintLine, default_display_mode_ref, finish_flash_active, is_local_foldable_block,
-            now_epoch_ms, semantic_lines,
+            MaterializeContext, RichPaintLine, default_display_mode_ref, finish_flash_active,
+            is_local_foldable_block, now_epoch_ms, semantic_lines,
         },
         project_groups::project_groups,
         tick::GROK_WAVE_SPEED,
@@ -51,7 +51,6 @@ pub(crate) struct ProjectionInfo {
     pub(crate) group_label: Option<String>,
     pub(crate) group_running: bool,
     pub(crate) group_failed: bool,
-    pub(crate) rail: bool,
     pub(crate) background: Option<Color>,
 }
 
@@ -76,7 +75,6 @@ impl ProjectionInfo {
             group_label: None,
             group_running: false,
             group_failed: false,
-            rail: entry.kind == DshRenderKind::ToolCall,
             background: (entry.kind == DshRenderKind::User).then_some(theme.bg_light),
         }
     }
@@ -191,6 +189,15 @@ impl DshScrollbackHost {
     /// primary (white) foreground; keeping it here also makes the paint path
     /// independent of the runtime's hit-map implementation.
     pub fn set_selected_target(&mut self, target: Option<HitTarget>) {
+        if self.selected_target == target {
+            return;
+        }
+        if let Some(entry_id) = self.selected_target.as_ref().and_then(hit_target_entry_id) {
+            self.entries.remove(&entry_id);
+        }
+        if let Some(entry_id) = target.as_ref().and_then(hit_target_entry_id) {
+            self.entries.remove(&entry_id);
+        }
         self.selected_target = target;
     }
 
@@ -751,9 +758,12 @@ impl DshScrollbackHost {
                     self.width,
                     self.theme,
                     &projection,
-                    &self.expanded_blocks,
-                    self.show_timestamps,
-                    &self.appearance,
+                    &MaterializeContext::new(
+                        &self.expanded_blocks,
+                        self.show_timestamps,
+                        &self.appearance,
+                        self.selected_target.as_ref(),
+                    ),
                 );
                 self.entries
                     .insert(entry_id, CachedPaneEntry { entry, lines });
@@ -927,6 +937,7 @@ impl DshScrollbackHost {
                 wave_rows: self.appearance.animation.wave_rows,
                 wave_speed: GROK_WAVE_SPEED,
                 background: line.background.unwrap_or(Theme::current().bg_base),
+                dim_accent: self.appearance.scrollback.display.dim_accent,
                 accent: line.accent,
                 flash_accent: line.flash_accent,
                 bullet: line.bullet,
@@ -984,6 +995,7 @@ impl DshScrollbackHost {
                 wave_rows: self.appearance.animation.wave_rows,
                 wave_speed: GROK_WAVE_SPEED,
                 background: paint.background.unwrap_or(self.theme.bg_base),
+                dim_accent: self.appearance.scrollback.display.dim_accent,
                 accent: paint.accent,
                 flash_accent: paint.flash_accent,
                 bullet: paint.bullet,
@@ -1102,6 +1114,15 @@ fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
     }
 }
 
+fn hit_target_entry_id(target: &HitTarget) -> Option<DshRenderEntryId> {
+    match target {
+        HitTarget::TranscriptEntry(entry_id) | HitTarget::TranscriptBlock { entry_id, .. } => {
+            Some(*entry_id)
+        }
+        _ => None,
+    }
+}
+
 fn entry_projections(
     entries: &[DshRenderEntryRef<'_>],
     width: usize,
@@ -1143,7 +1164,6 @@ fn entry_projections(
         projection.group_label = group.label;
         projection.group_running = group.running;
         projection.group_failed = group.failed;
-        projection.rail = true;
     }
     projections
 }
@@ -1152,6 +1172,7 @@ fn entry_projections(
 mod tests {
     use super::*;
     use crate::geometry::{HitMap, insert_text_line};
+    use dsh_pager::{DshRenderContent, DshRenderEntry};
     use dsh_pager_protocol::{HistoryEntry, SessionEvent};
     use serde_json::{Value, json};
 
@@ -1311,5 +1332,75 @@ mod tests {
             hit.target,
             HitTarget::TranscriptEntry(DshRenderEntryId::Event { seq: 0 })
         );
+    }
+
+    #[test]
+    fn selecting_completed_tool_lifts_muted_text_without_full_cache_invalidation() {
+        let theme = *Theme::current();
+        let entry_id = DshRenderEntryId::Event { seq: 40 };
+        let entry = DshRenderEntry {
+            id: entry_id,
+            source_seq: 40,
+            created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+            kind: DshRenderKind::ToolCall,
+            text: "Run pwd".into(),
+            partial: false,
+            visibility: DshRenderVisibility::Visible,
+            finish: DshRenderFinish::Completed,
+            group_key: None,
+            selectable: true,
+            lineage: vec![40],
+            content: DshRenderContent {
+                blocks: vec![DshRenderBlock::ToolCall {
+                    name: "bash".into(),
+                    call_id: Some("call-40".into()),
+                    arguments: r#"{"command":"pwd"}"#.into(),
+                    edit: None,
+                    view: None,
+                    result: None,
+                }],
+                fallback: "Run pwd".into(),
+            },
+        };
+        let mut scrollback = Scrollback::from_render_entries([entry]);
+        let mut host = DshScrollbackHost::default();
+        host.sync(&mut scrollback, 80, theme);
+
+        let unselected_lines = host.visible_lines(&mut scrollback, 0, 10);
+        let unselected = unselected_lines
+            .iter()
+            .find(|line| line.copy_text.contains("pwd"))
+            .unwrap_or_else(|| panic!("collapsed execute header: {unselected_lines:#?}"));
+        assert!(
+            unselected
+                .line
+                .spans
+                .iter()
+                .any(|span| { span.content.contains("pwd") && span.style.fg == Some(theme.gray) })
+        );
+        assert!(unselected.line.spans[0].content.starts_with('❙'));
+        assert_ne!(
+            unselected.line.spans[0].style.fg,
+            Some(theme.accent_success)
+        );
+
+        host.reset_stats();
+        host.set_selected_target(Some(HitTarget::TranscriptBlock {
+            entry_id,
+            block_index: 0,
+        }));
+        let selected = host
+            .visible_lines(&mut scrollback, 0, 10)
+            .into_iter()
+            .find(|line| line.copy_text.contains("pwd"))
+            .expect("selected execute header");
+        assert!(selected.line.spans.iter().any(|span| {
+            span.content.contains("pwd") && span.style.fg == Some(theme.text_primary)
+        }));
+        assert!(selected.line.spans[0].content.starts_with('┃'));
+        assert_eq!(selected.line.spans[0].style.fg, Some(theme.accent_success));
+        assert_eq!(host.stats().materialized_entries, 1);
     }
 }

@@ -175,11 +175,17 @@ worker没有 DSH 中性真源，按 B/D 边界排除；它们不是继续在 vie
 | Edit | `Edit` / `Creating` + path + hunk 统计 | 按变体 | 配置可选 |
 | ListDir | `List path (N entries)` | Collapsed | 无 |
 | Search | `Search "pattern"` | Collapsed | 无 |
-| WebFetch / WebSearch | `Fetch` / `Web Search` | Collapsed | 有 |
-| MCP use_tool | Server + Action | Collapsed | 有 |
+| WebFetch / WebSearch | `Fetch` / `Web Search` | Collapsed | 折叠时无；展开运行时有 |
+| MCP use_tool | Server + Action | Collapsed | 折叠时无；展开运行时有 |
 | 失败 | 红 bullet；Execute 红 rail | 视变体 | 静态 `accent_error` |
 
 Execute 完成：**不**强制改 fold。用户展开过就保持；没展开就保持折叠。`!` bash 完成强制 Expanded。
+
+稳定态的亮度也是状态契约，不只是 rail 颜色：completed、collapsed、未选中的工具标题使用
+`text_muted`，默认 bullet 为灰色；running 或 selected 标题恢复 `text_primary`，展开 bullet
+使用更亮的灰色。选中 completed Execute 时，细灰 `❙` 临时恢复为满宽、满色 `┃`；取消选中
+后回到细灰。Read/Search/ListDir 不因 entry 级 fallback 被强制补 rail，Edit、Execute、Web/Other
+仍分别服从自身变体的 accent 规则。
 
 ### 5.2 VerbRun 分组
 
@@ -405,6 +411,17 @@ Btw（`/btw`）与 Agent 正文同类，走同一套 overlay 资格；触发仍�
 | `Enter` | 全屏 viewer | — | — | 详情进 viewer |
 
 拖选复制必须丢掉装饰：blockquote 的 `│ `、tool header 前缀、diff gutter、VerbRun chrome。
+
+### 10.1 流式输出期间的滚动
+
+手工视口用“从 transcript 顶部开始的绝对行号”表示，是否跟随尾部由独立的
+`follow_mode` 表示，不能再用“距底部距离”同时表达两件事：
+
+- 鼠标滚轮或键盘向上移动后立刻退出 follow；后续 token/工具状态增长不改变当前首行。
+- 手工向下落到当时的底部仍保持 manual，避免同一滚轮事件刚到边界就被流式增长重新吸走。
+- 已在底部时再向下 overscroll 一次才恢复 follow；此后新内容继续贴底。
+- resize、估算高度收敛或 fold 改变仍用稳定 entry/block anchor 恢复；同一帧有明确滚动输入时，
+  输入优先，不能再用旧 anchor 覆盖它。
 
 ## 11. DSH 对齐检查清单
 
