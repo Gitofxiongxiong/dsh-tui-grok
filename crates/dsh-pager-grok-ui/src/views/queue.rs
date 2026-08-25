@@ -18,6 +18,24 @@ pub struct QueueRenderState<'a> {
     pub revision: u64,
 }
 
+/// Return whether an authoritative inbox item belongs on a user-facing queue
+/// surface. Context injections are model-facing state: the host keeps them in
+/// the same snapshot for authority/revision purposes, but its wire contract
+/// requires them to remain invisible until the agent claims them.
+pub fn queue_item_is_visible(item: &DshQueueItem) -> bool {
+    item.placement != QueuePlacement::Context
+}
+
+/// Iterate the queue rows that the user may see and mutate.
+pub fn visible_queue_items(queue: &[DshQueueItem]) -> impl Iterator<Item = &DshQueueItem> {
+    queue.iter().filter(|item| queue_item_is_visible(item))
+}
+
+/// Count rows that contribute to queue geometry and shortcut visibility.
+pub fn visible_queue_len(queue: &[DshQueueItem]) -> usize {
+    visible_queue_items(queue).count()
+}
+
 /// Render the authoritative queue list. `selected_id` is a stable item ID;
 /// the caller never persists an array index across refreshes.
 pub fn render_queue_content(
@@ -38,7 +56,8 @@ pub fn render_queue_content(
             .fg(theme.gray_bright)
             .add_modifier(Modifier::BOLD),
     );
-    if queue.is_empty() {
+    let mut visible_items = visible_queue_items(queue).peekable();
+    if visible_items.peek().is_none() {
         buffer.set_string(
             area.x,
             area.y.saturating_add(2),
@@ -48,7 +67,7 @@ pub fn render_queue_content(
         return;
     }
     let mut y = area.y.saturating_add(2);
-    for item in queue {
+    for item in visible_items {
         if y >= area.bottom() {
             break;
         }
@@ -117,20 +136,23 @@ pub fn moved_selection(
     selected_id: Option<&str>,
     delta: isize,
 ) -> Option<DshQueueItemId> {
-    if queue.is_empty() {
+    let visible_len = visible_queue_len(queue);
+    if visible_len == 0 {
         return None;
     }
     let current = selected_id
-        .and_then(|id| queue.iter().position(|item| item.id == id))
+        .and_then(|id| visible_queue_items(queue).position(|item| item.id == id))
         .unwrap_or(0);
     let next = if delta < 0 {
         current.saturating_sub(delta.unsigned_abs())
     } else {
         current
             .saturating_add(delta as usize)
-            .min(queue.len().saturating_sub(1))
+            .min(visible_len.saturating_sub(1))
     };
-    Some(DshQueueItemId::new(queue[next].id.clone()))
+    visible_queue_items(queue)
+        .nth(next)
+        .map(|item| DshQueueItemId::new(item.id.clone()))
 }
 
 pub fn placement_label(placement: QueuePlacement) -> &'static str {
@@ -146,10 +168,10 @@ mod tests {
     use super::*;
     use dsh_pager::DshQueueContent;
 
-    fn item(id: &str) -> DshQueueItem {
+    fn item(id: &str, placement: QueuePlacement) -> DshQueueItem {
         DshQueueItem {
             id: id.into(),
-            placement: QueuePlacement::Queued,
+            placement,
             content: DshQueueContent {
                 lines: vec![id.into()],
                 summary: Some(id.into()),
@@ -161,11 +183,51 @@ mod tests {
 
     #[test]
     fn selection_moves_by_stable_item_id() {
-        let queue = vec![item("a"), item("b")];
+        let queue = vec![
+            item("hidden-before", QueuePlacement::Context),
+            item("a", QueuePlacement::Queued),
+            item("hidden-between", QueuePlacement::Context),
+            item("b", QueuePlacement::Steering),
+        ];
         assert_eq!(moved_selection(&queue, Some("a"), 1).unwrap().as_str(), "b");
         assert_eq!(
             moved_selection(&queue, Some("b"), -1).unwrap().as_str(),
             "a"
         );
+        assert_eq!(moved_selection(&queue, None, 0).unwrap().as_str(), "a");
+    }
+
+    #[test]
+    fn context_items_are_not_rendered_on_the_queue_surface() {
+        let queue = vec![
+            item(
+                "The approval policy changed from never to ask",
+                QueuePlacement::Context,
+            ),
+            item("visible follow-up", QueuePlacement::Queued),
+        ];
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buffer = Buffer::empty(area);
+        render_queue_content(
+            &mut buffer,
+            area,
+            &queue,
+            QueueRenderState {
+                selected_id: Some("visible follow-up"),
+                editing: false,
+                editor_text: "",
+                pending_id: None,
+                revision: 4,
+            },
+            Theme::current(),
+        );
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("visible follow-up"));
+        assert!(!rendered.contains("approval policy changed"));
+        assert!(!rendered.contains("[context]"));
     }
 }

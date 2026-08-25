@@ -18,6 +18,7 @@ use crate::theme::Theme;
 use crate::views::agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact};
 use crate::views::prompt_contract::{PromptFlagContract, PromptInfoContract, PromptStyleContract};
 use crate::views::prompt_widget::GrokPromptRenderer;
+use crate::views::queue::visible_queue_len;
 use crate::views::transcript::RichTranscript;
 use crate::views::turn_status::{MouseButtons, TurnStatusArgs, render_turn_status};
 
@@ -335,7 +336,7 @@ impl ReferenceRunner {
                 prompt_height: 3,
                 tasks_height: (snapshot.tasks.len() as u16).min(8),
                 catalog_height: (snapshot.agent.subagents.len() as u16).min(8),
-                queue_height: (snapshot.queue.len() as u16).clamp(0, 3),
+                queue_height: (visible_queue_len(&snapshot.queue) as u16).clamp(0, 3),
                 turn_status_height: u16::from(snapshot.turn_status.visible),
                 banner_height: u16::from(!snapshot.prompt.suggestions.is_empty()),
                 status_line_height: u16::from(snapshot.status.is_some() && !short),
@@ -444,7 +445,7 @@ pub fn render_semantic(
         (
             "queue",
             layout.queue,
-            format!("{} queued", snapshot.queue.len()),
+            format!("{} queued", visible_queue_len(&snapshot.queue)),
         ),
     ] {
         if rect.height > 0 {
@@ -667,6 +668,8 @@ pub fn semantic_signature(frame: &SemanticFrame) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dsh_pager::{DshQueueContent, DshQueueItem};
+    use dsh_pager_protocol::QueuePlacement;
 
     #[test]
     fn matrix_covers_required_sizes_states_and_inputs() {
@@ -757,5 +760,37 @@ mod tests {
         assert!(frame.cells.iter().any(|cell| cell.x == 0 && cell.y == 0));
         assert!(frame.cells.iter().any(|cell| cell.symbol == "╭"));
         assert!(frame.cells.iter().any(|cell| cell.y > 0));
+    }
+
+    #[test]
+    fn context_only_inbox_has_no_semantic_queue_surface() {
+        let runner = ReferenceRunner::new(ParityMatrix::default());
+        let mut snapshot = GrokHostSnapshot::demo();
+        snapshot.queue = vec![DshQueueItem {
+            id: "approval-policy-context".into(),
+            placement: QueuePlacement::Context,
+            content: DshQueueContent {
+                lines: vec!["The approval policy changed from never to ask".into()],
+                summary: Some("The approval policy changed from never to ask".into()),
+                editable_text: None,
+                block_count: 1,
+            },
+        }];
+        let mut shell = AppShell::default();
+        let frame = runner.render(
+            &snapshot,
+            &mut shell,
+            TerminalSize {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert!(frame.row_text("queue").is_none());
+        assert!(
+            frame
+                .rows
+                .iter()
+                .all(|row| !row.text.contains("approval policy changed"))
+        );
     }
 }

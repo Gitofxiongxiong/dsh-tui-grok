@@ -80,7 +80,10 @@ use crate::views::{
         PromptFlagContract, PromptGeometry, PromptInfoContract, PromptStyleContract,
     },
     prompt_widget::GrokPromptRenderer,
-    queue::{QueueRenderState, moved_selection, render_queue_content},
+    queue::{
+        QueueRenderState, moved_selection, queue_item_is_visible, render_queue_content,
+        visible_queue_items, visible_queue_len,
+    },
     session_picker::{ResumePickerOutcome, ResumePickerState},
     shortcuts_bar::{HintItem, ShortcutsBar},
     status_bar::StatusBar,
@@ -723,11 +726,7 @@ impl UiState {
         let catalog_height = 0;
         let watcher_visible =
             !snapshot.turn_status.visible && watcher_label(&snapshot.agent).is_some();
-        let queue_height = if snapshot.queue.is_empty() {
-            0
-        } else {
-            (snapshot.queue.len() as u16).clamp(1, 3)
-        };
+        let queue_height = (visible_queue_len(&snapshot.queue) as u16).clamp(0, 3);
         let timeline_width = crate::views::timeline::rail_width(
             appearance.show_timeline,
             false,
@@ -1124,13 +1123,12 @@ impl UiState {
             snapshot
                 .queue
                 .iter()
-                .any(|item| item.id == selected)
+                .any(|item| item.id == selected && queue_item_is_visible(item))
                 .then(|| selected.to_string())
         });
         if self.queue_selected_id.is_none() {
-            self.queue_selected_id = snapshot
-                .queue
-                .first()
+            self.queue_selected_id = visible_queue_items(&snapshot.queue)
+                .next()
                 .map(|item| DshQueueItemId::new(item.id.clone()).to_string());
         }
     }
@@ -1557,6 +1555,7 @@ impl UiState {
             self.prompt.can_send(),
             "hint-seam can_send must match the composer predicate"
         );
+        let has_visible_queue = visible_queue_len(&snapshot.queue) > 0;
         let mut hints = build_hints(
             active_pane,
             prompt_focus_hint(),
@@ -1577,14 +1576,14 @@ impl UiState {
             false,
             snapshot.running,
             false,
-            !snapshot.queue.is_empty(),
+            has_visible_queue,
             false,
             false,
             false,
             crate::terminal::terminal_context().shift_enter_unavailable(),
             None,
         );
-        if (self.shell.overlay() == Overlay::Queue || !snapshot.queue.is_empty())
+        if (self.shell.overlay() == Overlay::Queue || has_visible_queue)
             && active_pane != ActivePane::Queue
             && !self.queue_editing
             && let Some(def) = registry.find(ActionId::ToggleQueue)
@@ -1899,10 +1898,12 @@ impl UiState {
                     session,
                     Some(transport.control_plane()),
                 );
-                self.queue_selected_id = snapshot.queue.first().map(|item| item.id.clone());
+                self.queue_selected_id = visible_queue_items(&snapshot.queue)
+                    .next()
+                    .map(|item| item.id.clone());
                 self.queue_editing = false;
                 self.queue_editor.reset();
-                self.status = if snapshot.queue.is_empty() {
+                self.status = if visible_queue_len(&snapshot.queue) == 0 {
                     Some("Queue is empty".into())
                 } else {
                     Some(format!(
@@ -3173,8 +3174,13 @@ impl UiState {
     ) -> Option<&'a dsh_pager::DshQueueItem> {
         self.queue_selected_id
             .as_deref()
-            .and_then(|id| snapshot.queue.iter().find(|item| item.id == id))
-            .or_else(|| snapshot.queue.first())
+            .and_then(|id| {
+                snapshot
+                    .queue
+                    .iter()
+                    .find(|item| item.id == id && queue_item_is_visible(item))
+            })
+            .or_else(|| visible_queue_items(&snapshot.queue).next())
     }
 
     fn submit_queue_edit(
@@ -4481,6 +4487,56 @@ mod tests {
         assert!(rendered.contains("Current session"));
         assert!(rendered.contains("Workspace tasks"));
         assert!(rendered.contains("Sessions"));
+    }
+
+    #[test]
+    fn context_only_inbox_does_not_open_or_populate_the_queue_pane() {
+        let mut session = SessionState::new("context-only-queue".into(), 1);
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "type": "session/queue",
+                    "sessionId": "context-only-queue",
+                    "items": [{
+                        "id": "approval-policy-context",
+                        "placement": "context",
+                        "message": {
+                            "role": "user",
+                            "content": [{
+                                "type": "text",
+                                "text": "The approval policy changed from \"never\" to \"ask\" (changed by the user)."
+                            }],
+                            "source": { "kind": "plugin", "plugin": "user-approval" }
+                        }
+                    }]
+                })),
+            })
+            .expect("context queue notification");
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState::default();
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 30)).expect("context queue terminal");
+
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render context-only queue");
+        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        assert!(!screen.contains("Queue · revision"));
+        assert!(!screen.contains("The approval policy changed"));
+        assert!(ui.queue_selected_id.is_none());
+
+        ui.shell.open_queue();
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render manually opened queue");
+        let overlay = buffer_text(terminal.backend().buffer(), 100, 30);
+        assert!(overlay.contains("Queue · host authority"));
+        assert!(overlay.contains("No queued prompts"));
+        assert!(!overlay.contains("The approval policy changed"));
+        assert!(!overlay.contains("[context]"));
+        assert!(ui.queue_selected_id.is_none());
     }
 
     #[test]
