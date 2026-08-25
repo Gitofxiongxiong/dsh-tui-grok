@@ -43,4 +43,5 @@ pub mod timeline;
 pub mod transcript;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/turn_status.rs"]
 pub mod turn_status;
+pub mod welcome;
 pub mod workspace;

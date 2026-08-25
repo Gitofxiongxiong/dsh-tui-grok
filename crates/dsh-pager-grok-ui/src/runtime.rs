@@ -25,7 +25,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::Style,
-    text::{Line, Span, Text},
+    text::{Line, Text},
     widgets::{Block, Borders, Paragraph},
 };
 
@@ -88,6 +88,7 @@ use crate::views::{
     timeline::{RailViewport, compute_rail, render_rail},
     transcript::ScrollbackPane,
     turn_status::{MouseButtons as TurnStatusMouseButtons, TurnStatusArgs, render_turn_status},
+    welcome::{WelcomeAnimation, format_cwd, render_welcome},
     workspace::WorkspaceTreeController,
 };
 use serde_json::json;
@@ -235,11 +236,14 @@ fn run_loop(
         terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
         })?;
-        let poll_interval = if session.running() || ui.scrollback_pane.is_animating() {
-            ANIMATION_POLL_INTERVAL
-        } else {
-            POLL_INTERVAL
-        };
+        let welcome_animating =
+            ui.scrollback_pane.is_empty() && ui.welcome_animation.is_animating(Instant::now());
+        let poll_interval =
+            if session.running() || ui.scrollback_pane.is_animating() || welcome_animating {
+                ANIMATION_POLL_INTERVAL
+            } else {
+                POLL_INTERVAL
+            };
         if !event::poll(poll_interval)? {
             continue;
         }
@@ -363,6 +367,7 @@ struct UiState {
     timestamps_enabled: Option<bool>,
     status: Option<String>,
     frame: usize,
+    welcome_animation: WelcomeAnimation,
     hit_map: HitMap,
     geometry_lines: Vec<GeometryLine>,
     selection: SelectionModel,
@@ -640,6 +645,7 @@ impl UiState {
         self.agent_pane.sync(&snapshot.agent);
         self.reconcile_snapshot(&snapshot);
         self.reconcile_session_mode(&snapshot);
+        self.welcome_animation.observe_session(&snapshot.session_id);
         let session_mode = self.effective_session_mode(&snapshot);
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
@@ -672,7 +678,7 @@ impl UiState {
         let prompt_style = PromptStyleContract {
             focused,
             compact,
-            title: Some(snapshot.session_title.clone()),
+            title: None,
             show_prefix: appearance.prompt_show_prefix,
             show_borders: appearance.prompt_show_borders,
             show_accent_line: appearance.prompt_show_accent_line,
@@ -761,15 +767,13 @@ impl UiState {
         let agent_layout = AgentView::layout(&mut self.shell, layout_params);
         let header = agent_layout.status_bar;
         let input = agent_layout.prompt;
-        let compact_header = compact || header.width < 70;
-        let status_bar = StatusBar::new(&snapshot.session_title);
-        // The upstream status row is left/right aligned. Keep the compact
-        // branding chip only where it cannot collide with the right status.
-        if compact_header {
-            frame.render_widget(status_bar.center("GROK UI"), header);
-        } else {
-            frame.render_widget(status_bar, header);
-        }
+        let home = std::env::var("HOME").ok();
+        let cwd = format_cwd(
+            &snapshot.cwd,
+            home.as_deref(),
+            header.width.saturating_sub(18) as usize,
+        );
+        frame.render_widget(StatusBar::new(&cwd), header);
 
         // Grok composes the right side as named status items so context usage
         // can retain a stable hover rectangle while its contents change.
@@ -1227,13 +1231,10 @@ impl UiState {
             .set_selected_target(self.selected_transcript.clone());
         self.scrollback_pane
             .sync_with_options(scrollback, render_width, *theme, show_timestamps);
-        if self.scrollback_pane.is_empty() {
+        let empty = self.scrollback_pane.is_empty();
+        if empty {
             self.scroll = 0;
             self.scroll_anchor = None;
-            lines.push(Line::from(Span::styled(
-                "  No transcript events yet. Type a prompt below.",
-                Style::default().fg(theme.gray),
-            )));
         } else {
             total_height = self.scrollback_pane.total_height(scrollback);
             let mut max_scroll = total_height.saturating_sub(content.height as usize);
@@ -1300,6 +1301,7 @@ impl UiState {
             .borders(Borders::LEFT)
             .border_style(Style::default().fg(theme.bg_light))
             .style(Style::default().bg(theme.bg_base));
+        let transcript_inner = block.inner(content);
         frame.render_widget(
             Paragraph::new(Text::from(lines))
                 .block(block)
@@ -1307,6 +1309,17 @@ impl UiState {
                 .scroll((0, 0)),
             content,
         );
+        if empty {
+            let elapsed = self.welcome_animation.elapsed(Instant::now());
+            render_welcome(
+                frame.buffer_mut(),
+                transcript_inner,
+                elapsed,
+                &snapshot.model,
+                snapshot.session_mode,
+                theme,
+            );
+        }
 
         // Timestamp is a right-side overlay, matching Grok's renderer: it is
         // visible but not part of the selectable/copyable text geometry.
@@ -4102,6 +4115,54 @@ mod tests {
         assert!(!ui.hit_map.regions().iter().any(|region| {
             matches!(&region.target, HitTarget::Overlay(name) if name == "timeline")
         }));
+    }
+
+    #[test]
+    fn empty_session_renders_cwd_and_whale_without_exposing_session_id() {
+        let mut session = SessionState::new("private-session-id".into(), 1);
+        session
+            .install_initial(SessionHistoryValue {
+                events: Vec::new(),
+                has_more: false,
+                projections: None,
+            })
+            .expect("empty session fixture");
+        assert!(session.set_projection("cwd", 1, json!("/work/project")));
+        assert!(session.set_projection("model", 1, json!("deepseek")));
+
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState::default();
+        let mut wide_terminal = Terminal::new(TestBackend::new(80, 24)).expect("wide terminal");
+        wide_terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render wide welcome");
+        let wide = buffer_text(wide_terminal.backend().buffer(), 80, 24);
+        let wide_buffer = wide_terminal.backend().buffer();
+        assert!(wide.contains("/work/project"));
+        assert!(wide.contains("DeepSeek Harness"));
+        assert!(wide.contains("Explore the uncharted!"));
+        assert!(wide.contains("Shift+Tab changes mode"));
+        assert!(!wide.contains("private-session-id"));
+        assert!(!wide.contains("No transcript events yet"));
+        assert!(wide_buffer.content.iter().any(|cell| {
+            cell.fg == ratatui::style::Color::Rgb(78, 111, 255)
+                || cell.bg == ratatui::style::Color::Rgb(78, 111, 255)
+        }));
+        assert!(wide_buffer.content.iter().any(|cell| {
+            cell.fg == ratatui::style::Color::Rgb(190, 225, 255)
+                || cell.bg == ratatui::style::Color::Rgb(190, 225, 255)
+        }));
+
+        let mut compact_terminal =
+            Terminal::new(TestBackend::new(40, 12)).expect("compact terminal");
+        compact_terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render compact welcome");
+        let compact = buffer_text(compact_terminal.backend().buffer(), 40, 12);
+        assert!(compact.contains("DeepSeek Harness"));
+        assert!(compact.contains("Shift+Tab changes mode"));
+        assert!(!compact.contains("Explore the uncharted!"));
+        assert!(!compact.contains("private-session-id"));
     }
 
     #[test]

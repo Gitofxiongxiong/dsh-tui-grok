@@ -365,13 +365,13 @@ pub fn render_semantic(
     );
     rows.push(SemanticRow {
         role: "header".into(),
-        text: format!("{} · {}", snapshot.session_title, connection),
+        text: format!("{} · {}", snapshot.cwd, connection),
         rect: layout.status_bar.into(),
     });
     if snapshot.transcript.is_empty() {
         rows.push(SemanticRow {
             role: "body-empty".into(),
-            text: "No transcript events yet".into(),
+            text: "DeepSeek Harness".into(),
             rect: layout.scrollback.into(),
         });
     } else {
@@ -587,7 +587,7 @@ pub fn render_semantic(
     let prompt_style = PromptStyleContract {
         focused: shell.owner() == KeyOwner::Prompt,
         compact: effective_compact(false, area.height),
-        title: Some(snapshot.session_title.clone()),
+        title: None,
         ..PromptStyleContract::default()
     };
     let prompt_info = PromptInfoContract {
@@ -729,10 +729,7 @@ mod tests {
                 height: 24,
             },
         );
-        assert_eq!(
-            frame.row_text("body-empty"),
-            Some("No transcript events yet")
-        );
+        assert_eq!(frame.row_text("body-empty"), Some("DeepSeek Harness"));
         assert_eq!(frame.focus_owner, "transcript");
         assert!(
             frame

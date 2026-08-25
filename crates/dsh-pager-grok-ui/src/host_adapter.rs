@@ -389,6 +389,8 @@ pub struct PromptSnapshot {
 pub struct GrokHostSnapshot {
     pub session_title: String,
     pub session_id: String,
+    #[serde(default)]
+    pub cwd: String,
     pub model: String,
     pub connection: String,
     pub status: Option<String>,
@@ -533,6 +535,20 @@ impl GrokHostSnapshot {
         session: &SessionState,
         control_plane: Option<&ControlPlaneStore>,
     ) -> Self {
+        let cwd = control_plane
+            .and_then(|store| store.snapshot(session.session_id()))
+            .and_then(|snapshot| snapshot.cwd.clone())
+            .or_else(|| {
+                session
+                    .projection("cwd")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| ".".to_string())
+            });
         let model = session
             .projection("model")
             .and_then(|value| value.as_str())
@@ -677,6 +693,7 @@ impl GrokHostSnapshot {
         Self {
             session_title: title,
             session_id: session.session_id().to_string(),
+            cwd,
             model,
             connection: format!("{:?}", session.connection_phase()).to_lowercase(),
             status: session.status_message().map(str::to_string),
@@ -715,6 +732,7 @@ impl GrokHostSnapshot {
         Self {
             session_title: "DeepSeek / Grok UI adapter".into(),
             session_id: "demo".into(),
+            cwd: "/work/demo".into(),
             model: "deepseek-reasoner".into(),
             connection: "connected".into(),
             status: None,
@@ -1315,6 +1333,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
     GrokHostSnapshot {
         session_title: format!("Session {session_id}"),
         session_id: session_id.clone(),
+        cwd: ".".into(),
         model: "deepseek".into(),
         connection: "connected".into(),
         status: None,
