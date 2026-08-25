@@ -29,7 +29,9 @@ Grok 的 transcript 不是“三种气泡”。每条历史是一个 `RenderBloc
 | 工具 `ToolCall` | Execute 等有；Read/Search/ListDir/Edit 默认无 | 无 | 多数 Collapsed 摘要行 | Execute/部分工具 `┃` 行波；Read 靠 VerbRun header |
 | Agent 正文 `AgentMessage` | 无 | 有，同用户消息 | 不可折叠 | 无 |
 
-用户口语里的“正在思考/跑工具时左边竖条会闪”，源码里不是开关闪烁，而是 **accent rail 的 `sin²` 行波**：
+用户口语里的“正在思考/跑工具时左边竖条会闪”，Grok 源码里不是开关闪烁，
+而是 **accent rail 的 `sin²` 行波**。DSH 本地按用户确认的节奏适配成固定线速度
+的移动高光带，仍保留连续的明暗包络：
 
 - 多行思考块：高光沿 `┃` 往下走。
 - 单行工具摘要：同一公式作用在一行上，看起来就是竖条明暗闪烁。
@@ -228,12 +230,27 @@ Expanded/Truncated 才出现 `$ command`、空行、terminal output 面板。tru
 - 运行/静态满色：`┃` U+2503（`accent_bar`；legacy `│`）
 - 折叠可分组且未选中：`❙` U+2759（`collapsed_accent`），颜色 `dim_accent=0.5`
 
-公式（`entry_renderer.rs` `WAVE_SPEED=0.15`，`wave_rows=32`）：
+Grok 基线公式（`entry_renderer.rs` `WAVE_SPEED=0.15`，`wave_rows=32`）：
 
 ```text
 brightness = sin²(tick * 0.15 + row_phase)
 period ≈ π / 0.15 ≈ 21 ticks ≈ 0.7s  （30fps）
 ```
+
+DSH 节奏适配不再让所有长度共享上述单点周期，而是把每个连续 animated rail
+投影为 `(local_row, rail_len)`，并用单调经过时间驱动高光中心：
+
+```text
+speed = 8 rows/s
+band = 4 rows
+gap = 6 rows
+cycle = (rail_len + band + gap) / speed
+```
+
+因此 1/4/12/24 行 rail 的完整周期约为 1.375/1.75/2.75/4.25 秒；相邻长度
+只改变完整遍历时间，不改变高光每秒经过的终端行数。单行工具摘要自然退化为
+带固定空档的平缓脉冲。渲染仍保持 33ms poll 以保证平滑度，实际相位来自
+`Instant` 而不是重绘计数，所以输入或通知导致的额外重绘不会加速行波。
 
 特殊态：
 

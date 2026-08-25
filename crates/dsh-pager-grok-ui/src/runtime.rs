@@ -367,6 +367,7 @@ struct UiState {
     timestamps_enabled: Option<bool>,
     status: Option<String>,
     frame: usize,
+    rail_wave_started_at: Option<Instant>,
     welcome_animation: WelcomeAnimation,
     hit_map: HitMap,
     geometry_lines: Vec<GeometryLine>,
@@ -1226,7 +1227,10 @@ impl UiState {
         let mut total_height = 0;
         let mut scroll_top = 0;
         let render_width = content.width.saturating_sub(1).max(1) as usize;
-        self.scrollback_pane.set_tick(self.frame as u64);
+        let now = Instant::now();
+        let started_at = *self.rail_wave_started_at.get_or_insert(now);
+        self.scrollback_pane
+            .set_wave_elapsed(now.saturating_duration_since(started_at));
         self.scrollback_pane
             .set_selected_target(self.selected_transcript.clone());
         self.scrollback_pane

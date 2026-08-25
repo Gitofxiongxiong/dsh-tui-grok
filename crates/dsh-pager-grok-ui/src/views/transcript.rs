@@ -5,7 +5,7 @@
 //! needs to inspect protocol JSON or flatten a tool result itself.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
 use dsh_pager::scrollback::{Scrollback, compute_paint_window};
@@ -51,6 +51,8 @@ pub struct RichPaintLine {
     pub rail_accent: Option<Color>,
     /// Logical row phase inside the entry's rail.
     pub rail_wave_row: u16,
+    /// Number of terminal rows in this contiguous animated rail segment.
+    pub rail_wave_len: u16,
     pub selectable: bool,
     pub background: Option<Color>,
     pub copy_text: String,
@@ -193,7 +195,7 @@ impl ProjectionInfo {
 pub struct ScrollbackPane {
     width: usize,
     show_timestamps: bool,
-    tick: u64,
+    wave_elapsed_ms: u64,
     entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
     expanded_entries: HashSet<DshRenderEntryId>,
     expanded_blocks: HashSet<(DshRenderEntryId, usize)>,
@@ -206,7 +208,7 @@ impl ScrollbackPane {
     pub fn clear(&mut self) {
         self.width = 0;
         self.show_timestamps = true;
-        self.tick = 0;
+        self.wave_elapsed_ms = 0;
         self.entries.clear();
         self.expanded_entries.clear();
         self.expanded_blocks.clear();
@@ -219,10 +221,10 @@ impl ScrollbackPane {
         self.sync_with_options(scrollback, width, theme, true);
     }
 
-    /// Set the animation frame without invalidating the semantic-line cache.
-    /// Running accents are recolored when visible lines are materialized.
-    pub fn set_tick(&mut self, tick: u64) {
-        self.tick = tick;
+    /// Set monotonic animation time without invalidating the semantic-line
+    /// cache. Running accents are recolored when visible lines materialize.
+    pub fn set_wave_elapsed(&mut self, elapsed: Duration) {
+        self.wave_elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     }
 
     /// Pass the runtime's current transcript hit target into the projection.
@@ -479,7 +481,7 @@ impl ScrollbackPane {
                     .is_some_and(|target| line_matches_target(&line, target));
                 apply_dynamic_accent(
                     &mut line,
-                    self.tick,
+                    self.wave_elapsed_ms,
                     *Theme::current(),
                     cached.entry.finished_at_ms,
                     now_epoch_ms(),
@@ -660,7 +662,8 @@ fn semantic_lines(
                 rail_animated: line_rail && rail_animated,
                 rail_flash: line_rail && rail_flash,
                 rail_accent: line_rail.then_some(rail_accent),
-                rail_wave_row: lines.len().min(u16::MAX as usize) as u16,
+                rail_wave_row: 0,
+                rail_wave_len: 0,
                 selectable: semantic_line.selectable,
                 background: projection.background,
                 copy_text,
@@ -688,7 +691,8 @@ fn semantic_lines(
                         rail_animated: line_rail && rail_animated,
                         rail_flash: line_rail && rail_flash,
                         rail_accent: line_rail.then_some(rail_accent),
-                        rail_wave_row: lines.len().min(u16::MAX as usize) as u16,
+                        rail_wave_row: 0,
+                        rail_wave_len: 0,
                         selectable: false,
                         background: projection.background,
                         copy_text: String::new(),
@@ -731,6 +735,7 @@ fn semantic_lines(
                 rail_flash: false,
                 rail_accent: None,
                 rail_wave_row: 0,
+                rail_wave_len: 0,
                 selectable: false,
                 background: projection.background,
                 copy_text: String::new(),
@@ -751,6 +756,7 @@ fn semantic_lines(
             rail_flash: false,
             rail_accent: None,
             rail_wave_row: 0,
+            rail_wave_len: 0,
             selectable: false,
             background: projection.background,
             copy_text: String::new(),
@@ -760,7 +766,28 @@ fn semantic_lines(
             line: blank,
         });
     }
+    assign_rail_wave_geometry(&mut lines);
     lines
+}
+
+fn assign_rail_wave_geometry(lines: &mut [RichPaintLine]) {
+    let mut start = 0;
+    while start < lines.len() {
+        if !lines[start].rail_animated {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < lines.len() && lines[end].rail_animated {
+            end += 1;
+        }
+        let len = (end - start).min(u16::MAX as usize) as u16;
+        for (row, line) in lines[start..end].iter_mut().enumerate() {
+            line.rail_wave_row = row.min(u16::MAX as usize) as u16;
+            line.rail_wave_len = len;
+        }
+        start = end;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1433,16 +1460,30 @@ fn decorate_line(
     line
 }
 
-const WAVE_SPEED: f32 = 0.15;
-const WAVE_ROWS: u16 = 32;
+const WAVE_ROWS_PER_SECOND: f64 = 8.0;
+const WAVE_BAND_ROWS: f64 = 4.0;
+const WAVE_GAP_ROWS: f64 = 6.0;
 const FINISH_FLASH_DURATION_MS: u64 = 400;
 
-fn wave_brightness(tick: u64, row: u16) -> f32 {
-    use std::f32::consts::PI;
+fn wave_cycle_seconds(rail_len: u16) -> f64 {
+    (f64::from(rail_len.max(1)) + WAVE_BAND_ROWS + WAVE_GAP_ROWS) / WAVE_ROWS_PER_SECOND
+}
 
-    let phase = (row as f32 / WAVE_ROWS.max(1) as f32) * 2.0 * PI;
-    let value = (tick as f32 * WAVE_SPEED + phase).sin();
-    value * value
+fn wave_brightness(elapsed_ms: u64, row: u16, rail_len: u16) -> f32 {
+    use std::f64::consts::FRAC_PI_2;
+
+    let rail_len = rail_len.max(row.saturating_add(1)).max(1);
+    let travel_rows = wave_cycle_seconds(rail_len) * WAVE_ROWS_PER_SECOND;
+    let traveled_rows = (elapsed_ms as f64 / 1_000.0 * WAVE_ROWS_PER_SECOND) % travel_rows;
+    let half_band = WAVE_BAND_ROWS / 2.0;
+    let band_center = traveled_rows - half_band;
+    let row_center = f64::from(row) + 0.5;
+    let normalized_distance = (row_center - band_center).abs() / half_band;
+    if normalized_distance >= 1.0 {
+        return 0.0;
+    }
+    let envelope = (normalized_distance * FRAC_PI_2).cos();
+    (envelope * envelope) as f32
 }
 
 fn blend_color(base: Color, foreground: Color, opacity: f32) -> Option<Color> {
@@ -1480,7 +1521,7 @@ fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
 
 fn apply_dynamic_accent(
     line: &mut RichPaintLine,
-    tick: u64,
+    wave_elapsed_ms: u64,
     theme: Theme,
     finished_at_ms: Option<u64>,
     now_ms: Option<u64>,
@@ -1508,7 +1549,7 @@ fn apply_dynamic_accent(
         blend_color(
             background,
             theme.text_primary,
-            wave_brightness(tick, line.rail_wave_row),
+            wave_brightness(wave_elapsed_ms, line.rail_wave_row, line.rail_wave_len),
         )
         .unwrap_or(theme.text_primary)
     };
@@ -3002,6 +3043,84 @@ mod tests {
     }
 
     #[test]
+    fn rail_wave_cycle_scales_with_length_at_fixed_row_speed() {
+        assert!((wave_cycle_seconds(1) - 1.375).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(4) - 1.75).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(12) - 2.75).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(24) - 4.25).abs() < f64::EPSILON);
+
+        let row_zero_peak = wave_brightness(313, 0, 24);
+        let row_eight_peak_one_second_later = wave_brightness(1_313, 8, 24);
+        assert!(row_zero_peak > 0.999);
+        assert!(row_eight_peak_one_second_later > 0.999);
+    }
+
+    #[test]
+    fn running_rail_geometry_uses_its_contiguous_rendered_length() {
+        let mut scrollback = Scrollback::default();
+        for (seq, data) in [
+            (
+                1,
+                json!({
+                    "turn": 1,
+                    "step": 0,
+                    "chunk": {"type": "block-start", "index": 0, "blockType": "reasoning"}
+                }),
+            ),
+            (
+                2,
+                json!({
+                    "turn": 1,
+                    "step": 0,
+                    "chunk": {
+                        "type": "reasoning-delta",
+                        "index": 0,
+                        "text": "first line\nsecond line\nthird line"
+                    }
+                }),
+            ),
+        ] {
+            scrollback.apply_event(&HistoryEntry {
+                event: SessionEvent {
+                    event_type: "assistant/chunk".into(),
+                    seq,
+                    time: 1_787_500_000_000.0 + seq as f64,
+                    data,
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+
+        let mut pane = ScrollbackPane::default();
+        pane.sync(&mut scrollback, 80, *Theme::current());
+        let animated = pane
+            .visible_lines(&mut scrollback, 0, 20)
+            .into_iter()
+            .filter(|line| line.rail_animated)
+            .collect::<Vec<_>>();
+        let expected_len = animated.len().min(u16::MAX as usize) as u16;
+        assert!(
+            expected_len >= 4,
+            "header and reasoning rows should animate"
+        );
+        assert!(
+            animated
+                .iter()
+                .all(|line| line.rail_wave_len == expected_len)
+        );
+        assert_eq!(
+            animated
+                .iter()
+                .map(|line| line.rail_wave_row)
+                .collect::<Vec<_>>(),
+            (0..expected_len).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn running_tool_rail_uses_traveling_wave_colors() {
         let mut scrollback = Scrollback::default();
         scrollback.apply_event(&HistoryEntry {
@@ -3026,22 +3145,24 @@ mod tests {
         let theme = *Theme::current();
         let mut pane = ScrollbackPane::default();
         pane.sync(&mut scrollback, 80, theme);
-        pane.set_tick(0);
+        pane.set_wave_elapsed(Duration::ZERO);
         let first = pane
             .visible_lines(&mut scrollback, 0, 20)
             .into_iter()
             .find(|line| line.rail_animated)
             .expect("running rail");
-        pane.set_tick(10);
+        pane.set_wave_elapsed(Duration::from_millis(313));
         let second = pane
             .visible_lines(&mut scrollback, 0, 20)
             .into_iter()
             .find(|line| line.rail_animated)
-            .expect("running rail at next tick");
+            .expect("running rail after elapsed time");
+        assert_eq!(first.rail_wave_row, 0);
+        assert_eq!(first.rail_wave_len, 1);
         assert_ne!(
             first.line.spans.first().and_then(|span| span.style.fg),
             second.line.spans.first().and_then(|span| span.style.fg),
-            "running rail should be recolored by the frame tick"
+            "running rail should be recolored by monotonic elapsed time"
         );
         assert_ne!(
             first.line.spans.first().and_then(|span| span.style.fg),
