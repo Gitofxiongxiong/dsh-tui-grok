@@ -10,8 +10,8 @@ use crate::{
     scrollback::tool::{
         EditToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock, ReadLine,
         ReadToolCallBlock, SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode,
-        SearchToolCallBlock, ToolCallBlock, ToolDiff, WebFetchToolCallBlock, WebSearchSource,
-        WebSearchToolCallBlock,
+        SearchToolCallBlock, SubagentToolCallBlock, SubagentToolKind, ToolCallBlock, ToolDiff,
+        WebFetchToolCallBlock, WebSearchSource, WebSearchToolCallBlock,
     },
     views::execute_tool_adapter::project_execute_tool,
 };
@@ -222,6 +222,14 @@ pub fn project_tool(block: &DshRenderBlock) -> Option<ToolCallBlock> {
         apply_error(&mut fetch.error, result.as_deref(), "Fetch failed");
         return Some(ToolCallBlock::WebFetch(fetch));
     }
+    if is_subagent_tool_name(name) {
+        return Some(ToolCallBlock::Subagent(project_subagent(
+            name,
+            args.as_ref(),
+            view.as_ref(),
+            result.as_deref(),
+        )));
+    }
 
     let title = result_view
         .and_then(DshToolResultView::title)
@@ -368,10 +376,88 @@ fn apply_error(target: &mut Option<String>, result: Option<&DshToolResult>, fall
     }
 }
 
+fn is_subagent_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "subagent" | "task" | "Task" | "spawn_subagent" | "spawn_agent"
+    )
+}
+
+fn project_subagent(
+    name: &str,
+    args: Option<&Value>,
+    view: Option<&DshToolCallView>,
+    result: Option<&DshToolResult>,
+) -> SubagentToolCallBlock {
+    let description = subagent_description(name, args, view);
+    let background = args
+        .and_then(|value| value.get("background"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let kind = if result.is_some_and(|result| result.is_error) {
+        SubagentToolKind::Failed
+    } else if result.is_none() || !background {
+        SubagentToolKind::Running
+    } else {
+        SubagentToolKind::Started
+    };
+    let mut block = SubagentToolCallBlock::new(description, kind);
+    apply_error(&mut block.error, result, "Subagent failed");
+    if block.error.is_some() {
+        block.kind = SubagentToolKind::Failed;
+    }
+    block
+}
+
+fn subagent_description(
+    name: &str,
+    args: Option<&Value>,
+    view: Option<&DshToolCallView>,
+) -> String {
+    if let Some(description) = argument_string(args, &["description", "title", "task"]) {
+        return description.to_string();
+    }
+    if let Some(title) = view.map(DshToolCallView::title) {
+        let title = title.trim();
+        if !title.is_empty() && !title.eq_ignore_ascii_case(name) {
+            return title.to_string();
+        }
+    }
+    if let Some(prompt) = argument_string(args, &["prompt"])
+        && let Some(line) = prompt.lines().map(str::trim).find(|line| !line.is_empty())
+    {
+        return line.trim_start_matches('#').trim().to_string();
+    }
+    name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dsh_pager::{DshReadLine, DshToolResult};
+
+    #[test]
+    fn subagent_prefers_argument_description_over_tool_name_title() {
+        let block = DshRenderBlock::ToolCall {
+            name: "subagent".into(),
+            call_id: Some("call-1".into()),
+            arguments: r#"{"description":"分析 Rust 工作区架构","prompt":"only read"}"#.into(),
+            edit: None,
+            view: Some(DshToolCallView::Generic {
+                title: "subagent".into(),
+                kind: DshToolKind::Other,
+                raw_input: None,
+                content: Vec::new(),
+                locations: Vec::new(),
+            }),
+            result: None,
+        };
+        let ToolCallBlock::Subagent(subagent) = project_tool(&block).expect("subagent") else {
+            panic!("wrong block");
+        };
+        assert_eq!(subagent.description, "分析 Rust 工作区架构");
+        assert_eq!(subagent.kind, SubagentToolKind::Running);
+    }
 
     #[test]
     fn typed_read_result_maps_without_flattening_lines() {

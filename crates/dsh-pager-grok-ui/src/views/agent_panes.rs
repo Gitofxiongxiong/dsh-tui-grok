@@ -13,10 +13,16 @@ use ratatui::{
 };
 
 use crate::{
+    glyphs,
     host_adapter::{AgentSnapshot, ChildTranscriptView, FeatureStatus, SubagentRow, TaskRow},
     render::line_utils::truncate_str,
     theme::Theme,
 };
+
+/// Show each watcher pulse frame for this many animation ticks.
+/// Copied from Grok's `MONITOR_PULSE_DIVISOR`: at ~30fps, 8 ticks ≈ 267ms
+/// per frame, so `○ ◎ ◉ ◎` completes in about 1.07s.
+pub const MONITOR_PULSE_DIVISOR: u64 = 8;
 
 /// Stable selection identity across task/subagent snapshot refreshes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -382,16 +388,38 @@ pub fn render_agent_detail_content(
     id: &AgentItemId,
     child: Option<&ChildTranscriptView>,
     theme: &Theme,
-) {
+) -> Rect {
+    render_agent_detail_chrome(
+        buffer,
+        area,
+        snapshot,
+        id,
+        child.and_then(|view| view.error.as_deref()),
+        child.is_none(),
+        theme,
+    )
+}
+
+/// Paint detail chrome and return the inner body rect reserved for the child
+/// Grok scrollback (or empty when a status line occupies the body).
+pub fn render_agent_detail_chrome(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &AgentSnapshot,
+    id: &AgentItemId,
+    error: Option<&str>,
+    loading: bool,
+    theme: &Theme,
+) -> Rect {
     if area.width == 0 || area.height == 0 {
-        return;
+        return area;
     }
     let mut row = 0u16;
     match id {
         AgentItemId::Task(id) => {
             let Some(task) = snapshot.tasks.iter().find(|task| task.id == *id) else {
                 put(buffer, area, "Task no longer exists", theme.warning, theme);
-                return;
+                return Rect::new(area.x, area.y, area.width, 0);
             };
             put_at(
                 buffer,
@@ -430,6 +458,7 @@ pub fn render_agent_detail_content(
                     theme,
                     false,
                 );
+                row = row.saturating_add(1);
             }
         }
         AgentItemId::Subagent(id) => {
@@ -441,7 +470,7 @@ pub fn render_agent_detail_content(
                     theme.warning,
                     theme,
                 );
-                return;
+                return Rect::new(area.x, area.y, area.width, 0);
             };
             put_at(
                 buffer,
@@ -500,64 +529,28 @@ pub fn render_agent_detail_content(
                 row = row.saturating_add(1);
             }
             row = row.saturating_add(1);
-            match child {
-                Some(view) if view.error.is_some() => {
-                    put_at(
-                        buffer,
-                        area,
-                        row,
-                        &format!(
-                            "history unavailable: {}",
-                            view.error.as_deref().unwrap_or("unknown")
-                        ),
-                        theme.warning,
-                        theme,
-                        false,
-                    );
-                }
-                Some(view) if view.rows.is_empty() => {
-                    put_at(
-                        buffer,
-                        area,
-                        row,
-                        "Child transcript is empty",
-                        theme.gray,
-                        theme,
-                        false,
-                    );
-                }
-                Some(view) => {
-                    let body_bottom = area.height.saturating_sub(1);
-                    for transcript in &view.rows {
-                        if row >= body_bottom {
-                            break;
-                        }
-                        if transcript.text.trim().is_empty() {
-                            continue;
-                        }
-                        put_at(
-                            buffer,
-                            area,
-                            row,
-                            &format!("{}  {}", transcript.label, transcript.text),
-                            theme.text_secondary,
-                            theme,
-                            false,
-                        );
-                        row = row.saturating_add(1);
-                    }
-                }
-                None => {
-                    put_at(
-                        buffer,
-                        area,
-                        row,
-                        "Loading child transcript…",
-                        theme.gray,
-                        theme,
-                        false,
-                    );
-                }
+            if let Some(error) = error {
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    &format!("history unavailable: {error}"),
+                    theme.warning,
+                    theme,
+                    false,
+                );
+                row = row.saturating_add(1);
+            } else if loading {
+                put_at(
+                    buffer,
+                    area,
+                    row,
+                    "Loading child transcript…",
+                    theme.gray,
+                    theme,
+                    false,
+                );
+                row = row.saturating_add(1);
             }
         }
     }
@@ -570,6 +563,20 @@ pub fn render_agent_detail_content(
         theme,
         false,
     );
+    let body_top = area
+        .y
+        .saturating_add(row.min(area.height.saturating_sub(1)));
+    let body_bottom = area.bottom().saturating_sub(1);
+    if body_top >= body_bottom || error.is_some() || loading || matches!(id, AgentItemId::Task(_)) {
+        Rect::new(area.x, body_top, area.width, 0)
+    } else {
+        Rect::new(
+            area.x,
+            body_top,
+            area.width,
+            body_bottom.saturating_sub(body_top),
+        )
+    }
 }
 
 /// A watcher cue shown next to the normal turn status when background work is
@@ -585,7 +592,7 @@ pub fn render_watcher_cue(
     if area.width == 0 || area.height == 0 {
         return None;
     }
-    let frame = ["○", "◎", "◉", "◎"][(tick as usize) % 4];
+    let frame = watcher_pulse_frame(tick);
     put_at(
         buffer,
         area,
@@ -596,6 +603,11 @@ pub fn render_watcher_cue(
         false,
     );
     Some(area)
+}
+
+pub fn watcher_pulse_frame(tick: u64) -> &'static str {
+    let frames = glyphs::monitor_icon_frames();
+    frames[(tick / MONITOR_PULSE_DIVISOR) as usize % frames.len()]
 }
 
 pub fn watcher_label(snapshot: &AgentSnapshot) -> Option<String> {
@@ -868,35 +880,16 @@ mod tests {
     }
 
     #[test]
-    fn subagent_detail_renders_child_transcript_instead_of_metadata_only() {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 8));
+    fn subagent_detail_chrome_reserves_body_for_child_scrollback() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
         let snapshot = snapshot();
         let child = ChildTranscriptView {
             child_id: "child-a".into(),
-            rows: vec![crate::host_adapter::TranscriptRow {
-                id: dsh_pager::DshRenderEntryId::Event { seq: 1 },
-                created_at_ms: None,
-                started_at_ms: None,
-                finished_at_ms: None,
-                label: "user".into(),
-                text: "delegate this".into(),
-                kind: dsh_pager::DshRenderKind::User,
-                visibility: dsh_pager::DshRenderVisibility::Visible,
-                finish: dsh_pager::DshRenderFinish::Completed,
-                group_key: None,
-                selectable: true,
-                source_seq: 1,
-                seq: dsh_pager::DshSeq::new(1),
-                content: dsh_pager::DshRenderContent {
-                    blocks: Vec::new(),
-                    fallback: String::new(),
-                },
-            }],
             error: None,
         };
-        render_agent_detail_content(
+        let body = render_agent_detail_content(
             &mut buffer,
-            Rect::new(0, 0, 80, 8),
+            Rect::new(0, 0, 80, 12),
             &snapshot,
             &AgentItemId::Subagent("child-a".into()),
             Some(&child),
@@ -907,8 +900,25 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("delegate this"));
-        assert!(text.contains("does not cancel"));
+        assert!(text.contains("research"), "{text}");
+        assert!(text.contains("does not cancel"), "{text}");
+        assert!(body.height > 0, "{body:?}");
+        assert!(body.y > 0, "{body:?}");
+    }
+
+    #[test]
+    fn watcher_pulse_holds_each_frame_for_the_grok_divisor() {
+        let frames = crate::glyphs::monitor_icon_frames();
+        assert_eq!(watcher_pulse_frame(0), frames[0]);
+        assert_eq!(
+            watcher_pulse_frame(MONITOR_PULSE_DIVISOR.saturating_sub(1)),
+            frames[0]
+        );
+        assert_eq!(watcher_pulse_frame(MONITOR_PULSE_DIVISOR), frames[1]);
+        assert_ne!(
+            watcher_pulse_frame(0),
+            watcher_pulse_frame(MONITOR_PULSE_DIVISOR)
+        );
     }
 
     #[test]

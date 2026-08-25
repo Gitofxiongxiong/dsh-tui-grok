@@ -44,7 +44,7 @@ use crate::geometry::{
 };
 use crate::host_adapter::{
     AgentSnapshot, ChildTranscriptView, FeatureStatus, FileSearchRow, FileSearchSnapshot,
-    GrokHostSnapshot, MediaSnapshot, SuggestionSnapshot, child_transcript_from_history,
+    GrokHostSnapshot, MediaSnapshot, SuggestionSnapshot, child_scrollback_from_history,
     media_snapshot_from_scrollback, resume_picker_entries, resume_picker_search_hits,
 };
 use crate::input::{PromptEditor, key::KeyShortcut, line_editor::LineEditOutcome};
@@ -64,7 +64,7 @@ use crate::views::{
     },
     agent_hints::{self, ActivePane, build_hints, prompt_focus_hint},
     agent_panes::{
-        AgentItemId, AgentPaneController, inline_agent_pane_height, render_agent_detail_content,
+        AgentItemId, AgentPaneController, inline_agent_pane_height, render_agent_detail_chrome,
         render_agent_tasks_content, render_inline_agent_panes, render_watcher_cue, watcher_label,
     },
     agent_status::AgentStatusBar,
@@ -102,6 +102,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ANIMATION_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const NOTIFICATION_BUDGET: usize = 256;
 const TRANSCRIPT_DOUBLE_CLICK: Duration = Duration::from_millis(450);
+const CHILD_HISTORY_REFRESH: Duration = Duration::from_millis(400);
 
 fn contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
@@ -124,6 +125,40 @@ fn now_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default()
+}
+
+fn paint_child_scrollback(
+    pane: &mut DshScrollbackHost,
+    scroll_top: &mut usize,
+    follow: &mut bool,
+    wave_started_at: &mut Option<Instant>,
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    scrollback: &mut dsh_pager::scrollback::Scrollback,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let now = Instant::now();
+    let started_at = *wave_started_at.get_or_insert(now);
+    pane.set_wave_tick(animation_tick(now.saturating_duration_since(started_at)));
+    let width = area.width.max(1) as usize;
+    pane.sync_with_options(scrollback, width, *theme, false);
+    let total_height = pane.total_height(scrollback);
+    let max_scroll = total_height.saturating_sub(area.height as usize);
+    if *follow {
+        *scroll_top = max_scroll;
+    }
+    *scroll_top = (*scroll_top).min(max_scroll);
+    let next_top = pane.prepare_viewport(scrollback, *scroll_top, area.height, *follow);
+    *scroll_top = next_top.min(max_scroll);
+    if *scroll_top >= max_scroll {
+        *follow = true;
+    }
+    for paint in pane.visible_lines(scrollback, *scroll_top, area.height) {
+        let _ = pane.paint_buffer_line(buf, area, &paint, None);
+    }
 }
 
 fn subagent_catalog_unsupported(error: &PagerError) -> bool {
@@ -265,6 +300,9 @@ fn run_loop(
                 ui.status = Some(format!("notification error: {error}"));
             }
         }
+        if ui.shell.overlay() == Overlay::AgentTasks {
+            ui.refresh_open_child_transcript(transport, session);
+        }
         let frame_links = ui.frame_links.clone();
         if let Err(error) = terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
@@ -274,12 +312,16 @@ fn run_loop(
         }
         let welcome_animating =
             ui.scrollback_pane.is_empty() && ui.welcome_animation.is_animating(Instant::now());
-        let poll_interval =
-            if session.running() || ui.scrollback_pane.is_animating() || welcome_animating {
-                ANIMATION_POLL_INTERVAL
-            } else {
-                POLL_INTERVAL
-            };
+        let poll_interval = if session.running()
+            || ui.scrollback_pane.is_animating()
+            || welcome_animating
+            || ui.watchers_live
+            || ui.child_scrollback_pane.is_animating()
+        {
+            ANIMATION_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
         match event::poll(poll_interval) {
             Ok(false) => continue,
             Ok(true) => {}
@@ -479,7 +521,13 @@ struct UiState {
     agent_pane: AgentPaneController,
     agent_detail: Option<AgentItemId>,
     child_transcript: Option<ChildTranscriptView>,
+    child_scrollback: Option<dsh_pager::scrollback::Scrollback>,
+    child_scrollback_pane: DshScrollbackHost,
+    child_scroll_top: usize,
+    child_follow: bool,
+    child_history_at: Option<Instant>,
     last_agent_item_click: Option<(Instant, AgentItemId)>,
+    watchers_live: bool,
     dashboard: DashboardModel,
     workspace_tree: WorkspaceTreeController,
     dashboard_revision: Option<u64>,
@@ -1039,6 +1087,12 @@ impl UiState {
                 priority: 5,
             });
         }
+        self.watchers_live = watcher_label(&snapshot.agent).is_some();
+        let animation_tick_now = {
+            let now = Instant::now();
+            let started_at = *self.rail_wave_started_at.get_or_insert(now);
+            animation_tick(now.saturating_duration_since(started_at))
+        };
         let turn_status_output = if snapshot.turn_status.visible {
             render_turn_status(
                 frame.buffer_mut(),
@@ -1064,7 +1118,7 @@ impl UiState {
                 frame.buffer_mut(),
                 agent_layout.turn_status,
                 &snapshot.agent,
-                self.frame as u64,
+                animation_tick_now,
                 theme,
             ) {
                 self.hit_map.insert(crate::geometry::HitRegion {
@@ -1876,15 +1930,36 @@ impl UiState {
         let buf = frame.buffer_mut();
         if let Some(content) = render_modal_window(buf, area, &mut self.modal, &config, theme) {
             let agent = snapshot.agent.clone();
-            if let Some(id) = self.agent_detail.as_ref() {
-                render_agent_detail_content(
+            if let Some(id) = self.agent_detail.clone() {
+                let error = self
+                    .child_transcript
+                    .as_ref()
+                    .and_then(|view| view.error.as_deref());
+                let loading = self.child_scrollback.is_none() && error.is_none();
+                let body = render_agent_detail_chrome(
                     buf,
                     content.content,
                     &agent,
-                    id,
-                    self.child_transcript.as_ref(),
+                    &id,
+                    error,
+                    loading,
                     theme,
                 );
+                if let Some(mut scrollback) = self.child_scrollback.take() {
+                    if body.height > 0 {
+                        paint_child_scrollback(
+                            &mut self.child_scrollback_pane,
+                            &mut self.child_scroll_top,
+                            &mut self.child_follow,
+                            &mut self.rail_wave_started_at,
+                            buf,
+                            body,
+                            &mut scrollback,
+                            theme,
+                        );
+                    }
+                    self.child_scrollback = Some(scrollback);
+                }
             } else {
                 render_agent_tasks_content(buf, content.content, &agent, &self.agent_pane, theme);
             }
@@ -1988,7 +2063,7 @@ impl UiState {
                     return Ok(false);
                 }
                 if name == "watcher-cue" {
-                    self.agent_detail = None;
+                    self.clear_agent_detail();
                     self.shell.open_agent_tasks();
                     self.status = Some("Agent tasks opened".into());
                     return Ok(false);
@@ -2092,8 +2167,7 @@ impl UiState {
             }
             ShellAction::OpenAgentTasks => {
                 self.agent_pane.clear();
-                self.agent_detail = None;
-                self.child_transcript = None;
+                self.clear_agent_detail();
                 self.refresh_agent_subagents(transport, session, true);
                 let snapshot = GrokHostSnapshot::from_session_with_control_plane(
                     session,
@@ -2274,7 +2348,10 @@ impl UiState {
                 self.handle_agent_tasks_key(key, transport, session);
                 Ok(false)
             }
-            ShellAction::AgentTasksMouse(_) => Ok(false),
+            ShellAction::AgentTasksMouse(mouse) => {
+                self.handle_agent_tasks_mouse(mouse, transport, session);
+                Ok(false)
+            }
             ShellAction::DashboardKey(key) => {
                 self.handle_dashboard_key(key, transport, session)?;
                 Ok(false)
@@ -2630,19 +2707,19 @@ impl UiState {
         if self.agent_detail.is_some() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    self.agent_detail = None;
-                    self.child_transcript = None;
-                    self.shell.close_overlay();
+                    self.close_agent_overlay();
                     self.status = Some("Agent detail closed".into());
                 }
-                KeyCode::Up | KeyCode::Char('k') => self.agent_pane.move_selection(-1),
-                KeyCode::Down | KeyCode::Char('j') => self.agent_pane.move_selection(1),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_child_transcript(-3),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_child_transcript(3),
+                KeyCode::PageUp => self.scroll_child_transcript(-12),
+                KeyCode::PageDown => self.scroll_child_transcript(12),
                 _ => {}
             }
             return;
         }
         if key.code == KeyCode::Esc {
-            self.shell.close_overlay();
+            self.close_agent_overlay();
             self.status = Some("Agent tasks closed".into());
             return;
         }
@@ -2717,48 +2794,151 @@ impl UiState {
     fn open_agent_detail(
         &mut self,
         transport: &mut RpcTransport,
-        _session: &SessionState,
+        session: &SessionState,
         agent: &AgentSnapshot,
         id: AgentItemId,
     ) {
         self.agent_detail = Some(id.clone());
         self.child_transcript = None;
-        let AgentItemId::Subagent(child_id) = &id else {
+        self.child_scrollback = None;
+        self.child_scrollback_pane.clear();
+        self.child_scroll_top = 0;
+        self.child_follow = true;
+        self.child_history_at = None;
+        if matches!(id, AgentItemId::Task(_)) {
             self.status = Some("Agent detail opened".into());
             return;
+        }
+        self.load_child_transcript(transport, session, agent, true);
+    }
+
+    fn refresh_open_child_transcript(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) {
+        let Some(AgentItemId::Subagent(_)) = &self.agent_detail else {
+            return;
         };
-        let Some(row) = agent.subagents.iter().find(|row| row.id == *child_id) else {
-            self.status = Some("Subagent no longer exists".into());
+        if self
+            .child_history_at
+            .is_some_and(|at| at.elapsed() < CHILD_HISTORY_REFRESH)
+        {
+            return;
+        }
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        self.load_child_transcript(transport, session, &snapshot.agent, false);
+    }
+
+    fn load_child_transcript(
+        &mut self,
+        transport: &mut RpcTransport,
+        _session: &SessionState,
+        agent: &AgentSnapshot,
+        announce: bool,
+    ) {
+        let Some(AgentItemId::Subagent(child_id)) = self.agent_detail.clone() else {
+            return;
+        };
+        let Some(row) = agent.subagents.iter().find(|row| row.id == child_id) else {
+            self.child_transcript = Some(ChildTranscriptView {
+                child_id,
+                error: Some("Subagent no longer exists".into()),
+            });
+            self.child_scrollback = None;
             return;
         };
         let Some(address) = row.address() else {
             self.child_transcript = Some(ChildTranscriptView {
                 child_id: child_id.clone(),
-                rows: Vec::new(),
                 error: Some("no durable child session for this job yet".into()),
             });
-            self.status = Some("Subagent job has no child session yet".into());
+            self.child_scrollback = None;
+            if announce {
+                self.status = Some("Subagent job has no child session yet".into());
+            }
             return;
         };
+        self.child_history_at = Some(Instant::now());
         match dsh_pager::peek_subagent_history(transport, &address, 100) {
             Ok(history) => {
-                let rows = child_transcript_from_history(&history.events);
-                let count = rows.len();
+                let scrollback = child_scrollback_from_history(&history.events);
+                let count = scrollback.entries().len();
                 self.child_transcript = Some(ChildTranscriptView {
                     child_id: child_id.clone(),
-                    rows,
                     error: None,
                 });
-                self.status = Some(format!("Opened child transcript ({count} entries)"));
+                self.child_scrollback = Some(scrollback);
+                self.child_scrollback_pane.clear();
+                if announce {
+                    self.status = Some(format!("Opened child transcript ({count} entries)"));
+                }
             }
             Err(error) => {
                 self.child_transcript = Some(ChildTranscriptView {
                     child_id: child_id.clone(),
-                    rows: Vec::new(),
                     error: Some(error.to_string()),
                 });
-                self.status = Some(format!("Child history unavailable: {error}"));
+                self.child_scrollback = None;
+                if announce {
+                    self.status = Some(format!("Child history unavailable: {error}"));
+                }
             }
+        }
+    }
+
+    fn handle_agent_tasks_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        _transport: &mut RpcTransport,
+        _session: &SessionState,
+    ) {
+        match handle_modal_mouse(&mut self.modal, mouse.kind, mouse.column, mouse.row) {
+            ModalWindowOutcome::CloseRequested => {
+                self.close_agent_overlay();
+                self.status = Some("Agent detail closed".into());
+                return;
+            }
+            ModalWindowOutcome::ShortcutActivated(_) => {
+                self.close_agent_overlay();
+                self.status = Some("Agent tasks closed".into());
+                return;
+            }
+            _ => {}
+        }
+        if self.agent_detail.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_child_transcript(-3),
+                MouseEventKind::ScrollDown => self.scroll_child_transcript(3),
+                _ => {}
+            }
+        }
+    }
+
+    fn clear_agent_detail(&mut self) {
+        self.agent_detail = None;
+        self.child_transcript = None;
+        self.child_scrollback = None;
+        self.child_scrollback_pane.clear();
+        self.child_scroll_top = 0;
+        self.child_follow = true;
+        self.child_history_at = None;
+    }
+
+    fn close_agent_overlay(&mut self) {
+        self.clear_agent_detail();
+        self.shell.close_overlay();
+    }
+
+    fn scroll_child_transcript(&mut self, delta: isize) {
+        self.child_follow = false;
+        if delta.is_negative() {
+            self.child_scroll_top = self.child_scroll_top.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.child_scroll_top = self.child_scroll_top.saturating_add(delta as usize);
         }
     }
 

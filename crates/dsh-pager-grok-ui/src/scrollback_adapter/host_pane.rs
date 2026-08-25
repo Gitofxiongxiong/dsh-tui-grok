@@ -1499,8 +1499,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            text.contains("subagent") || text.contains("Ran") || text.contains("分析"),
-            "grouped four subagent tools should paint: {text}"
+            text.contains("分析") || text.contains("Ran"),
+            "grouped four subagent tools should paint descriptions or a verb-group header: {text}"
         );
         assert!(host.stats().revision_syncs >= 1);
         assert!(!host.is_empty());

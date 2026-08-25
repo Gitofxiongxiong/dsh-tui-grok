@@ -10,6 +10,7 @@ mod list_dir;
 mod other;
 mod read;
 mod search;
+mod subagent;
 mod web_fetch;
 mod web_search;
 
@@ -21,6 +22,7 @@ pub use read::{LineRange, ReadLine, ReadToolCallBlock};
 pub use search::{
     SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode, SearchToolCallBlock,
 };
+pub use subagent::{SubagentToolCallBlock, SubagentToolKind};
 pub use web_fetch::WebFetchToolCallBlock;
 pub use web_search::{WebSearchSource, WebSearchToolCallBlock};
 
@@ -108,6 +110,7 @@ pub enum ToolCallBlock {
     Search(SearchToolCallBlock),
     WebFetch(WebFetchToolCallBlock),
     WebSearch(WebSearchToolCallBlock),
+    Subagent(SubagentToolCallBlock),
     Other(OtherToolCallBlock),
 }
 
@@ -121,6 +124,7 @@ impl ToolCallBlock {
             Self::Search(block) => (block.output(ctx), !block.is_success()),
             Self::WebFetch(block) => (block.output(ctx), !block.is_success()),
             Self::WebSearch(block) => (block.output(ctx), !block.is_success()),
+            Self::Subagent(block) => (block.output(ctx), !block.is_success()),
             Self::Other(block) => (block.output(ctx), !block.is_success()),
         };
         // Keep the upstream per-tool accent contract. Read/Search/ListDir
@@ -151,7 +155,7 @@ impl ToolCallBlock {
                 .edit
                 .accent
                 .map(AccentStyle::static_color),
-            Self::Read(_) | Self::ListDir(_) | Self::Search(_) => None,
+            Self::Read(_) | Self::ListDir(_) | Self::Search(_) | Self::Subagent(_) => None,
             Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_)
                 if ctx.mode == DisplayMode::Collapsed =>
             {
@@ -170,6 +174,7 @@ impl ToolCallBlock {
             Self::Read(_) | Self::Edit(_) | Self::ListDir(_) | Self::Search(_) => {
                 failed.then(|| AccentStyle::static_color(ctx.theme.accent_error))
             }
+            Self::Subagent(block) => block.bullet_style(ctx),
             Self::WebFetch(_) | Self::WebSearch(_) | Self::Other(_) if failed => {
                 Some(AccentStyle::static_color(ctx.theme.accent_error))
             }
@@ -221,7 +226,7 @@ impl ToolCallBlock {
             Self::ListDir(_) => Some(VerbGroupKind::Dir),
             Self::WebFetch(_) => Some(VerbGroupKind::WebFetch),
             Self::WebSearch(_) => Some(VerbGroupKind::WebSearch),
-            Self::Execute(_) | Self::Edit(_) | Self::Other(_) => None,
+            Self::Execute(_) | Self::Edit(_) | Self::Other(_) | Self::Subagent(_) => None,
         }
     }
 
@@ -229,6 +234,7 @@ impl ToolCallBlock {
         self.verb_group_kind().unwrap_or(match self {
             Self::Execute(_) => VerbGroupKind::Command,
             Self::Edit(_) => VerbGroupKind::EditFile,
+            Self::Subagent(_) => VerbGroupKind::Subagent,
             Self::Other(_) => VerbGroupKind::OtherTool,
             _ => VerbGroupKind::OtherTool,
         })
@@ -243,6 +249,7 @@ impl ToolCallBlock {
             Self::Search(block) => !block.is_success(),
             Self::WebFetch(block) => !block.is_success(),
             Self::WebSearch(block) => !block.is_success(),
+            Self::Subagent(block) => !block.is_success(),
             Self::Other(block) => !block.is_success(),
         }
     }
@@ -379,6 +386,22 @@ mod tests {
         assert_eq!(
             ToolCallBlock::Edit(EditToolCallBlock::new("Edit a.rs")).verb_group_kind(),
             None
+        );
+        assert_eq!(
+            ToolCallBlock::Subagent(SubagentToolCallBlock::new(
+                "分析 Rust 工作区架构",
+                SubagentToolKind::Running
+            ))
+            .verb_group_kind(),
+            None
+        );
+        assert_eq!(
+            ToolCallBlock::Subagent(SubagentToolCallBlock::new(
+                "分析 Rust 工作区架构",
+                SubagentToolKind::Running
+            ))
+            .label_kind(),
+            VerbGroupKind::Subagent
         );
     }
 

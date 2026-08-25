@@ -50,6 +50,14 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]
 }
 
+/// Idle watcher pulse copied from Grok's `monitor_icon_frames`.
+///
+/// `○ ◎ ◉ ◎` (U+25CB / U+25CE / U+25C9) is a one-column breath so the
+/// following `N subagents still running` label never shifts.
+pub fn monitor_icon_frames() -> &'static [&'static str] {
+    &["\u{25CB}", "\u{25CE}", "\u{25C9}", "\u{25CE}"]
+}
+
 pub fn token_arrow() -> &'static str {
     "⇣"
 }

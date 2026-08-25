@@ -5,11 +5,11 @@
 //! stable and must not become a second host-owned view model.
 
 use dsh_pager::{
-    ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationAdapter,
-    DshPresentationModel, DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry,
-    DshRenderEntryId, DshRenderFinish, DshRenderKind, DshRenderUpdate, DshRenderVisibility, DshSeq,
-    DshSessionId, JobView, SessionControlSnapshot, SessionState, SubagentCatalog,
-    SubagentListEntry, event_time_epoch_ms,
+    ControlPlaneStore, Diagnostic, DshGeneration, DshInteraction, DshPresentationModel,
+    DshQueueItem, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
+    DshRenderFinish, DshRenderKind, DshRenderVisibility, DshSeq, DshSessionId, JobView,
+    SessionControlSnapshot, SessionState, SubagentCatalog, SubagentListEntry, event_time_epoch_ms,
+    scrollback::Scrollback,
 };
 use dsh_pager_protocol::{
     HistoryEntry, PromptMode, SessionEvent, SessionListValue, SessionModeId, SessionSearchValue,
@@ -379,25 +379,18 @@ impl SubagentRow {
     }
 }
 
-/// Fold a child history page into the same transcript rows the parent view uses.
-pub fn child_transcript_from_history(history: &[HistoryEntry]) -> Vec<TranscriptRow> {
-    let mut adapter = DshPresentationAdapter::default();
-    adapter
-        .adapt_history(history)
-        .into_iter()
-        .filter_map(|update| match update {
-            DshRenderUpdate::Upsert(entry) if entry.visibility != DshRenderVisibility::Hidden => {
-                Some(TranscriptRow::from(entry))
-            }
-            _ => None,
-        })
-        .collect()
+/// Fold a child history page through the same presentation model the parent
+/// transcript uses. Streaming thinking deltas upsert one canonical entry
+/// instead of becoming one dump row per token.
+pub fn child_scrollback_from_history(history: &[HistoryEntry]) -> Scrollback {
+    let mut scrollback = Scrollback::default();
+    scrollback.rebuild(history);
+    scrollback
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildTranscriptView {
     pub child_id: String,
-    pub rows: Vec<TranscriptRow>,
     pub error: Option<String>,
 }
 
@@ -2379,7 +2372,7 @@ mod tests {
     }
 
     #[test]
-    fn child_transcript_folds_history_into_parent_transcript_rows() {
+    fn child_history_rebuilds_through_canonical_scrollback() {
         let history = vec![HistoryEntry {
             event: SessionEvent {
                 event_type: "user/message".into(),
@@ -2395,10 +2388,72 @@ mod tests {
             },
             view: None,
         }];
-        let rows = child_transcript_from_history(&history);
+        let scrollback = child_scrollback_from_history(&history);
         assert!(
-            rows.iter().any(|row| row.text.contains("delegate this")),
-            "{rows:?}"
+            scrollback
+                .entries()
+                .iter()
+                .any(|entry| entry.text.contains("delegate this")),
+            "{:?}",
+            scrollback
+                .entries()
+                .iter()
+                .map(|entry| &entry.text)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn child_history_collapses_streaming_thinking_deltas() {
+        let mut history = vec![HistoryEntry {
+            event: SessionEvent {
+                event_type: "user/message".into(),
+                seq: 1,
+                time: 1.0,
+                data: json!({
+                    "source": { "kind": "user" },
+                    "content": [{ "type": "text", "text": "analyze the crate" }]
+                }),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        }];
+        let mut thinking = String::new();
+        for (index, piece) in ["Let", " me", " start", " by", " reading"]
+            .iter()
+            .enumerate()
+        {
+            thinking.push_str(piece);
+            history.push(HistoryEntry {
+                event: SessionEvent {
+                    event_type: "assistant/chunk".into(),
+                    seq: i64::try_from(index).expect("index") + 2,
+                    time: 2.0,
+                    data: json!({
+                        "turn": 1,
+                        "step": 0,
+                        "chunk": {"type": "reasoning-delta", "index": 0, "text": piece}
+                    }),
+                    source_event_seqs: None,
+                    surface_op: None,
+                    ignorable: None,
+                },
+                view: None,
+            });
+        }
+        let scrollback = child_scrollback_from_history(&history);
+        let thinking_entries = scrollback
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == DshRenderKind::Thinking)
+            .collect::<Vec<_>>();
+        assert_eq!(thinking_entries.len(), 1, "{thinking_entries:?}");
+        assert!(
+            thinking_entries[0].text.contains("Let me start by reading"),
+            "{}",
+            thinking_entries[0].text
         );
     }
 
