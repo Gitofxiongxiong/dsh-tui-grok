@@ -7,6 +7,7 @@ publish = false
 description = "Grok Build-derived DeepSeek Harness terminal UI and host adapter"
 
 [dependencies]
+anstyle = { workspace = true }
 chrono = { workspace = true }
 crossterm = { workspace = true }
 xai-ratatui-textarea = { package = "dsh-grok-textarea", path = "../dsh-grok-textarea" }
@@ -15,13 +16,13 @@ dsh-pager-primitives = { path = "../dsh-pager-primitives" }
 dsh-pager-protocol = { path = "../dsh-pager-protocol" }
 dsh-pager-render = { path = "../dsh-pager-render" }
 dsh-grok-inline = { path = "../dsh-grok-inline" }
-pulldown-cmark = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 textwrap = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
+xai-grok-markdown = { path = "vendor/grok/xai-grok-markdown" }
 
 [dev-dependencies]
 pretty_assertions = "1.4"

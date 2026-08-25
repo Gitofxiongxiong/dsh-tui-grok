@@ -1,0 +1,8 @@
+xai-grok-markdown-core is first-party code maintained by xAI for the Grok TUI.
+
+Copyright 2023-2026 xAI
+Licensed under the Apache License, Version 2.0 (see ../LICENSE).
+
+The vendored Rust source is copied from Grok Build mirror commit
+19d42e35c07a9c9244f03f6df0c4c353f970d4f9. Cargo-only changes adapt the
+workspace edition/lint inheritance to this repository.

@@ -9,6 +9,8 @@ Derived modules:
   crates/dsh-grok-inline    <- xai-ratatui-inline
   crates/dsh-pager-primitives <- xai-grok-pager-render primitives
   crates/dsh-pager-grok-ui/vendor/grok <- xai-grok-pager view/input modules
+  crates/dsh-pager-grok-ui/vendor/grok/xai-grok-markdown <- xai-grok-markdown
+  crates/dsh-pager-grok-ui/vendor/grok/xai-grok-markdown-core <- xai-grok-markdown-core
 
 The full upstream pager, ACP adapters, Grok shell/agent/tools, config,
 workspace, persistence, and telemetry code are not included. DSH-native crates

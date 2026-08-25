@@ -10,6 +10,8 @@ members = [
     "crates/dsh-pager-protocol",
     "crates/dsh-pager-primitives",
     "crates/dsh-pager-render",
+    "crates/dsh-pager-grok-ui/vendor/grok/xai-grok-markdown",
+    "crates/dsh-pager-grok-ui/vendor/grok/xai-grok-markdown-core",
 ]
 
 [workspace.package]
@@ -21,6 +23,11 @@ version = "0.1.0"
 crossterm = "0.28.1"
 chrono = "0.4"
 anstyle-parse = "0.2"
+anstyle = "1.0"
+anstyle-lossy = "1.1.4"
+anstyle-syntect = "1.0.4"
+html-escape = "0.2"
+linkify = "0.10"
 ratatui = "0.29.0"
 ratatui-core = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -28,6 +35,11 @@ serde_json = "1"
 similar = "2.7"
 textwrap = "0.16.1"
 pulldown-cmark = "0.13"
+supports-color = "3.0"
+syntect = "5.3"
 tui-scrollbar = "0.2"
+two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
+url = "2"
+xai-grok-markdown-core = { path = "crates/dsh-pager-grok-ui/vendor/grok/xai-grok-markdown-core" }

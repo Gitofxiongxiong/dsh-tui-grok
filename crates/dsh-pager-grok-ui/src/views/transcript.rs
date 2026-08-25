@@ -14,7 +14,6 @@ use dsh_pager::{
     DshRenderKind, DshRenderVisibility, DshToolCallView, DshToolDiff, DshToolKind, DshToolResult,
     DshToolResultView, ScrollAnchor,
 };
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -522,7 +521,6 @@ fn semantic_lines(
             rail: true,
             header: true,
             selectable: true,
-            markdown: false,
         }]
     } else if projection.mode == DisplayMode::Collapsed
         && entry.kind == DshRenderKind::ToolCall
@@ -540,7 +538,6 @@ fn semantic_lines(
             rail: true,
             header: true,
             selectable: true,
-            markdown: false,
         }]
     } else {
         render_semantic_lines(entry, &row, theme, width, expanded_blocks)
@@ -578,7 +575,6 @@ fn semantic_lines(
                     rail: projection.rail,
                     header: true,
                     selectable: true,
-                    markdown: false,
                 },
             );
         } else {
@@ -588,7 +584,6 @@ fn semantic_lines(
                 rail: projection.rail,
                 header: true,
                 selectable: true,
-                markdown: false,
             }];
         }
     }
@@ -622,14 +617,6 @@ fn semantic_lines(
         && ((projection.group_header && !projection.group_expanded)
             || (entry.kind == DshRenderKind::ToolCall
                 && projection.mode == DisplayMode::Collapsed));
-    let markdown_total = semantic
-        .iter()
-        .filter(|line| line.markdown)
-        .map(|line| {
-            word_wrap_line(&line.line, width.saturating_sub(ENTRY_CHROME_WIDTH).max(1)).len()
-        })
-        .sum::<usize>();
-    let mut markdown_rows = 0usize;
     for semantic_line in semantic {
         let line_rail = projection.rail || semantic_line.rail;
         let reserve_timestamp = timestamp_pending.is_some();
@@ -676,41 +663,6 @@ fn semantic_lines(
                 screen_y: 0,
                 line,
             });
-            if semantic_line.markdown {
-                markdown_rows = markdown_rows.saturating_add(1);
-                if markdown_rows.is_multiple_of(MARKDOWN_SPACING_EVERY)
-                    && markdown_rows < markdown_total
-                {
-                    lines.push(RichPaintLine {
-                        entry_id: entry.id,
-                        block_index: None,
-                        line_index: lines.len(),
-                        header: false,
-                        group_header: false,
-                        rail: line_rail,
-                        rail_animated: line_rail && rail_animated,
-                        rail_flash: line_rail && rail_flash,
-                        rail_accent: line_rail.then_some(rail_accent),
-                        rail_wave_row: 0,
-                        rail_wave_len: 0,
-                        selectable: false,
-                        background: projection.background,
-                        copy_text: String::new(),
-                        content_offset: 0,
-                        timestamp: None,
-                        screen_y: 0,
-                        line: decorate_line(
-                            Line::from(""),
-                            width,
-                            line_rail,
-                            collapsed_rail,
-                            rail_accent,
-                            projection.background,
-                            theme,
-                        ),
-                    });
-                }
-            }
         }
     }
     if projection.background.is_some() {
@@ -797,7 +749,6 @@ struct SemanticLine {
     rail: bool,
     header: bool,
     selectable: bool,
-    markdown: bool,
 }
 
 /// Upstream Grok's horizontal entry chrome: accent column + two left-pad
@@ -805,11 +756,6 @@ struct SemanticLine {
 /// are painted as either `│  ` for operational rows or `   ` for plain text.
 const ENTRY_CHROME_WIDTH: usize = 3;
 const TIMESTAMP_RESERVED_WIDTH: usize = 10;
-/// Terminal rows are integral, so the relaxed Markdown rhythm is represented
-/// as five rows for every four rendered Markdown rows. The spacer is inserted
-/// only between content rows and is not selectable or copyable.
-const MARKDOWN_SPACING_EVERY: usize = 4;
-
 fn is_local_foldable_block(block: &DshRenderBlock) -> bool {
     matches!(
         block,
@@ -942,11 +888,6 @@ fn render_semantic_lines(
                 rail: false,
                 header: index == 0,
                 selectable: true,
-                markdown: row
-                    .content
-                    .blocks
-                    .iter()
-                    .any(|block| matches!(block, DshRenderBlock::Markdown { .. })),
             })
             .collect();
     }
@@ -969,7 +910,6 @@ fn render_semantic_lines(
                     rail: false,
                     header: false,
                     selectable: false,
-                    markdown: false,
                 });
             }
         }
@@ -1002,7 +942,6 @@ fn render_semantic_lines(
                 rail,
                 header: line_index == 0,
                 selectable: true,
-                markdown: matches!(block, DshRenderBlock::Markdown { .. }),
             });
         }
     }
@@ -1029,7 +968,6 @@ fn thinking_running_lines(
         rail: true,
         header: true,
         selectable: true,
-        markdown: false,
     }];
     let max_body = 3usize;
     if body.len() > max_body {
@@ -1039,7 +977,6 @@ fn thinking_running_lines(
             rail: true,
             header: false,
             selectable: true,
-            markdown: false,
         });
         body = body.split_off(body.len().saturating_sub(max_body));
     }
@@ -1049,7 +986,6 @@ fn thinking_running_lines(
         rail: true,
         header: false,
         selectable: true,
-        markdown: false,
     }));
     lines
 }
@@ -2317,7 +2253,7 @@ fn render_block(
     let prefix = " ".repeat(indent.saturating_mul(2));
     match block {
         DshRenderBlock::Markdown { text } => {
-            render_markdown(lines, text, theme, &prefix);
+            render_markdown(lines, text, theme, &prefix, width);
         }
         DshRenderBlock::Plain { text } => {
             push_plain_lines(
@@ -2389,216 +2325,18 @@ fn render_block(
     }
 }
 
-/// Grok-style pretty Markdown projection.
-///
-/// This follows the same AST boundary as the upstream `MarkdownContent`:
-/// fenced delimiters are presentation chrome (not body text), soft breaks are
-/// collapsed, inline emphasis/code/link styles are applied to spans, and
-/// block-level constructs get their own semantic rows. The streaming/cache
-/// layer from `xai-grok-markdown` remains a later optimization; this adapter
-/// keeps the DSH-neutral entry and copy contracts intact.
-fn render_markdown(lines: &mut Vec<Line<'static>>, text: &str, theme: Theme, prefix: &str) {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_FOOTNOTES);
-
-    let base = Style::default().fg(theme.md_text);
-    let mut current = base;
-    let mut styles = Vec::new();
-    let mut current_line = Vec::<Span<'static>>::new();
-    let mut line_prefix = prefix.to_string();
-    let mut list_depth = 0usize;
-    let mut ordered_next = Vec::<Option<u64>>::new();
-    let mut in_code = false;
-    let mut code_style = Style::default().fg(theme.md_code).bg(theme.md_code_bg);
-
-    let flush = |lines: &mut Vec<Line<'static>>,
-                 current_line: &mut Vec<Span<'static>>,
-                 line_prefix: &str| {
-        if current_line.is_empty() {
-            return;
-        }
-        let mut spans =
-            Vec::with_capacity(current_line.len() + usize::from(!line_prefix.is_empty()));
-        if !line_prefix.is_empty() {
-            spans.push(Span::styled(
-                line_prefix.to_string(),
-                Style::default().fg(theme.md_muted),
-            ));
-        }
-        spans.append(current_line);
-        lines.push(Line::from(spans));
-    };
-
-    for event in Parser::new_ext(text, options) {
-        match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                flush(lines, &mut current_line, &line_prefix);
-                current = heading_style(level, theme);
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                flush(lines, &mut current_line, &line_prefix);
-                current = base;
-            }
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => {
-                flush(lines, &mut current_line, &line_prefix);
-            }
-            Event::Start(Tag::CodeBlock(kind)) => {
-                flush(lines, &mut current_line, &line_prefix);
-                in_code = true;
-                code_style = match kind {
-                    CodeBlockKind::Fenced(_) | CodeBlockKind::Indented => {
-                        Style::default().fg(theme.md_code).bg(theme.md_code_bg)
-                    }
-                };
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                flush(lines, &mut current_line, &line_prefix);
-                in_code = false;
-                current = base;
-            }
-            Event::Start(Tag::Emphasis) => {
-                styles.push(current);
-                current = current.add_modifier(Modifier::ITALIC);
-            }
-            Event::End(TagEnd::Emphasis) => current = styles.pop().unwrap_or(base),
-            Event::Start(Tag::Strong) => {
-                styles.push(current);
-                current = current.add_modifier(Modifier::BOLD);
-            }
-            Event::End(TagEnd::Strong) => current = styles.pop().unwrap_or(base),
-            Event::Start(Tag::Strikethrough) => {
-                styles.push(current);
-                current = current.add_modifier(Modifier::CROSSED_OUT);
-            }
-            Event::End(TagEnd::Strikethrough) => current = styles.pop().unwrap_or(base),
-            Event::Start(Tag::Link { .. }) => {
-                styles.push(current);
-                current = current.fg(theme.link_fg).add_modifier(Modifier::UNDERLINED);
-            }
-            Event::End(TagEnd::Link) => current = styles.pop().unwrap_or(base),
-            Event::Start(Tag::BlockQuote(_)) => {
-                flush(lines, &mut current_line, &line_prefix);
-                line_prefix.push_str("│ ");
-            }
-            Event::End(TagEnd::BlockQuote(_)) => {
-                flush(lines, &mut current_line, &line_prefix);
-                line_prefix.truncate(line_prefix.len().saturating_sub(2));
-            }
-            Event::Start(Tag::List(start)) => {
-                flush(lines, &mut current_line, &line_prefix);
-                list_depth = list_depth.saturating_add(1);
-                ordered_next.push(start);
-            }
-            Event::End(TagEnd::List(_)) => {
-                flush(lines, &mut current_line, &line_prefix);
-                list_depth = list_depth.saturating_sub(1);
-                ordered_next.pop();
-            }
-            Event::Start(Tag::Item) => {
-                flush(lines, &mut current_line, &line_prefix);
-                let indent = "  ".repeat(list_depth.saturating_sub(1));
-                let marker = if let Some(Some(next)) = ordered_next.last_mut() {
-                    let marker = format!("{next}. ");
-                    *next = next.saturating_add(1);
-                    marker
-                } else {
-                    "• ".to_string()
-                };
-                line_prefix.push_str(&indent);
-                current_line.push(Span::styled(marker, Style::default().fg(theme.md_muted)));
-            }
-            Event::End(TagEnd::Item) => flush(lines, &mut current_line, &line_prefix),
-            Event::Rule => {
-                flush(lines, &mut current_line, &line_prefix);
-                lines.push(Line::from(Span::styled(
-                    format!("{prefix}────────────────────"),
-                    Style::default().fg(theme.md_muted),
-                )));
-            }
-            Event::TaskListMarker(checked) => current_line.push(Span::styled(
-                if checked { "☑ " } else { "☐ " },
-                Style::default().fg(if checked {
-                    theme.md_task_checked
-                } else {
-                    theme.md_task_unchecked
-                }),
-            )),
-            Event::Code(code) => current_line.push(Span::styled(
-                code.into_string(),
-                Style::default().fg(theme.md_code).bg(theme.md_code_bg),
-            )),
-            Event::Text(text) => {
-                let text = text.into_string();
-                let style = if in_code {
-                    code_style
-                } else if text.trim_start().starts_with("http://")
-                    || text.trim_start().starts_with("https://")
-                {
-                    current.fg(theme.link_fg).add_modifier(Modifier::UNDERLINED)
-                } else {
-                    current
-                };
-                for (index, part) in text.split('\n').enumerate() {
-                    if index > 0 {
-                        flush(lines, &mut current_line, &line_prefix);
-                    }
-                    if !part.is_empty() {
-                        current_line.push(Span::styled(part.to_string(), style));
-                    }
-                }
-            }
-            Event::SoftBreak => current_line.push(Span::styled(" ", current)),
-            Event::HardBreak => flush(lines, &mut current_line, &line_prefix),
-            Event::Html(text) | Event::InlineHtml(text) => current_line.push(Span::styled(
-                text.into_string(),
-                Style::default().fg(theme.md_muted),
-            )),
-            Event::FootnoteReference(name) => current_line.push(Span::styled(
-                format!("[^{name}]"),
-                Style::default().fg(theme.link_fg),
-            )),
-            Event::InlineMath(text) | Event::DisplayMath(text) => current_line.push(Span::styled(
-                text.into_string(),
-                Style::default().fg(theme.md_code),
-            )),
-            Event::Start(Tag::Table(_)) | Event::End(TagEnd::Table) => {}
-            Event::Start(Tag::TableHead)
-            | Event::End(TagEnd::TableHead)
-            | Event::Start(Tag::TableRow)
-            | Event::End(TagEnd::TableRow)
-            | Event::Start(Tag::TableCell)
-            | Event::End(TagEnd::TableCell) => {}
-            _ => {}
-        }
-    }
-    flush(lines, &mut current_line, &line_prefix);
-}
-
-fn heading_style(level: HeadingLevel, theme: Theme) -> Style {
-    match level {
-        HeadingLevel::H1 => Style::default()
-            .fg(theme.md_heading_h1)
-            .add_modifier(theme.md_heading_h1_mod),
-        HeadingLevel::H2 => Style::default()
-            .fg(theme.md_heading_h2)
-            .add_modifier(theme.md_heading_h2_mod),
-        HeadingLevel::H3 => Style::default()
-            .fg(theme.md_heading_h3)
-            .add_modifier(theme.md_heading_h3_mod),
-        HeadingLevel::H4 => Style::default()
-            .fg(theme.md_heading_h4)
-            .add_modifier(theme.md_heading_h4_mod),
-        HeadingLevel::H5 => Style::default()
-            .fg(theme.md_heading_h5)
-            .add_modifier(theme.md_heading_h5_mod),
-        HeadingLevel::H6 => Style::default()
-            .fg(theme.md_heading_h6)
-            .add_modifier(theme.md_heading_h6_mod),
-    }
+/// Render Markdown through the fixed Grok Build renderer.
+fn render_markdown(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    _theme: Theme,
+    prefix: &str,
+    width: usize,
+) {
+    let content_width = width
+        .saturating_sub(unicode_width::UnicodeWidthStr::width(prefix))
+        .max(1);
+    lines.extend(crate::render::markdown::render(text, content_width, prefix));
 }
 
 fn render_diff(
@@ -2783,13 +2521,20 @@ mod tests {
         assert!(!text.iter().any(|line| line == "Assistant"));
         assert!(text.iter().any(|line| line == "Title"));
         assert!(!text.iter().any(|line| line.contains("# Title")));
-        assert!(rendered.iter().any(|line| {
-            line.spans.iter().any(|span| {
-                span.content.contains("code") && span.style.bg == Some(theme.md_code_bg)
-            })
-        }));
+        let inline_code = rendered
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains("code"))
+            .expect("inline code span");
+        assert_eq!(inline_code.style.fg, Some(theme.md_code));
+        assert!(inline_code.style.add_modifier.contains(Modifier::BOLD));
+        let fenced = rendered
+            .iter()
+            .find(|line| line.to_string().contains("let x = 1;"))
+            .expect("fenced code line");
+        assert_eq!(fenced.style.bg, Some(theme.md_code_bg));
         let mut list = Vec::new();
-        render_markdown(&mut list, "- one\n- two", theme, "");
+        render_markdown(&mut list, "- one\n- two", theme, "", 80);
         assert!(
             list.iter()
                 .any(|line| line.to_string().starts_with("• one"))
@@ -3275,9 +3020,9 @@ mod tests {
     }
 
     #[test]
-    fn markdown_lines_use_fractional_terminal_spacing() {
+    fn wrapped_markdown_does_not_inject_periodic_blank_rows() {
         let id = DshRenderEntryId::Event { seq: 31 };
-        let text = "# one\n# two\n# three\n# four\n# five";
+        let text = "dsh-pager-grok-ui keeps one continuous paragraph while ordinary terminal wrapping produces more than four visible rows";
         let entry = DshRenderEntry {
             id,
             source_seq: 31,
@@ -3297,26 +3042,22 @@ mod tests {
                 fallback: text.into(),
             },
         };
-        let rich = RichTranscript::new(&[entry], 80, *Theme::current());
+        let rich = RichTranscript::new(&[entry], 24, *Theme::current());
         let lines = rich.visible_lines(0, 20);
 
-        assert_eq!(
-            lines.iter().filter(|line| line.selectable).count(),
-            5,
-            "all five Markdown rows remain selectable"
+        assert!(
+            lines.len() > 4,
+            "fixture must exercise the old four-row cadence"
         );
-        assert_eq!(
-            lines.iter().filter(|line| !line.selectable).count(),
-            1,
-            "one spacer row is inserted after the fourth Markdown row"
+        assert!(
+            lines.iter().all(|line| line.selectable),
+            "a single paragraph must not gain synthetic blank rows"
         );
-        assert!(!lines[4].selectable);
-        assert!(lines[4].copy_text.is_empty());
+        assert!(lines.iter().all(|line| !line.copy_text.is_empty()));
         assert_eq!(
             lines.iter().map(|line| line.line_index).collect::<Vec<_>>(),
             (0..lines.len()).collect::<Vec<_>>()
         );
-        assert!(lines.iter().any(|line| line.copy_text == "five"));
     }
 
     #[test]
@@ -3693,14 +3434,23 @@ mod tests {
         let mut lines = Vec::new();
         render_markdown(
             &mut lines,
-            "# heading\n```rust\nlet x = 1;\n```\nhttps://example.com",
+            "# heading\n```rust\nlet x = 1;\n```\n[Example](https://example.com)",
             theme,
             "",
+            80,
         );
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.md_heading_h1));
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.md_code));
-        assert_eq!(lines[1].spans[0].style.bg, Some(theme.md_code_bg));
-        assert_eq!(lines[2].spans[0].style.fg, Some(theme.link_fg));
+        let code = lines
+            .iter()
+            .find(|line| line.to_string().contains("let x = 1;"))
+            .expect("fenced code line");
+        assert_eq!(code.style.bg, Some(theme.md_code_bg));
+        let link = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains("Example"))
+            .expect("link span");
+        assert_eq!(link.style.fg, Some(theme.link_fg));
 
         let mut diff = Vec::new();
         render_diff(&mut diff, None, "old", "new", theme, 0);

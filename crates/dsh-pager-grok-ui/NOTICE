@@ -1,4 +1,5 @@
-dsh-pager-grok-ui contains view and input modules derived from Grok Build.
+dsh-pager-grok-ui contains view, input, and Markdown rendering modules derived
+from Grok Build.
 
 Upstream mirror commit: 19d42e35c07a9c9244f03f6df0c4c353f970d4f9
 SOURCE_REV: 7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa

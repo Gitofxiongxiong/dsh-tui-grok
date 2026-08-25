@@ -1,0 +1,12 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-markdown-core"
+version = "0.1.0"
+edition = "2024"
+description = "Headless markdown analysis sharing Grok Build's exact pulldown-cmark config."
+
+[dependencies]
+pulldown-cmark = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
