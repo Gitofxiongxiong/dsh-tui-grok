@@ -24,8 +24,8 @@ use crate::views::execute_tool::{
 };
 use crate::views::execute_tool_adapter::project_execute_tool;
 use crate::{
-    geometry::HitTarget, glyphs, host_adapter::TranscriptRow,
-    render::wrapping::word_wrap_line, theme::Theme,
+    geometry::HitTarget, glyphs, host_adapter::TranscriptRow, render::wrapping::word_wrap_line,
+    theme::Theme,
 };
 
 /// A rich line after semantic block rendering and terminal-width wrapping.
@@ -1396,30 +1396,36 @@ fn decorate_line(
     line
 }
 
-const WAVE_ROWS_PER_SECOND: f64 = 4.0;
-const WAVE_BAND_ROWS: f64 = 4.0;
+const WAVE_ROWS_PER_SECOND: f64 = 8.0;
+/// Spatial support of the traveling envelope, in terminal rows.
+///
+/// The bright core is much thinner than this window. The extra length is a
+/// gray ramp so adjacent rows and 33ms frames do not jump from black to white.
+const WAVE_BAND_ROWS: f64 = 16.0;
 const WAVE_GAP_ROWS: f64 = 6.0;
 const FINISH_FLASH_DURATION_MS: u64 = 400;
+const WAVE_FRAME_MS: u64 = 33;
 
 fn wave_cycle_seconds(rail_len: u16) -> f64 {
     (f64::from(rail_len.max(1)) + WAVE_BAND_ROWS + WAVE_GAP_ROWS) / WAVE_ROWS_PER_SECOND
 }
 
 fn wave_brightness(elapsed_ms: u64, row: u16, rail_len: u16) -> f32 {
-    use std::f64::consts::FRAC_PI_2;
-
     let rail_len = rail_len.max(row.saturating_add(1)).max(1);
     let travel_rows = wave_cycle_seconds(rail_len) * WAVE_ROWS_PER_SECOND;
     let traveled_rows = (elapsed_ms as f64 / 1_000.0 * WAVE_ROWS_PER_SECOND) % travel_rows;
     let half_band = WAVE_BAND_ROWS / 2.0;
     let band_center = traveled_rows - half_band;
     let row_center = f64::from(row) + 0.5;
-    let normalized_distance = (row_center - band_center).abs() / half_band;
-    if normalized_distance >= 1.0 {
+    let distance = (row_center - band_center).abs();
+    if distance >= half_band {
         return 0.0;
     }
-    let envelope = (normalized_distance * FRAC_PI_2).cos();
-    (envelope * envelope) as f32
+    // 3σ equals the half-band, so the clipped edge is ~0.01. The peak stays
+    // a thin core; the tails supply extra gray steps.
+    let sigma = half_band / 3.0;
+    let envelope = (-0.5 * (distance / sigma) * (distance / sigma)).exp();
+    envelope as f32
 }
 
 fn blend_color(base: Color, foreground: Color, opacity: f32) -> Option<Color> {
@@ -2789,15 +2795,53 @@ mod tests {
 
     #[test]
     fn rail_wave_cycle_scales_with_length_at_fixed_row_speed() {
-        assert!((wave_cycle_seconds(1) - 2.75).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(4) - 3.5).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(12) - 5.5).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(24) - 8.5).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(1) - 2.875).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(4) - 3.25).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(12) - 4.25).abs() < f64::EPSILON);
+        assert!((wave_cycle_seconds(24) - 5.75).abs() < f64::EPSILON);
 
-        let row_zero_peak = wave_brightness(625, 0, 24);
-        let row_eight_peak_two_seconds_later = wave_brightness(2_625, 8, 24);
+        let row_zero_peak = wave_brightness(1_063, 0, 24);
+        let row_eight_peak_one_second_later = wave_brightness(2_063, 8, 24);
         assert!(row_zero_peak > 0.999);
-        assert!(row_eight_peak_two_seconds_later > 0.999);
+        assert!(row_eight_peak_one_second_later > 0.999);
+    }
+
+    #[test]
+    fn rail_wave_uses_a_long_gray_ramp_instead_of_chunky_jumps() {
+        let peak_at_row_eight_ms = 2_063;
+        let mid_ramp: Vec<f32> = (0..16)
+            .map(|row| wave_brightness(peak_at_row_eight_ms, row, 24))
+            .collect();
+        let distinct_steps = mid_ramp
+            .iter()
+            .filter(|brightness| **brightness > 0.02 && **brightness < 0.98)
+            .count();
+        assert!(
+            distinct_steps >= 8,
+            "traveling highlight should expose many intermediate grays, got {mid_ramp:?}"
+        );
+
+        let mut max_adjacent = 0.0f32;
+        let mut max_frame = 0.0f32;
+        for elapsed_ms in (0..6_000).step_by(5) {
+            for row in 0..24u16 {
+                let now = wave_brightness(elapsed_ms, row, 24);
+                let next_frame = wave_brightness(elapsed_ms.saturating_add(WAVE_FRAME_MS), row, 24);
+                max_frame = max_frame.max((now - next_frame).abs());
+                if row < 23 {
+                    let neighbor = wave_brightness(elapsed_ms, row + 1, 24);
+                    max_adjacent = max_adjacent.max((now - neighbor).abs());
+                }
+            }
+        }
+        assert!(
+            max_adjacent < 0.25,
+            "adjacent rows jumped {max_adjacent} of full brightness"
+        );
+        assert!(
+            max_frame < 0.08,
+            "a 33ms frame jumped {max_frame} of full brightness"
+        );
     }
 
     #[test]
