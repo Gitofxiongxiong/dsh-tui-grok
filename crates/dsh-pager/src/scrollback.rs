@@ -524,6 +524,23 @@ impl Scrollback {
         &self.entries
     }
 
+    /// Build canonical scrollback state from already-projected renderer DTOs.
+    ///
+    /// Reference and alternate view hosts use this boundary when they already
+    /// hold the neutral `DshRenderEntry` contract and must not reverse it into
+    /// protocol events. Identity, ordering, revisions, and layout ownership
+    /// remain exactly the same as for adapter-produced entries.
+    pub fn from_render_entries(entries: impl IntoIterator<Item = DshRenderEntry>) -> Self {
+        let mut scrollback = Self::default();
+        for entry in entries {
+            scrollback.upsert(entry.into());
+        }
+        if !scrollback.entries.is_empty() {
+            scrollback.commit_content_change(0..scrollback.entries.len(), true);
+        }
+        scrollback
+    }
+
     /// Monotonic revision of canonical entry content and topology.
     pub fn revision(&self) -> u64 {
         self.content_revision
@@ -1311,6 +1328,46 @@ mod tests {
         assert!(scrollback.set_projected_height(80, 0, 9));
         assert_eq!(scrollback.revision(), revision);
         assert!(scrollback.layout_revision() > layout_revision);
+    }
+
+    #[test]
+    fn projected_entries_build_canonical_identity_order_and_hidden_geometry() {
+        let first = DshRenderEntry::plain(
+            DshRenderEntryId::Event { seq: 10 },
+            10,
+            DshRenderKind::User,
+            "first",
+        );
+        let mut hidden = DshRenderEntry::plain(
+            DshRenderEntryId::Event { seq: 11 },
+            11,
+            DshRenderKind::SystemInstruction,
+            "hidden",
+        );
+        hidden.visibility = DshRenderVisibility::Hidden;
+        let mut scrollback = Scrollback::from_render_entries([first, hidden]);
+
+        assert_eq!(scrollback.revision(), 2);
+        assert_eq!(
+            scrollback
+                .render_entry_refs()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![
+                DshRenderEntryId::Event { seq: 10 },
+                DshRenderEntryId::Event { seq: 11 }
+            ]
+        );
+        assert_eq!(
+            scrollback.entry_index(DshRenderEntryId::Event { seq: 10 }),
+            Some(0)
+        );
+        assert_eq!(
+            scrollback.entry_layout(40, 1).map(|entry| entry.height),
+            Some(0)
+        );
+        let anchor = scrollback.anchor_at(40, 1).expect("visible anchor");
+        assert_eq!(anchor.entry_id, DshRenderEntryId::Event { seq: 10 });
     }
 
     #[test]

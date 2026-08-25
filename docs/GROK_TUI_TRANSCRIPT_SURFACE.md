@@ -274,10 +274,14 @@ pending 等邻接敏感变化仍显式回退全量语义同步。Sticky prompt �
 host 从 canonical user-entry 索引与 Fenwick layout 构造 prompt descriptor，把 pinned/pushed
 header 和补偿后的 body viewport 组合到同一 `RichPaintLine`、direct-Buffer 与 HitMap
 坐标系；compact 终端同样启用，zero/tiny viewport 安全退化。Production
-pane/revision/window/Buffer painter 已从 `views/transcript.rs` 整体迁到
-`scrollback_adapter/host_pane.rs`，并改名为 `DshScrollbackHost`；`transcript.rs` 现仅保留
-过渡 semantic materializer 与 legacy `RichTranscript` oracle。最终 semantic/oracle 收尾
-仍属于 S7，不能据此宣称整个 N2/pixel parity 已闭包。
+pane/revision/window/Buffer painter 已迁到 `scrollback_adapter/host_pane.rs`，并改名为
+`DshScrollbackHost`；S7 又把必要的中性 entry materializer 迁到相邻的
+`scrollback_adapter/materialize_entry.rs`，删除 `views/transcript.rs`、`RichTranscript` 和
+`RichEntry`。Runtime 与 parity 现在都从 canonical `Scrollback` 进入同一个
+host/viewport/direct-Buffer painter，semantic rows、cells、copy 与 entry/block HitMap
+消费同一份 `RichPaintLine`，不再有第二套 height/anchor/dynamic-paint oracle。本文定义的
+N2 scrollback renderer closure 因而已闭合；全 TUI 或任意数据的逐像素一致仍由上级
+parity 计划和同数据浏览器/golden 证据另行验收。
 
 特殊态：
 

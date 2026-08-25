@@ -2,8 +2,8 @@
 //!
 //! This module owns production revision synchronization, viewport materialization,
 //! fold/group state and direct Buffer painting. Canonical history remains owned
-//! by `dsh_pager::Scrollback`; semantic block materialization is temporarily
-//! provided by `views::transcript` until the S7 oracle deletion.
+//! by `dsh_pager::Scrollback`; semantic block materialization stays beside
+//! this host in the DSH adapter boundary.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,12 +23,15 @@ use crate::{
         sticky::{PromptDescriptor, RenderedPrompt, StickyHeaderLayout, compute_sticky_layout},
         types::DisplayMode,
     },
-    scrollback_adapter::{project_groups::project_groups, tick::GROK_WAVE_SPEED},
-    theme::Theme,
-    views::transcript::{
-        RichPaintLine, default_display_mode, default_display_mode_ref, finish_flash_active,
-        is_local_foldable_block, now_epoch_ms, semantic_lines,
+    scrollback_adapter::{
+        materialize_entry::{
+            RichPaintLine, default_display_mode_ref, finish_flash_active, is_local_foldable_block,
+            now_epoch_ms, semantic_lines,
+        },
+        project_groups::project_groups,
+        tick::GROK_WAVE_SPEED,
     },
+    theme::Theme,
 };
 
 #[derive(Debug, Clone)]
@@ -53,20 +56,13 @@ pub(crate) struct ProjectionInfo {
 }
 
 impl ProjectionInfo {
+    #[cfg(test)]
     pub(crate) fn plain(entry: &DshRenderEntry, width: usize, theme: Theme) -> Self {
-        Self {
-            mode: default_display_mode(entry, width, theme),
-            group_anchor: None,
-            group_header: false,
-            group_hidden: false,
-            group_expanded: false,
-            group_last_visible: false,
-            group_label: None,
-            group_running: false,
-            group_failed: false,
-            rail: entry.kind == DshRenderKind::ToolCall,
-            background: (entry.kind == DshRenderKind::User).then_some(theme.bg_light),
-        }
+        let scrollback = Scrollback::from_render_entries([entry.clone()]);
+        let entry = scrollback
+            .render_entry_ref(0)
+            .expect("projected entry remains canonical");
+        Self::plain_ref(entry, width, theme)
     }
 
     fn plain_ref(entry: DshRenderEntryRef<'_>, width: usize, theme: Theme) -> Self {

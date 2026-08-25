@@ -7,7 +7,8 @@
 > 上游：`/home/leo/aidreamschool/grok-build`，mirror
 > `19d42e35c07a9c9244f03f6df0c4c353f970d4f9`，`SOURCE_REV`
 > `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa`。
-> 本文只规划，不宣称闭包已迁完，也不授权继续在 `transcript.rs` 里发明视觉算法。
+> 本文是执行计划；当前结论以第 8 节最后一条执行状态为准，也不授权在已删除的
+> `transcript.rs` 之外重建平行视觉算法。
 
 > 路线纠偏（2026-08-25）：档 3 的“复用”默认含义是**复制固定上游的原文件、
 > 目录边界和测试，再在边界做适配**，不是阅读上游后重写一个较小的同职责实现。
@@ -141,9 +142,12 @@ event_loop 30fps
 `logical_row` 是 **entry 内行号**（含滚出屏幕的 `skip_rows`），不是可见高度，
 也不是 `rail_len + band + gap`。
 
-### 4.2 DSH：一个文件，一条平行宇宙
+### 4.2 DSH（计划建立时）：一个文件，一条平行宇宙
 
-`views/transcript.rs` 当前同时承担：
+以下是冻结规则建立时的债务快照，用来解释迁移原因；S7 后的最终拓扑见第 5 节和
+第 8 节最新执行状态。
+
+在这个债务快照中，`views/transcript.rs` 同时承担：
 
 | 职责 | 代表符号 | Grok 对应文件 |
 |---|---|---|
@@ -452,6 +456,19 @@ S1 可以单独先做，因为它删除的是已经被证伪的模型，且不�
 > prompt 视觉角色。UI 456/456、workspace、Clippy、source 72 rows/0 drift、full PTY 均通过。
 > S7 的 legacy `RichTranscript`/semantic oracle 收尾仍开放，因此仍不声明整套 scrollback
 > pixel parity。
+>
+> 执行状态续（2026-08-25 17:01 +0800）：S7 已完成。`views/transcript.rs` 与
+> `views::transcript` 模块已删除；必要的 DSH-neutral entry materializer 迁到
+> `scrollback_adapter/materialize_entry.rs`，不再拥有独立 history、height、anchor、viewport
+> 或 dynamic painter。Parity 现在从 snapshot DTO 构造 canonical `Scrollback`，只调用一次
+> `DshScrollbackHost` 的 sync/viewport/visible/direct-Buffer 链，并用同一份 `RichPaintLine`
+> 生成 semantic rows、cells、entry/block HitMap 和 timestamp hit region。旧
+> `RichTranscript`/`RichEntry` 及其两次重复 materialize/paint 已删除；仓库 production
+> source 中对应符号与 `views::transcript` 引用为 0。新增 canonical-constructor 与 parity
+> production-background/hit-geometry 测试；UI 456/456、workspace、Clippy、50k、source
+> 72 rows/0 drift、full PTY 和 1200×800 DSH/Grok 浏览器回归均通过。至此本文定义的
+> **N2 scrollback renderer closure 已接上**；因浏览器双方业务 transcript 不同，本结论不扩张为
+> 全 TUI、任意数据或未经同数据 golden 验证的逐像素一致。
 
 禁止的顺序：先把 `transcript.rs` 拆成 `wave.rs` `tools.rs` `thinking.rs` 三个
 本地文件再谈 vendor。那是把平行宇宙正规化，漂移不会减。
@@ -509,14 +526,16 @@ Grok 全部功能」，这是已经写在 N2 里、现在必须当真执行的�
    revision 后先 clone 或扫描全历史再裁窗口。追加/删除/重排可保守 full resync，
    但必须由 topology 标记显式触发。
 
-未完成 S7 不得写「pixel parity 完成」。
+S7 已关闭，因此可以声明本文定义的 **N2 scrollback renderer closure** 完成；“全 TUI
+pixel parity”仍必须由上级计划的 N1/N3/N4 和同数据浏览器/golden 证据单独验收，不能由
+本节结论外推。
 
 ## 12. 挂账（TEMPORARY adapter）
 
-当前已知、允许短暂存在、必须在对应切片删除的本地实现：
+当前没有仍开放的 TEMPORARY scrollback adapter。已关闭挂账保留如下，便于审计：
 
-| 项 | 现在位置 | 删除切片 |
+| 项 | 收尾位置 | 状态 |
 |---|---|---|
-| semantic materializer + legacy `RichTranscript` oracle | `transcript.rs` | S7 删除/迁出 |
+| semantic materializer + legacy `RichTranscript` oracle | 中性 materializer 迁到 `scrollback_adapter/materialize_entry.rs`；legacy oracle 删除 | S7 已关闭 |
 
 新增 TEMPORARY 必须改本表，不能只在 PR 描述里写「以后再迁」。

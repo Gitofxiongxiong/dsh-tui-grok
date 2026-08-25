@@ -1,8 +1,8 @@
-//! Grok-derived transcript block projection.
+//! DSH entry materialization for the Grok-derived scrollback renderer.
 //!
 //! The host adapter keeps typed DSH blocks intact. This module owns the
-//! user-visible role, indentation and copy projection so the runtime never
-//! needs to inspect protocol JSON or flatten a tool result itself.
+//! user-visible role, indentation and copy projection so production and
+//! parity consume the same renderer without inspecting protocol JSON.
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dsh_pager::scrollback::Scrollback;
 use dsh_pager::{
     DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderEntryRef,
-    DshRenderFinish, DshRenderKind, DshRenderVisibility, ScrollAnchor,
+    DshRenderFinish, DshRenderKind, DshRenderVisibility,
 };
 #[cfg(test)]
 use dsh_pager::{DshToolCallView, DshToolDiff, DshToolKind, DshToolResult, DshToolResultView};
@@ -21,15 +21,14 @@ use ratatui::{
 };
 
 use crate::{
-    appearance::{BlockBackground, GrokAppearanceSnapshot, ScrollbackAppearance},
+    appearance::{GrokAppearanceSnapshot, ScrollbackAppearance},
     glyphs,
     host_adapter::TranscriptRow,
     render::wrapping::word_wrap_line,
     scrollback::{
         agent::AgentMessageBlock,
-        block_renderer::{BlockRenderSpec, BlockRenderer},
         entry_renderer::{
-            DynamicAccentSpec, EntryLayoutSpec, EntryRenderer, EntrySourceLine, GroupHeaderSpec,
+            EntryLayoutSpec, EntryRenderer, EntrySourceLine, GroupHeaderSpec,
             TIMESTAMP_RESERVED_WIDTH, TimestampLabel, timestamp_label,
         },
         thinking::{ThinkingBlock, ThinkingBlockContext},
@@ -43,14 +42,15 @@ use crate::{
             ProjectedBlock, ProjectedLine as SemanticLine, materialize_block, project_entry,
         },
         project_tool::project_tool,
-        tick::GROK_WAVE_SPEED,
     },
     theme::Theme,
 };
 
 #[cfg(test)]
 use crate::{
-    geometry::HitTarget, scrollback_adapter::host_pane::DshScrollbackHost as ScrollbackPane,
+    geometry::HitTarget,
+    scrollback::entry_renderer::DynamicAccentSpec,
+    scrollback_adapter::{host_pane::DshScrollbackHost as ScrollbackPane, tick::GROK_WAVE_SPEED},
 };
 
 /// A rich line after semantic block rendering and terminal-width wrapping.
@@ -99,23 +99,6 @@ pub struct RichPaintLine {
     pub joiner_to_previous: Option<String>,
     pub screen_y: u16,
     pub line: Line<'static>,
-}
-
-#[derive(Debug, Clone)]
-struct RichEntry {
-    id: DshRenderEntryId,
-    lines: Vec<RichPaintLine>,
-    start_y: usize,
-}
-
-/// Width-specific transcript projection used by the production AgentView.
-/// Scrollback remains the host-owned source of stable entries; this layer
-/// only supplies Grok semantic block lines and matching viewport geometry.
-#[derive(Debug, Clone)]
-pub struct RichTranscript {
-    width: usize,
-    entries: Vec<RichEntry>,
-    total_height: usize,
 }
 
 pub(crate) fn semantic_lines(
@@ -644,200 +627,6 @@ fn render_agent_projection(
     body
 }
 
-fn render_agent_body(row: &TranscriptRow, theme: Theme, width: usize) -> Vec<Line<'static>> {
-    if row.content.blocks.is_empty() {
-        return render_markdown_body(&row.text, theme, width);
-    }
-    let mut body = Vec::new();
-    for block in &row.content.blocks {
-        render_block(&mut body, block, theme, 0, width);
-    }
-    body
-}
-
-impl RichTranscript {
-    pub fn new(entries: &[DshRenderEntry], width: usize, theme: Theme) -> Self {
-        let width = width.max(1);
-        let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
-        let mut projected = Vec::with_capacity(entries.len());
-        let mut start_y = 0usize;
-        for entry in entries {
-            let projection = ProjectionInfo::plain(entry, width, theme);
-            let lines = semantic_lines(
-                entry,
-                width,
-                theme,
-                &projection,
-                &HashSet::new(),
-                true,
-                &appearance,
-            );
-            if lines.is_empty() {
-                continue;
-            }
-            // Every entry keeps one non-selectable spacer row, matching the
-            // existing scrollback rhythm without inventing a fake identity.
-            let height = lines.len().saturating_add(1);
-            projected.push(RichEntry {
-                id: entry.id,
-                lines,
-                start_y,
-            });
-            start_y = start_y.saturating_add(height);
-        }
-        Self {
-            width,
-            entries: projected,
-            total_height: start_y,
-        }
-    }
-
-    pub fn width(&self) -> usize {
-        self.width
-    }
-
-    pub fn total_height(&self) -> usize {
-        self.total_height
-    }
-
-    pub fn anchor_at(&self, scroll_top: usize) -> Option<ScrollAnchor> {
-        let top = scroll_top.min(self.total_height.checked_sub(1)?);
-        let entry = self
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| entry.start_y <= top)?;
-        let intra = top.saturating_sub(entry.start_y);
-        Some(ScrollAnchor {
-            entry_id: entry.id,
-            intra_row: intra.min(entry.lines.len().saturating_sub(1)),
-        })
-    }
-
-    pub fn scroll_for_anchor(&self, anchor: ScrollAnchor) -> Option<usize> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|entry| entry.id == anchor.entry_id)?;
-        Some(
-            entry
-                .start_y
-                .saturating_add(anchor.intra_row.min(entry.lines.len().saturating_sub(1))),
-        )
-    }
-
-    pub fn visible_lines(&self, scroll_top: usize, viewport_height: u16) -> Vec<RichPaintLine> {
-        let top = scroll_top.min(self.total_height);
-        let bottom = top.saturating_add(viewport_height as usize);
-        let mut painted = Vec::new();
-        for entry in &self.entries {
-            for line in &entry.lines {
-                let virtual_y = entry.start_y.saturating_add(line.line_index);
-                if virtual_y < top {
-                    continue;
-                }
-                if virtual_y >= bottom {
-                    break;
-                }
-                let mut line = line.clone();
-                line.screen_y = (virtual_y.saturating_sub(top)) as u16;
-                let theme = *Theme::current();
-                let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
-                EntryRenderer::paint_dynamic(
-                    &mut line.line,
-                    DynamicAccentSpec {
-                        tick: 0,
-                        logical_row: line.accent_wave_row,
-                        wave_rows: appearance.animation.wave_rows,
-                        wave_speed: GROK_WAVE_SPEED,
-                        background: line.background.unwrap_or(theme.bg_base),
-                        accent: line.accent,
-                        flash_accent: line.flash_accent,
-                        bullet: line.bullet,
-                        bullet_span: line.bullet_span,
-                        selected: false,
-                        flash: false,
-                        pending_user_input: false,
-                    },
-                );
-                painted.push(line);
-            }
-            if entry.start_y >= bottom {
-                break;
-            }
-        }
-        painted
-    }
-
-    pub fn line_y(&self, entry_id: DshRenderEntryId, line_index: usize) -> Option<usize> {
-        let entry = self.entries.iter().find(|entry| entry.id == entry_id)?;
-        (line_index < entry.lines.len()).then_some(entry.start_y.saturating_add(line_index))
-    }
-}
-
-/// Paint a materialized scrollback line. Scrollback owns wrapping and line
-/// identity; this helper only applies Grok's semantic role colors.
-pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: Theme) -> Style {
-    if header {
-        return Style::default()
-            .fg(color_for_kind(kind, theme))
-            .add_modifier(Modifier::BOLD);
-    }
-    let color = if text.starts_with("▸ ")
-        || text.starts_with("› ")
-        || text.starts_with(glyphs::disclosure_open())
-        || text.starts_with("◆ ")
-        || text.starts_with('✓')
-    {
-        theme.gray_bright
-    } else if text.starts_with('✗') || text.starts_with("[unsupported") {
-        theme.accent_user
-    } else if text.starts_with("diff ") {
-        theme.diff_equal_fg
-    } else if text.starts_with('+') {
-        theme.diff_insert_fg
-    } else if text.starts_with('-') {
-        theme.diff_delete_fg
-    } else {
-        color_for_kind(kind, theme)
-    };
-    Style::default().fg(color)
-}
-
-/// Render one transcript row using the same role hierarchy as the imported
-/// Grok block widgets. User and assistant messages render their content
-/// directly; operational rows retain a stable semantic header.
-pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
-    let width = 120;
-    let mut appearance = GrokAppearanceSnapshot::default().scrollback(theme);
-    appearance.scrollback.blocks.prompt.vpad = false;
-    appearance.scrollback.blocks.prompt.bg = BlockBackground::None;
-    let block = match row.kind {
-        DshRenderKind::User => UserPromptBlock::new(&row.text).render(UserPromptContext {
-            mode: DisplayMode::Expanded,
-            width,
-            appearance: &appearance,
-            theme,
-        }),
-        DshRenderKind::Assistant => {
-            AgentMessageBlock::new(render_agent_body(row, theme, width)).render()
-        }
-        _ => return render_generic_row_at_width(row, theme, width),
-    };
-    BlockRenderer::render(
-        block,
-        BlockRenderSpec {
-            width,
-            base_background: theme.bg_base,
-        },
-    )
-    .output
-    .lines
-    .into_iter()
-    .map(|line| line.content)
-    .collect()
-}
-
 fn render_generic_row_at_width(
     row: &TranscriptRow,
     theme: Theme,
@@ -961,41 +750,6 @@ fn truncate_summary(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(crate) fn default_display_mode(
-    entry: &DshRenderEntry,
-    width: usize,
-    theme: Theme,
-) -> DisplayMode {
-    if entry.visibility == DshRenderVisibility::Collapsed {
-        return DisplayMode::Collapsed;
-    }
-    match entry.kind {
-        DshRenderKind::User => {
-            let lines = render_row(&TranscriptRow::from(entry.clone()), theme)
-                .iter()
-                .map(|line| word_wrap_line(line, width))
-                .map(|lines| lines.len())
-                .sum::<usize>();
-            if lines > 3 {
-                DisplayMode::Truncated
-            } else {
-                DisplayMode::Expanded
-            }
-        }
-        DshRenderKind::Thinking if entry.finish == DshRenderFinish::Running => {
-            DisplayMode::Truncated
-        }
-        DshRenderKind::Thinking
-        | DshRenderKind::ToolCall
-        | DshRenderKind::ToolResult
-        | DshRenderKind::Error => DisplayMode::Collapsed,
-        DshRenderKind::AgentContext | DshRenderKind::Context | DshRenderKind::Compaction => {
-            DisplayMode::Collapsed
-        }
-        _ => DisplayMode::Expanded,
-    }
-}
-
 pub(crate) fn default_display_mode_ref(entry: DshRenderEntryRef<'_>, width: usize) -> DisplayMode {
     if entry.visibility == DshRenderVisibility::Collapsed {
         return DisplayMode::Collapsed;
@@ -1024,20 +778,6 @@ pub(crate) fn default_display_mode_ref(entry: DshRenderEntryRef<'_>, width: usiz
         | DshRenderKind::Context
         | DshRenderKind::Compaction => DisplayMode::Collapsed,
         _ => DisplayMode::Expanded,
-    }
-}
-
-/// Reconstruct a stable copy payload from typed blocks. This intentionally
-/// preserves newlines and does not trim user-visible content.
-pub fn copy_row(row: &TranscriptRow) -> String {
-    copy_content(&row.content, &row.text)
-}
-
-fn copy_content(content: &DshRenderContent, fallback: &str) -> String {
-    if content.blocks.is_empty() {
-        fallback.to_string()
-    } else {
-        content.display_text()
     }
 }
 
@@ -1238,6 +978,79 @@ mod tests {
     use dsh_pager_protocol::{HistoryEntry, SessionEvent};
     use serde_json::json;
 
+    fn materialized_entries(
+        entries: &[DshRenderEntry],
+        width: usize,
+        theme: Theme,
+    ) -> Vec<RichPaintLine> {
+        let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+        let mut lines = Vec::new();
+        for entry in entries {
+            let projection = ProjectionInfo::plain(entry, width.max(1), theme);
+            lines.extend(semantic_lines(
+                entry,
+                width.max(1),
+                theme,
+                &projection,
+                &HashSet::new(),
+                true,
+                &appearance,
+            ));
+        }
+        lines
+    }
+
+    fn entry_from_row(row: TranscriptRow) -> DshRenderEntry {
+        DshRenderEntry {
+            id: row.id,
+            source_seq: row.source_seq,
+            created_at_ms: row.created_at_ms,
+            started_at_ms: row.started_at_ms,
+            finished_at_ms: row.finished_at_ms,
+            kind: row.kind,
+            text: row.text,
+            partial: false,
+            visibility: row.visibility,
+            finish: row.finish,
+            group_key: row.group_key,
+            selectable: row.selectable,
+            lineage: Vec::new(),
+            content: row.content,
+        }
+    }
+
+    fn materialized_row(row: TranscriptRow, width: usize, theme: Theme) -> Vec<RichPaintLine> {
+        materialized_entries(&[entry_from_row(row)], width, theme)
+    }
+
+    fn materialized_row_with_expanded_blocks(
+        row: TranscriptRow,
+        width: usize,
+        theme: Theme,
+    ) -> Vec<RichPaintLine> {
+        let entry = entry_from_row(row);
+        let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+        let mut projection = ProjectionInfo::plain(&entry, width.max(1), theme);
+        projection.mode = DisplayMode::Expanded;
+        let expanded_blocks = entry
+            .content
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| is_local_foldable_block(block))
+            .map(|(index, _)| (entry.id, index))
+            .collect();
+        semantic_lines(
+            &entry,
+            width.max(1),
+            theme,
+            &projection,
+            &expanded_blocks,
+            true,
+            &appearance,
+        )
+    }
+
     fn row() -> TranscriptRow {
         TranscriptRow {
             id: DshRenderEntryId::Event { seq: 7 },
@@ -1271,28 +1084,16 @@ mod tests {
     #[test]
     fn structured_blocks_render_roles_and_copy_without_flattening_at_adapter() {
         let row = row();
-        let rendered = render_row(&row, *Theme::current())
+        let copied = row.content.display_text();
+        let rendered = materialized_row(row, 120, *Theme::current())
             .iter()
-            .map(Line::to_string)
+            .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("src/lib.rs"));
         assert!(rendered.contains("- old"));
         assert!(rendered.contains("+ new"));
-        assert!(copy_row(&row).contains("diff src/lib.rs"));
-    }
-
-    #[test]
-    fn materialized_tool_lines_keep_semantic_roles() {
-        let theme = *Theme::current();
-        assert_eq!(
-            style_for_paint(DshRenderKind::ToolCall, false, "▸ edit", theme).fg,
-            Some(theme.gray_bright)
-        );
-        assert_eq!(
-            style_for_paint(DshRenderKind::Error, false, "✗ result", theme).fg,
-            Some(theme.accent_user)
-        );
+        assert!(copied.contains("diff src/lib.rs"));
     }
 
     #[test]
@@ -1305,8 +1106,7 @@ mod tests {
             "fallback",
         );
         user.created_at_ms = Some(1_787_500_000_000);
-        let rich = RichTranscript::new(std::slice::from_ref(&user), 80, theme);
-        let lines = rich.visible_lines(0, 20);
+        let lines = materialized_entries(std::slice::from_ref(&user), 80, theme);
         let timestamp_line = lines
             .iter()
             .find(|line| line.timestamp.is_some())
@@ -1326,7 +1126,7 @@ mod tests {
             DshRenderKind::ToolCall,
             "pwd",
         );
-        let tool_lines = RichTranscript::new(&[tool], 80, theme).visible_lines(0, 20);
+        let tool_lines = materialized_entries(&[tool], 80, theme);
         assert!(tool_lines.iter().all(|line| line.timestamp.is_none()));
     }
 
@@ -1354,11 +1154,14 @@ mod tests {
                 fallback: "# Title".into(),
             },
         };
-        let rendered = render_row(&assistant, theme);
+        let rendered = materialized_row(assistant.clone(), 120, theme)
+            .into_iter()
+            .map(|line| line.line)
+            .collect::<Vec<_>>();
         let text = rendered.iter().map(Line::to_string).collect::<Vec<_>>();
-        assert_eq!(text[0], "Title");
+        assert_eq!(text[0].trim(), "Title");
         assert!(!text.iter().any(|line| line == "Assistant"));
-        assert!(text.iter().any(|line| line == "Title"));
+        assert!(text.iter().any(|line| line.trim() == "Title"));
         assert!(!text.iter().any(|line| line.contains("# Title")));
         let inline_code = rendered
             .iter()
@@ -1386,10 +1189,17 @@ mod tests {
             content: DshRenderContent::default(),
             ..assistant
         };
-        let user_lines = render_row(&user, theme);
-        assert_eq!(user_lines.len(), 1);
-        assert_eq!(user_lines[0].to_string(), "❯ hello");
-        assert!(!user_lines.iter().any(|line| line.to_string() == "You"));
+        let user_lines = materialized_row(user, 120, theme);
+        assert!(
+            user_lines
+                .iter()
+                .any(|line| line.line.to_string().trim() == "❯ hello")
+        );
+        assert!(
+            !user_lines
+                .iter()
+                .any(|line| line.line.to_string().trim() == "You")
+        );
     }
 
     #[test]
@@ -1436,8 +1246,7 @@ mod tests {
             },
         };
         let theme = *Theme::current();
-        let rich = RichTranscript::new(std::slice::from_ref(&entry), 80, theme);
-        let initial = rich.visible_lines(0, 20);
+        let initial = materialized_entries(std::slice::from_ref(&entry), 80, theme);
         assert!(initial.iter().any(|line| line.copy_text == "◆ Thinking…"));
         assert!(initial.iter().any(|line| line.copy_text == "◆ shell"));
         assert!(initial.iter().any(|line| line.copy_text == "final answer"));
@@ -1809,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_transcript_uses_structured_blocks_and_stable_identity() {
+    fn semantic_materializer_uses_structured_blocks_and_stable_identity() {
         let row = row();
         let entry = DshRenderEntry {
             id: row.id,
@@ -1827,8 +1636,7 @@ mod tests {
             lineage: Vec::new(),
             content: row.content,
         };
-        let rich = RichTranscript::new(&[entry], 80, *Theme::current());
-        let lines = rich.visible_lines(0, 20);
+        let lines = materialized_entries(&[entry], 80, *Theme::current());
         let rendered = lines
             .iter()
             .map(|line| line.line.to_string())
@@ -1841,8 +1649,6 @@ mod tests {
             lines.iter().map(|line| line.line_index).collect::<Vec<_>>(),
             (0..lines.len()).collect::<Vec<_>>()
         );
-        let anchor = rich.anchor_at(1).expect("anchor");
-        assert_eq!(rich.scroll_for_anchor(anchor), Some(1));
     }
 
     #[test]
@@ -1868,8 +1674,7 @@ mod tests {
                 fallback: text.into(),
             },
         };
-        let rich = RichTranscript::new(&[entry], 24, *Theme::current());
-        let lines = rich.visible_lines(0, 20);
+        let lines = materialized_entries(&[entry], 24, *Theme::current());
 
         assert!(
             lines.len() > 4,
@@ -1887,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_transcript_wraps_unicode_without_losing_lines() {
+    fn semantic_materializer_wraps_unicode_without_losing_lines() {
         let mut row = row();
         row.content = DshRenderContent {
             blocks: vec![DshRenderBlock::Markdown {
@@ -1895,7 +1700,7 @@ mod tests {
             }],
             fallback: "中文abcdef".into(),
         };
-        let rich = RichTranscript::new(
+        let lines = materialized_entries(
             &[DshRenderEntry {
                 id: row.id,
                 source_seq: row.source_seq,
@@ -1915,9 +1720,8 @@ mod tests {
             4,
             *Theme::current(),
         );
-        assert!(rich.total_height() > 1);
-        let visible_text = rich
-            .visible_lines(0, 20)
+        assert!(lines.len() > 1);
+        let visible_text = lines
             .iter()
             .flat_map(|line| line.line.to_string().chars().collect::<Vec<_>>())
             .filter(|character| !character.is_whitespace())
@@ -1966,16 +1770,22 @@ mod tests {
                 content: DshRenderContent::default(),
             },
         ];
-        let rich = RichTranscript::new(&entries, 80, *Theme::current());
-        let rendered = rich
-            .visible_lines(0, 20)
+        let lines = materialized_entries(&entries, 80, *Theme::current());
+        let rendered = lines
             .iter()
             .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!rendered.contains("secret system prompt"));
         assert!(rendered.contains("repository files"));
-        assert_eq!(rich.entries.len(), 1);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.entry_id)
+                .collect::<HashSet<_>>()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2031,9 +1841,9 @@ mod tests {
                 fallback: "fallback".into(),
             },
         };
-        let rendered = render_row(&row, *Theme::current())
+        let rendered = materialized_row_with_expanded_blocks(row, 120, *Theme::current())
             .iter()
-            .map(Line::to_string)
+            .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         for expected in [
@@ -2042,7 +1852,7 @@ mod tests {
             "◆ shell",
             "✗ result",
             "output",
-            "[image: image/png]",
+            "[unsupported image block]",
             "[unsupported block: future]",
             "raw payload",
         ] {
@@ -2076,7 +1886,10 @@ mod tests {
                     blocks: vec![block],
                 },
             };
-            render_row(&row, theme)
+            materialized_row_with_expanded_blocks(row, 120, theme)
+                .into_iter()
+                .map(|line| line.line)
+                .collect::<Vec<_>>()
         };
 
         let terminal = render(DshRenderBlock::ToolCall {
@@ -2111,10 +1924,16 @@ mod tests {
             .iter()
             .find(|line| line.to_string().contains("Run show workspace"))
             .expect("expanded terminal header");
-        assert_eq!(terminal_header.to_string(), "◆ Run show workspace");
-        assert_eq!(
-            terminal_header.spans[0].content,
-            format!("{} ", glyphs::diamond_filled())
+        assert!(
+            terminal_header
+                .to_string()
+                .ends_with("◆ Run show workspace")
+        );
+        assert!(
+            terminal_header
+                .spans
+                .iter()
+                .any(|span| span.content == format!("{} ", glyphs::diamond_filled()))
         );
         assert!(terminal_text.contains("$ pwd"));
         assert!(terminal_text.contains("/work"));
@@ -2365,15 +2184,13 @@ mod tests {
                 content: DshRenderContent::default(),
             },
         ];
-        let rich = RichTranscript::new(&entries, 80, theme);
-        let user_lines = rich
-            .visible_lines(0, 20)
-            .into_iter()
+        let lines = materialized_entries(&entries, 80, theme);
+        let user_lines = lines
+            .iter()
             .filter(|line| line.entry_id == DshRenderEntryId::Event { seq: 10 })
             .collect::<Vec<_>>();
-        let agent_lines = rich
-            .visible_lines(0, 20)
-            .into_iter()
+        let agent_lines = lines
+            .iter()
             .filter(|line| line.entry_id == DshRenderEntryId::Event { seq: 11 })
             .collect::<Vec<_>>();
         assert!(

@@ -3,23 +3,24 @@
 //! This intentionally compares terminal-independent rows, rectangles and
 //! focus ownership. ANSI bytes remain the responsibility of PTY tests.
 
-use dsh_pager::DshRenderEntry;
+use dsh_pager::{DshRenderEntry, scrollback::Scrollback};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Borders, Widget};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{AppShell, KeyOwner, Overlay};
-use crate::appearance::{LayoutConfig, ScrollbarConfig};
+use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::geometry::{HitMap, HitTarget, insert_text_line};
 use crate::host_adapter::GrokHostSnapshot;
 use crate::input::PromptEditor;
+use crate::scrollback_adapter::host_pane::DshScrollbackHost;
 use crate::theme::Theme;
 use crate::views::agent::{AgentView, AgentViewLayout, AgentViewLayoutParams, effective_compact};
 use crate::views::prompt_contract::{PromptFlagContract, PromptInfoContract, PromptStyleContract};
 use crate::views::prompt_widget::GrokPromptRenderer;
 use crate::views::queue::visible_queue_len;
-use crate::views::transcript::RichTranscript;
 use crate::views::turn_status::{MouseButtons, TurnStatusArgs, render_turn_status};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +358,10 @@ pub fn render_semantic(
     area: Rect,
 ) -> SemanticFrame {
     let mut rows = Vec::new();
+    let mut map = HitMap::new(area);
+    let mut screen_buffer = Buffer::empty(area);
+    let theme = Theme::current();
+    screen_buffer.set_style(area, Style::default().bg(theme.bg_base));
     let connection = format!(
         "{} · {} · q{} · {}",
         snapshot.connection,
@@ -376,46 +381,73 @@ pub fn render_semantic(
             rect: layout.scrollback.into(),
         });
     } else {
-        let entries = snapshot
-            .transcript
-            .iter()
-            .map(|row| DshRenderEntry {
-                id: row.id,
-                source_seq: row.source_seq,
-                created_at_ms: row.created_at_ms,
-                started_at_ms: row.started_at_ms,
-                finished_at_ms: row.finished_at_ms,
-                kind: row.kind,
-                text: row.text.clone(),
-                partial: false,
-                visibility: row.visibility,
-                finish: row.finish,
-                group_key: row.group_key.clone(),
-                selectable: row.selectable,
-                lineage: Vec::new(),
-                content: row.content.clone(),
-            })
-            .collect::<Vec<_>>();
-        let rich = RichTranscript::new(
-            &entries,
-            layout.scrollback_content.width.saturating_sub(1).max(1) as usize,
-            *Theme::current(),
+        let mut scrollback = Scrollback::from_render_entries(snapshot_render_entries(snapshot));
+        let mut host = DshScrollbackHost::default();
+        let content = layout.scrollback_content;
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(theme.bg_light))
+            .style(Style::default().bg(theme.bg_base));
+        let transcript_inner = block.inner(content);
+        block.render(content, &mut screen_buffer);
+        let render_width = content.width.saturating_sub(1).max(1) as usize;
+        let appearance = GrokAppearanceSnapshot::for_area(area, false);
+        host.sync_with_appearance(
+            &mut scrollback,
+            render_width,
+            *theme,
+            appearance.show_timestamps,
+            appearance.scrollback(*theme),
         );
-        for paint in rich.visible_lines(0, layout.scrollback.height) {
-            if paint.screen_y >= layout.scrollback.height {
-                continue;
+        let scroll_top = host.prepare_viewport(&mut scrollback, 0, content.height, false);
+        for paint in host.visible_lines(&mut scrollback, scroll_top, content.height) {
+            if let Some(timestamp) =
+                host.paint_buffer_line(&mut screen_buffer, transcript_inner, &paint, None)
+            {
+                map.insert(crate::geometry::HitRegion {
+                    target: HitTarget::Overlay("transcript-timestamp".into()),
+                    rect: timestamp.rect,
+                    label: timestamp.label,
+                    link: None,
+                    priority: 12,
+                });
             }
             rows.push(SemanticRow {
                 role: "transcript".into(),
                 text: paint.line.to_string(),
                 rect: Rect::new(
-                    layout.scrollback.x.saturating_add(1),
-                    layout.scrollback.y.saturating_add(paint.screen_y),
-                    layout.scrollback.width.saturating_sub(1),
+                    transcript_inner.x,
+                    transcript_inner.y.saturating_add(paint.screen_y),
+                    transcript_inner.width,
                     1,
                 )
                 .into(),
             });
+            if !paint.selectable {
+                continue;
+            }
+            let text = paint.copy_text.clone();
+            let target = paint.block_index.map_or_else(
+                || HitTarget::TranscriptEntry(paint.entry_id),
+                |block_index| HitTarget::TranscriptBlock {
+                    entry_id: paint.entry_id,
+                    block_index,
+                },
+            );
+            insert_text_line(
+                &mut map,
+                target,
+                paint.line_index,
+                content
+                    .x
+                    .saturating_add(1)
+                    .saturating_add(paint.content_offset),
+                content.y.saturating_add(paint.screen_y),
+                paint.content_width,
+                &text,
+                paint.joiner_to_previous.clone(),
+                crate::geometry::first_link_target(&text),
+            );
         }
     }
     rows.push(SemanticRow {
@@ -462,49 +494,6 @@ pub fn render_semantic(
         rect: layout.status_line.into(),
     });
 
-    let mut map = HitMap::new(area);
-    let entries = snapshot
-        .transcript
-        .iter()
-        .map(|row| DshRenderEntry {
-            id: row.id,
-            source_seq: row.source_seq,
-            created_at_ms: row.created_at_ms,
-            started_at_ms: row.started_at_ms,
-            finished_at_ms: row.finished_at_ms,
-            kind: row.kind,
-            text: row.text.clone(),
-            partial: false,
-            visibility: row.visibility,
-            finish: row.finish,
-            group_key: row.group_key.clone(),
-            selectable: row.selectable,
-            lineage: Vec::new(),
-            content: row.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    let rich = RichTranscript::new(
-        &entries,
-        layout.scrollback_content.width.saturating_sub(1).max(1) as usize,
-        *Theme::current(),
-    );
-    for paint in rich.visible_lines(0, layout.scrollback.height) {
-        if paint.screen_y >= layout.scrollback.height {
-            continue;
-        }
-        let text = paint.line.to_string();
-        insert_text_line(
-            &mut map,
-            HitTarget::TranscriptEntry(paint.entry_id),
-            paint.line_index,
-            layout.scrollback.x.saturating_add(1),
-            layout.scrollback.y.saturating_add(paint.screen_y),
-            layout.scrollback.width.saturating_sub(1),
-            &text,
-            paint.joiner_to_previous.clone(),
-            crate::geometry::first_link_target(&text),
-        );
-    }
     map.insert(crate::geometry::HitRegion {
         target: HitTarget::Prompt,
         rect: layout.prompt,
@@ -537,10 +526,10 @@ pub fn render_semantic(
             priority,
         });
     }
-    let mut screen_buffer = Buffer::empty(area);
-    let theme = Theme::current();
-    screen_buffer.set_style(area, Style::default().bg(theme.bg_base));
     for row in &rows {
+        if row.role == "transcript" {
+            continue;
+        }
         let rect = Rect::new(row.rect.x, row.rect.y, row.rect.width, row.rect.height);
         screen_buffer.set_string(
             rect.x,
@@ -636,6 +625,29 @@ pub fn render_semantic(
     }
 }
 
+fn snapshot_render_entries(snapshot: &GrokHostSnapshot) -> Vec<DshRenderEntry> {
+    snapshot
+        .transcript
+        .iter()
+        .map(|row| DshRenderEntry {
+            id: row.id,
+            source_seq: row.source_seq,
+            created_at_ms: row.created_at_ms,
+            started_at_ms: row.started_at_ms,
+            finished_at_ms: row.finished_at_ms,
+            kind: row.kind,
+            text: row.text.clone(),
+            partial: false,
+            visibility: row.visibility,
+            finish: row.finish,
+            group_key: row.group_key.clone(),
+            selectable: row.selectable,
+            lineage: Vec::new(),
+            content: row.content.clone(),
+        })
+        .collect()
+}
+
 fn semantic_row_style(role: &str, theme: &Theme) -> Style {
     let color = match role {
         "header" => theme.gray_bright,
@@ -669,7 +681,8 @@ pub fn semantic_signature(frame: &SemanticFrame) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsh_pager::{DshQueueContent, DshQueueItem};
+    use crate::host_adapter::TranscriptRow;
+    use dsh_pager::{DshQueueContent, DshQueueItem, DshRenderEntryId, DshRenderKind};
     use dsh_pager_protocol::QueuePlacement;
 
     #[test]
@@ -761,6 +774,46 @@ mod tests {
         assert!(frame.cells.iter().any(|cell| cell.x == 0 && cell.y == 0));
         assert!(frame.cells.iter().any(|cell| cell.symbol == "╭"));
         assert!(frame.cells.iter().any(|cell| cell.y > 0));
+    }
+
+    #[test]
+    fn transcript_reference_uses_production_painter_and_hit_geometry() {
+        let runner = ReferenceRunner::new(ParityMatrix::default());
+        let mut snapshot = GrokHostSnapshot::demo();
+        snapshot.transcript = vec![TranscriptRow::from(DshRenderEntry::plain(
+            DshRenderEntryId::Event { seq: 41 },
+            41,
+            DshRenderKind::User,
+            "parity prompt",
+        ))];
+        let mut shell = AppShell::default();
+        let frame = runner.render(
+            &snapshot,
+            &mut shell,
+            TerminalSize {
+                width: 80,
+                height: 24,
+            },
+        );
+
+        let transcript_row = frame
+            .rows
+            .iter()
+            .find(|row| row.role == "transcript" && row.text.contains("❯ parity prompt"))
+            .expect("production painter emits the user prompt row");
+        assert!(
+            frame
+                .cells
+                .iter()
+                .any(|cell| { cell.y == transcript_row.rect.y && cell.bg == "bg_highlight" }),
+            "production user-row background is present in the transcript"
+        );
+        assert!(
+            frame
+                .hits
+                .iter()
+                .any(|hit| hit.target.contains("TranscriptEntry"))
+        );
     }
 
     #[test]
