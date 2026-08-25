@@ -4,6 +4,7 @@
 grok build 的代码仓库在/home/leo/code/grok-build
 
 - [GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md](GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md)：长期总控计划、不可破坏的设计契约、Grok 源码复用地图、细化里程碑、工作包、验收矩阵和风险登记；这是后续实现的最高优先级入口。
+- [GROK_SCROLLBACK_CLOSURE_PLAN.md](GROK_SCROLLBACK_CLOSURE_PLAN.md)：N2/档 3 执行细则。冻结 `transcript.rs` 自造视觉算法，按 Grok `scrollback/` 闭包 vendor，并把该神文件的职责按切片删掉。
 - [开发进度记录](开发进度记录/README.md)：每个工作批次在修改仓库前必须创建的时间戳记录，以及一份记录对应一个 Git commit 的提交规则。
 - [ARCHITECTURE.md](ARCHITECTURE.md)：模块边界、数据流和哪些代码允许依赖 host。
 - [MIGRATION_PLAN.md](MIGRATION_PLAN.md)：从旧 pager 到 Grok UI 的垂直迁移顺序。

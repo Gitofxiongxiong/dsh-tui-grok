@@ -465,6 +465,11 @@ Unknown block；File Search preview 复用同一 width/grapheme/hit-map 规则�
 N2 的出口：结构化 fixture 在 Grok reference 与 DSH adapter 下的 glyph、颜色 role、
 wrapping、selection/copy/link、stable block target 和 partial replacement 一致。
 
+执行细则、冻结 `transcript.rs` 继续膨胀的规则、Grok `scrollback/` 目录对照和
+S1–S7 删除顺序见
+[GROK_SCROLLBACK_CLOSURE_PLAN.md](GROK_SCROLLBACK_CLOSURE_PLAN.md)。
+那份文档是档 3（完整闭包替换）的可执行计划；未完成其 S7 不得把 N2 标成完成。
+
 ### N3：Workspace/Dashboard 与 Agent/Task/Subagent 专用 pane
 
 - Workspace：迁移 Grok tree/list/group/peek/back/focus/reorder/archive 视觉，DSH 提供
