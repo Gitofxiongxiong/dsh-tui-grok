@@ -287,7 +287,15 @@ execute + markdown。
 - `blocks/agent.rs`
 - `blocks/tool/execute.rs`（已有 B vendor，改接到 EntryRenderer，不要第二套 header）
 - `blocks/tool/read.rs` `search.rs` `edit.rs` 以及 verb-run 需要的 collapsed 摘要
-- `blocks/markdown_content.rs`（markdown crate 已 vendor，缺的是 block 包装）
+- Markdown B 接缝：完整 markdown parser/renderer 已随 `xai-grok-markdown` vendor，
+  `scrollback_adapter/materialize_entry.rs` 保留 `BlockOutput`、样式、wrap/copy 包装；
+  上游 `blocks/markdown_content.rs` 中依赖 streaming cache/raw overlay 的 wrapper 不在
+  N2 复制，作为全量 parity 的显式排除项登记在 `SOURCE_MANIFEST.md`
+
+> S4R 收尾决定：上面这条 Markdown B 接缝是本节“复制完整文件”默认规则的显式例外，
+> 不是把 parser/renderer 重写成本地算法。DSH 当前有 typed Markdown 正文，但没有 Grok
+> streaming cache/raw overlay runtime；N2 保留已 vendor 的完整纯 renderer 和
+> renderer-neutral block contract，不据此宣称完整 `MarkdownContent` runtime parity。
 
 随后：`web_search` `web_fetch` `list_dir` `subagent` `bg_task` `session_event`
 `context_info` `btw` `workflow`。没有对应 DSH 数据的，画显式 empty/unsupported，

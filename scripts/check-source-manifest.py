@@ -53,11 +53,12 @@ def main() -> int:
     parser.add_argument(
         "--upstream",
         type=Path,
-        default=Path("/home/leo/code/grok-build"),
-        help="Grok Build checkout (default: /home/leo/code/grok-build)",
+        default=None,
+        help="Grok Build checkout (default: sibling ../grok-build)",
     )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
+    upstream_root = args.upstream or repo.parent / "grok-build"
     manifest_path = repo / "crates/dsh-pager-grok-ui/SOURCE_MANIFEST.md"
     manifest = manifest_path.read_text(encoding="utf-8")
 
@@ -75,7 +76,7 @@ def main() -> int:
         if upstream_name == "same":
             upstream_name = local_name.removeprefix("vendor/grok/")
         local_path = repo / "crates/dsh-pager-grok-ui" / local_name
-        upstream = upstream_path(args.upstream, upstream_name)
+        upstream = upstream_path(upstream_root, upstream_name)
         if not local_path.is_file():
             local_drift.append(f"missing local vendor file: {local_path}")
         else:
@@ -91,17 +92,17 @@ def main() -> int:
 
     license_candidates = (
         repo / "crates/dsh-pager-grok-ui/vendor/grok/LICENSE",
-        args.upstream / "LICENSE",
+        upstream_root / "LICENSE",
     )
     for license_path in license_candidates:
         if not license_path.is_file():
             missing_license.append(f"missing license: {license_path}")
 
-    revision = source_revision(args.upstream)
+    revision = source_revision(upstream_root)
     if revision:
         print(f"upstream revision: {revision}")
     else:
-        print(f"upstream revision unavailable: {args.upstream}")
+        print(f"upstream revision unavailable: {upstream_root}")
     print(f"manifest rows checked: {len(rows)}")
     print(f"local drift: {len(local_drift)}")
     print(f"upstream drift: {len(upstream_drift)}")
