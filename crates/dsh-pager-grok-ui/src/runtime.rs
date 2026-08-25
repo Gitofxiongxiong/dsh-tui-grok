@@ -52,6 +52,7 @@ use crate::media::{
 use crate::modal_window_state::ModalWindowState;
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
+use crate::scrollback_adapter::tick::animation_tick;
 use crate::selection::SelectionModel;
 use crate::theme::Theme;
 use crate::views::{
@@ -654,9 +655,6 @@ impl UiState {
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
         let appearance = GrokAppearanceSnapshot::for_area(area, compact);
-        let show_timestamps = self
-            .timestamps_enabled
-            .unwrap_or(appearance.show_timestamps);
         let layout_cfg = LayoutConfig::default();
         let scrollbar_cfg = ScrollbarConfig::default();
         let inner_width = AgentViewLayout::inner_width(area, &layout_cfg, compact);
@@ -801,7 +799,7 @@ impl UiState {
             frame,
             &agent_layout,
             &scrollbar_cfg,
-            show_timestamps,
+            &appearance,
             &snapshot,
             &mut session.scrollback,
         );
@@ -1208,11 +1206,14 @@ impl UiState {
         frame: &mut Frame<'_>,
         layout: &AgentViewLayout,
         scrollbar_config: &ScrollbarConfig,
-        show_timestamps: bool,
+        appearance: &GrokAppearanceSnapshot,
         snapshot: &GrokHostSnapshot,
         scrollback: &mut dsh_pager::scrollback::Scrollback,
     ) {
         let theme = Theme::current();
+        let show_timestamps = self
+            .timestamps_enabled
+            .unwrap_or(appearance.show_timestamps);
         let content = layout.scrollback_content;
         let rail = Rect::new(
             layout.timeline_x,
@@ -1228,11 +1229,18 @@ impl UiState {
         let now = Instant::now();
         let started_at = *self.rail_wave_started_at.get_or_insert(now);
         self.scrollback_pane
-            .set_wave_elapsed(now.saturating_duration_since(started_at));
+            .set_wave_tick(animation_tick(now.saturating_duration_since(started_at)));
         self.scrollback_pane
             .set_selected_target(self.selected_transcript.clone());
         self.scrollback_pane
-            .sync_with_options(scrollback, render_width, *theme, show_timestamps);
+            .set_pending_interaction(snapshot.interaction.as_ref());
+        self.scrollback_pane.sync_with_appearance(
+            scrollback,
+            render_width,
+            *theme,
+            show_timestamps,
+            (*appearance).scrollback(*theme),
+        );
         let empty = self.scrollback_pane.is_empty();
         if empty {
             self.scroll = 0;
@@ -1260,7 +1268,6 @@ impl UiState {
             {
                 let text = paint.copy_text.clone();
                 let timestamp = paint.timestamp.clone();
-                let has_timestamp = timestamp.is_some();
                 while lines.len() < paint.screen_y as usize {
                     lines.push(Line::from(""));
                 }
@@ -1275,9 +1282,7 @@ impl UiState {
                     .x
                     .saturating_add(1)
                     .saturating_add(paint.content_offset);
-                let line_width = render_width
-                    .saturating_sub(usize::from(paint.content_offset))
-                    .saturating_sub(usize::from(has_timestamp) * 10);
+                let line_width = usize::from(paint.content_width);
                 let target = paint.block_index.map_or_else(
                     || HitTarget::TranscriptEntry(paint.entry_id),
                     |block_index| HitTarget::TranscriptBlock {
@@ -1293,6 +1298,7 @@ impl UiState {
                     content.y.saturating_add(paint.screen_y),
                     line_width as u16,
                     &text,
+                    paint.joiner_to_previous.clone(),
                     first_link_target(&text),
                 );
                 self.geometry_lines.push(geometry);
@@ -4271,12 +4277,14 @@ mod tests {
                 target: target.clone(),
                 line_index: 0,
                 text: "final answer".into(),
+                joiner_to_previous: None,
                 rect: Rect::new(4, 2, 12, 1),
             },
             GeometryLine {
                 target: target.clone(),
                 line_index: 1,
                 text: "second line".into(),
+                joiner_to_previous: Some(" ".into()),
                 rect: Rect::new(4, 3, 12, 1),
             },
         ];
@@ -4360,35 +4368,30 @@ mod tests {
             .iter()
             .find(|line| line.entry_id == id && line.selectable)
             .expect("collapsed completed execute summary");
-        assert_eq!(summary.copy_text, "› Run Query the current workspace");
-        assert!(summary.line.to_string().starts_with("❙  › Run "));
+        assert_eq!(summary.copy_text, "◆ Run Query the current workspace");
+        assert!(summary.line.to_string().starts_with("❙  ◆ Run "));
+        assert!(summary.line.spans.iter().any(|span| {
+            span.content == "❙  " && span.style.fg == Some(theme.accent_success)
+        }));
         assert!(
-            summary
-                .line
-                .spans
-                .iter()
-                .any(|span| { span.content == "❙  " && span.style.fg == Some(theme.gray) })
-        );
-        assert!(
-            summary
-                .line
-                .spans
-                .iter()
-                .any(|span| { span.content == "› " && span.style.fg == Some(theme.gray) })
+            summary.line.spans.iter().any(|span| {
+                span.content == "◆ " && span.style.fg == Some(theme.accent_success)
+            })
         );
         let target = HitTarget::TranscriptEntry(id);
         let rect = Rect::new(3, 2, 60, 1);
         ui.hit_map.insert(HitRegion {
             target: target.clone(),
             rect,
-            label: "› Run Query the current workspace".into(),
+            label: "◆ Run Query the current workspace".into(),
             link: None,
             priority: 10,
         });
         ui.geometry_lines.push(GeometryLine {
             target,
             line_index: 0,
-            text: "› Run Query the current workspace".into(),
+            text: "◆ Run Query the current workspace".into(),
+            joiner_to_previous: None,
             rect,
         });
         let click = || MouseEvent {
@@ -4415,7 +4418,7 @@ mod tests {
             .map(|line| line.copy_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(expanded.contains("▾ Run Query the current workspace"));
+        assert!(expanded.contains("◆ Run Query the current workspace"));
         assert!(!expanded.contains('⌄'));
         assert!(expanded.contains("/work"));
         assert!(expanded.contains("$ pwd"));

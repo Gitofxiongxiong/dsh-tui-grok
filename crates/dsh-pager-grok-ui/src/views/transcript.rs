@@ -5,26 +5,46 @@
 //! needs to inspect protocol JSON or flatten a tool result itself.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Local, TimeZone};
 use dsh_pager::scrollback::{Scrollback, compute_paint_window};
 use dsh_pager::{
-    DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderFinish,
-    DshRenderKind, DshRenderVisibility, DshToolCallView, DshToolDiff, DshToolKind, DshToolResult,
-    DshToolResultView, ScrollAnchor,
+    DshInteraction, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
+    DshRenderFinish, DshRenderKind, DshRenderVisibility, ScrollAnchor,
 };
+#[cfg(test)]
+use dsh_pager::{DshToolCallView, DshToolDiff, DshToolKind, DshToolResult, DshToolResultView};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
-use crate::views::execute_tool::{
-    DisplayMode as ExecuteDisplayMode, ExecuteBlockContext, ExecuteBlockLine,
-};
-use crate::views::execute_tool_adapter::project_execute_tool;
 use crate::{
-    geometry::HitTarget, glyphs, host_adapter::TranscriptRow, render::wrapping::word_wrap_line,
+    appearance::{BlockBackground, GrokAppearanceSnapshot, ScrollbackAppearance},
+    geometry::HitTarget,
+    glyphs,
+    host_adapter::TranscriptRow,
+    render::wrapping::word_wrap_line,
+    scrollback::{
+        agent::AgentMessageBlock,
+        block_renderer::{BlockRenderSpec, BlockRenderer},
+        entry_renderer::{
+            DynamicAccentSpec, EntryLayoutSpec, EntryRenderer, EntrySourceLine, GroupHeaderSpec,
+            TIMESTAMP_RESERVED_WIDTH, TimestampLabel, timestamp_label,
+        },
+        thinking::{ThinkingBlock, ThinkingBlockContext},
+        tool::ToolBlockContext,
+        types::{AccentStyle, DisplayMode},
+        user::{UserPromptBlock, UserPromptContext},
+    },
+    scrollback_adapter::{
+        project_entry::{
+            ProjectedBlock, ProjectedLine as SemanticLine, materialize_block, project_entry,
+        },
+        project_groups::project_groups,
+        project_tool::project_tool,
+        tick::GROK_WAVE_SPEED,
+    },
     theme::Theme,
 };
 
@@ -42,16 +62,20 @@ pub struct RichPaintLine {
     pub header: bool,
     pub group_header: bool,
     pub rail: bool,
-    /// Whether the left rail is in Grok's running wave state.
-    pub rail_animated: bool,
+    /// Grok-owned accent style for the entry rail.
+    pub accent: Option<AccentStyle>,
+    /// Accent used only during Grok's bounded post-finish flash.
+    pub flash_accent: Option<Color>,
+    /// Grok-owned accent style for the first-row bullet.
+    pub bullet: Option<AccentStyle>,
     /// Whether the left rail is in Grok's short post-finish accent flash.
-    pub rail_flash: bool,
-    /// Base accent used by the running wave and finish flash.
-    pub rail_accent: Option<Color>,
+    pub accent_flash: bool,
     /// Logical row phase inside the entry's rail.
-    pub rail_wave_row: u16,
-    /// Number of terminal rows in this contiguous animated rail segment.
-    pub rail_wave_len: u16,
+    pub accent_wave_row: u16,
+    /// Span index of the bullet after EntryRenderer inserts its chrome.
+    pub bullet_span: Option<usize>,
+    /// Freeze animated chrome while this entry is waiting on user input.
+    pub pending_user_input: bool,
     pub selectable: bool,
     pub background: Option<Color>,
     pub copy_text: String,
@@ -61,26 +85,15 @@ pub struct RichPaintLine {
     /// entry, including plain Markdown. Keeping the offset in the paint line
     /// keeps hit-testing aligned with the visible text.
     pub content_offset: u16,
+    /// Selectable content width after chrome and timestamp reservation.
+    pub content_width: u16,
     /// Timestamp painted as a non-selectable right-side overlay. The
     /// transcript copy/selection geometry intentionally keeps it separate.
     pub timestamp: Option<TimestampLabel>,
+    /// Exact source separator before this visual row (`None` = hard break).
+    pub joiner_to_previous: Option<String>,
     pub screen_y: u16,
     pub line: Line<'static>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimestampLabel {
-    pub short: String,
-    pub hover: String,
-}
-
-pub fn timestamp_label(created_at_ms: Option<u64>) -> Option<TimestampLabel> {
-    let millis = i64::try_from(created_at_ms?).ok()?;
-    let local = Local.timestamp_millis_opt(millis).single()?;
-    Some(TimestampLabel {
-        short: local.format("%-I:%M %p").to_string(),
-        hover: local.format("%H:%M:%S | %b %d").to_string(),
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -107,47 +120,7 @@ struct CachedPaneEntry {
     lines: Vec<RichPaintLine>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DisplayMode {
-    Collapsed,
-    Truncated,
-    Expanded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GroupKind {
-    VerbRun,
-    Context,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolVerb {
-    Read,
-    Search,
-    WebFetch,
-    WebSearch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct VerbCounts {
-    read: usize,
-    search: usize,
-    web_fetch: usize,
-    web_search: usize,
-}
-
-impl VerbCounts {
-    fn add(&mut self, verb: ToolVerb) {
-        match verb {
-            ToolVerb::Read => self.read += 1,
-            ToolVerb::Search => self.search += 1,
-            ToolVerb::WebFetch => self.web_fetch += 1,
-            ToolVerb::WebSearch => self.web_search += 1,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectionInfo {
     mode: DisplayMode,
     group_anchor: Option<DshRenderEntryId>,
@@ -155,9 +128,7 @@ struct ProjectionInfo {
     group_hidden: bool,
     group_expanded: bool,
     group_last_visible: bool,
-    group_kind: Option<GroupKind>,
-    group_count: usize,
-    verb_counts: VerbCounts,
+    group_label: Option<String>,
     group_running: bool,
     group_failed: bool,
     rail: bool,
@@ -173,9 +144,7 @@ impl ProjectionInfo {
             group_hidden: false,
             group_expanded: false,
             group_last_visible: false,
-            group_kind: None,
-            group_count: 0,
-            verb_counts: VerbCounts::default(),
+            group_label: None,
             group_running: false,
             group_failed: false,
             rail: entry.kind == DshRenderKind::ToolCall,
@@ -190,40 +159,69 @@ impl ProjectionInfo {
 /// and anchor restoration.  This cache owns only the Grok semantic block lines
 /// for entries that are currently known.  It reports those actual heights back
 /// to the DSH index and then paints through the shared `ScrollbackLayout`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ScrollbackPane {
     width: usize,
     show_timestamps: bool,
-    wave_elapsed_ms: u64,
+    wave_tick: u64,
+    appearance: ScrollbackAppearance,
     entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
     expanded_entries: HashSet<DshRenderEntryId>,
     expanded_blocks: HashSet<(DshRenderEntryId, usize)>,
     expanded_groups: HashSet<DshRenderEntryId>,
     projections: HashMap<DshRenderEntryId, ProjectionInfo>,
     selected_target: Option<HitTarget>,
+    pending_user_input: bool,
+    pending_call_id: Option<String>,
+    pending_entry: Option<DshRenderEntryId>,
+}
+
+impl Default for ScrollbackPane {
+    fn default() -> Self {
+        let theme = Theme::default();
+        Self {
+            width: 0,
+            show_timestamps: true,
+            wave_tick: 0,
+            appearance: GrokAppearanceSnapshot::default().scrollback(theme),
+            entries: HashMap::new(),
+            expanded_entries: HashSet::new(),
+            expanded_blocks: HashSet::new(),
+            expanded_groups: HashSet::new(),
+            projections: HashMap::new(),
+            selected_target: None,
+            pending_user_input: false,
+            pending_call_id: None,
+            pending_entry: None,
+        }
+    }
 }
 
 impl ScrollbackPane {
     pub fn clear(&mut self) {
         self.width = 0;
         self.show_timestamps = true;
-        self.wave_elapsed_ms = 0;
+        self.wave_tick = 0;
         self.entries.clear();
         self.expanded_entries.clear();
         self.expanded_blocks.clear();
         self.expanded_groups.clear();
         self.projections.clear();
         self.selected_target = None;
+        self.pending_user_input = false;
+        self.pending_call_id = None;
+        self.pending_entry = None;
     }
 
     pub fn sync(&mut self, scrollback: &mut Scrollback, width: usize, theme: Theme) {
         self.sync_with_options(scrollback, width, theme, true);
     }
 
-    /// Set monotonic animation time without invalidating the semantic-line
-    /// cache. Running accents are recolored when visible lines materialize.
-    pub fn set_wave_elapsed(&mut self, elapsed: Duration) {
-        self.wave_elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    /// Set the time-derived Grok animation tick without invalidating the
+    /// semantic-line cache. Running accents are recolored when visible lines
+    /// materialize.
+    pub fn set_wave_tick(&mut self, tick: u64) {
+        self.wave_tick = tick;
     }
 
     /// Pass the runtime's current transcript hit target into the projection.
@@ -234,6 +232,16 @@ impl ScrollbackPane {
         self.selected_target = target;
     }
 
+    /// Project the host-authoritative interaction onto the exact transcript
+    /// entry whose running chrome Grok freezes while waiting for the user.
+    pub fn set_pending_interaction(&mut self, interaction: Option<&DshInteraction>) {
+        self.pending_user_input = interaction.is_some();
+        self.pending_call_id = interaction.and_then(|interaction| match interaction {
+            DshInteraction::Approval { call_id, .. } => call_id.clone(),
+            DshInteraction::Question { .. } => None,
+        });
+    }
+
     pub fn sync_with_options(
         &mut self,
         scrollback: &mut Scrollback,
@@ -241,28 +249,45 @@ impl ScrollbackPane {
         theme: Theme,
         show_timestamps: bool,
     ) {
+        let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+        self.sync_with_appearance(scrollback, width, theme, show_timestamps, appearance);
+    }
+
+    pub fn sync_with_appearance(
+        &mut self,
+        scrollback: &mut Scrollback,
+        width: usize,
+        theme: Theme,
+        show_timestamps: bool,
+        appearance: ScrollbackAppearance,
+    ) {
         let width = width.max(1);
-        if self.width != width || self.show_timestamps != show_timestamps {
+        if self.width != width
+            || self.show_timestamps != show_timestamps
+            || self.appearance != appearance
+        {
             self.entries.clear();
         }
         self.width = width;
         self.show_timestamps = show_timestamps;
+        self.appearance = appearance;
         let entries = scrollback.render_entries();
         self.prune_local_state(&entries);
-        self.projections = build_projection(
+        self.pending_entry = self.resolve_pending_entry(&entries);
+        self.projections = entry_projections(
             &entries,
             width,
             theme,
             &self.expanded_entries,
-            &self.expanded_blocks,
             &self.expanded_groups,
+            self.pending_entry,
         );
         let mut live = HashMap::with_capacity(entries.len());
         for (entry_idx, entry) in entries.into_iter().enumerate() {
             let projection = self
                 .projections
                 .get(&entry.id)
-                .copied()
+                .cloned()
                 .unwrap_or_else(|| ProjectionInfo::plain(&entry, width, theme));
             let cached = self.entries.remove(&entry.id);
             let cached = match cached {
@@ -272,12 +297,13 @@ impl ScrollbackPane {
                         &entry,
                         width,
                         theme,
-                        projection,
+                        &projection,
                         &self.expanded_blocks,
                         show_timestamps,
+                        &self.appearance,
                     ),
                     entry: entry.clone(),
-                    projection,
+                    projection: projection.clone(),
                 },
             };
             let height =
@@ -329,27 +355,12 @@ impl ScrollbackPane {
         entry_id: DshRenderEntryId,
         block_index: Option<usize>,
     ) -> bool {
-        if let Some(block_index) = block_index {
-            let foldable = self
-                .entries
-                .get(&entry_id)
-                .and_then(|entry| entry.entry.content.blocks.get(block_index))
-                .is_some_and(is_local_foldable_block);
-            if !foldable {
-                return false;
-            }
-            let key = (entry_id, block_index);
-            if !self.expanded_blocks.insert(key) {
-                self.expanded_blocks.remove(&key);
-            }
-            // The block projection is width-specific just like the upstream
-            // EntryRenderer cache. Rebuild it on the next frame.
-            self.entries.clear();
-            return true;
-        }
-        let Some(projection) = self.projections.get(&entry_id).copied() else {
+        let Some(projection) = self.projections.get(&entry_id).cloned() else {
             return false;
         };
+        // A verb-run header is painted from the anchor's first Tool block, so
+        // its hit target can carry that block index. Upstream group routing
+        // wins before concrete block folding.
         if let Some(anchor) = projection.group_anchor
             && (projection.group_header || anchor == entry_id)
         {
@@ -358,6 +369,30 @@ impl ScrollbackPane {
             }
             self.entries.clear();
             return true;
+        }
+        if let Some(block_index) = block_index {
+            let nested_assistant_block = self
+                .entries
+                .get(&entry_id)
+                .is_some_and(|entry| entry.entry.kind == DshRenderKind::Assistant);
+            if nested_assistant_block {
+                let foldable = self
+                    .entries
+                    .get(&entry_id)
+                    .and_then(|entry| entry.entry.content.blocks.get(block_index))
+                    .is_some_and(is_local_foldable_block);
+                if !foldable {
+                    return false;
+                }
+                let key = (entry_id, block_index);
+                if !self.expanded_blocks.insert(key) {
+                    self.expanded_blocks.remove(&key);
+                }
+                // The block projection is width-specific just like the upstream
+                // EntryRenderer cache. Rebuild it on the next frame.
+                self.entries.clear();
+                return true;
+            }
         }
         if !is_foldable_kind(self.entries.get(&entry_id).map(|entry| &entry.entry)) {
             return false;
@@ -385,8 +420,9 @@ impl ScrollbackPane {
         let now = now_epoch_ms();
         self.entries.values().any(|entry| {
             entry.lines.iter().any(|line| {
-                line.rail_animated
-                    || (line.rail_flash && finish_flash_active(entry.entry.finished_at_ms, now))
+                line.accent.is_some_and(|accent| accent.animated)
+                    || line.bullet.is_some_and(|bullet| bullet.animated)
+                    || (line.accent_flash && finish_flash_active(entry.entry.finished_at_ms, now))
             })
         })
     }
@@ -474,22 +510,68 @@ impl ScrollbackPane {
                 }
                 let mut line = line.clone();
                 line.screen_y = screen_y as u16;
+                line.pending_user_input = self.pending_entry == Some(entry.id);
                 let selected = self
                     .selected_target
                     .as_ref()
                     .is_some_and(|target| line_matches_target(&line, target));
-                apply_dynamic_accent(
-                    &mut line,
-                    self.wave_elapsed_ms,
-                    *Theme::current(),
-                    cached.entry.finished_at_ms,
-                    now_epoch_ms(),
-                    selected,
+                let flashing = line.accent_flash
+                    && finish_flash_active(cached.entry.finished_at_ms, now_epoch_ms());
+                EntryRenderer::paint_dynamic(
+                    &mut line.line,
+                    DynamicAccentSpec {
+                        tick: self.wave_tick,
+                        logical_row: line.accent_wave_row,
+                        wave_rows: self.appearance.animation.wave_rows,
+                        wave_speed: GROK_WAVE_SPEED,
+                        background: line.background.unwrap_or(Theme::current().bg_base),
+                        accent: line.accent,
+                        flash_accent: line.flash_accent,
+                        bullet: line.bullet,
+                        bullet_span: line.bullet_span,
+                        selected,
+                        flash: flashing,
+                        pending_user_input: line.pending_user_input,
+                    },
                 );
                 painted.push(line);
             }
         }
         painted
+    }
+
+    fn resolve_pending_entry(&self, entries: &[DshRenderEntry]) -> Option<DshRenderEntryId> {
+        if !self.pending_user_input {
+            return None;
+        }
+        if let Some(call_id) = self.pending_call_id.as_deref()
+            && let Some(entry) = entries.iter().rev().find(|entry| {
+                entry.content.blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        DshRenderBlock::ToolCall {
+                            call_id: Some(candidate),
+                            ..
+                        } if candidate == call_id
+                    )
+                })
+            })
+        {
+            return Some(entry.id);
+        }
+        entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.finish == DshRenderFinish::Running
+                    && matches!(
+                        entry.kind,
+                        DshRenderKind::ToolCall
+                            | DshRenderKind::Thinking
+                            | DshRenderKind::Assistant
+                    )
+            })
+            .map(|entry| entry.id)
     }
 }
 
@@ -497,97 +579,22 @@ fn semantic_lines(
     entry: &DshRenderEntry,
     width: usize,
     theme: Theme,
-    projection: ProjectionInfo,
+    projection: &ProjectionInfo,
     expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
     show_timestamps: bool,
+    appearance: &ScrollbackAppearance,
 ) -> Vec<RichPaintLine> {
     if projection.group_hidden {
         return Vec::new();
     }
-    let Some(row) = projected_row(entry, projection.mode, width) else {
+    let effective_mode = if projection.group_expanded {
+        DisplayMode::Expanded
+    } else {
+        projection.mode
+    };
+    let Some(row) = projected_row(entry, effective_mode, width) else {
         return Vec::new();
     };
-    let semantic = if entry.kind == DshRenderKind::Thinking
-        && projection.mode == DisplayMode::Collapsed
-        && let Some(block) = entry
-            .content
-            .blocks
-            .iter()
-            .find(|block| matches!(block, DshRenderBlock::Reasoning { .. }))
-    {
-        vec![SemanticLine {
-            line: collapsed_block_line(block, entry, theme),
-            block_index: None,
-            rail: true,
-            header: true,
-            selectable: true,
-        }]
-    } else if projection.mode == DisplayMode::Collapsed
-        && entry.kind == DshRenderKind::ToolCall
-        && let Some(tool) = tool_block(entry)
-        && let Some(line) = execute_summary_line(
-            tool,
-            entry.finish,
-            theme,
-            width.saturating_sub(ENTRY_CHROME_WIDTH),
-        )
-    {
-        vec![SemanticLine {
-            line,
-            block_index: None,
-            rail: true,
-            header: true,
-            selectable: true,
-        }]
-    } else {
-        render_semantic_lines(entry, &row, theme, width, expanded_blocks)
-    };
-    let mut semantic = semantic;
-    if projection.group_header {
-        let single_read_detail = (projection.group_count == 1 && projection.verb_counts.read == 1)
-            .then(|| tool_block(entry).and_then(read_summary_detail))
-            .flatten();
-        let label = group_header_label(
-            projection.group_kind,
-            projection.group_count,
-            projection.verb_counts,
-            projection.group_running,
-            projection.group_failed,
-            projection.group_expanded,
-            single_read_detail.as_deref(),
-        );
-        let header = Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(if projection.group_failed {
-                    theme.accent_error
-                } else {
-                    theme.gray
-                })
-                .add_modifier(Modifier::BOLD),
-        ));
-        if projection.group_expanded {
-            semantic.insert(
-                0,
-                SemanticLine {
-                    line: header,
-                    block_index: None,
-                    rail: projection.rail,
-                    header: true,
-                    selectable: true,
-                },
-            );
-        } else {
-            semantic = vec![SemanticLine {
-                line: header,
-                block_index: None,
-                rail: projection.rail,
-                header: true,
-                selectable: true,
-            }];
-        }
-    }
-    let mut lines = Vec::new();
     let timestamp = if show_timestamps
         && matches!(entry.kind, DshRenderKind::User | DshRenderKind::Assistant)
         && !projection.group_header
@@ -596,166 +603,118 @@ fn semantic_lines(
     } else {
         None
     };
-    let mut timestamp_pending = timestamp;
-    let rail_accent = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
+    let semantic = render_semantic_lines(
+        entry,
+        &row,
+        theme,
+        width.saturating_sub(usize::from(timestamp.is_some()) * TIMESTAMP_RESERVED_WIDTH),
+        expanded_blocks,
+        appearance,
+        effective_mode,
+    );
+    let fallback_color = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
         theme.accent_error
-    } else if !projection.group_header
-        && let Some(tool) = tool_block(entry)
-    {
-        tool_accent(tool, entry.finish, theme)
+    } else if projection.group_running || entry.finish == DshRenderFinish::Running {
+        appearance.scrollback.blocks.execute.running_accent
     } else {
         theme.gray
     };
-    let rail_animated = projection.group_running || entry.finish == DshRenderFinish::Running;
-    let rail_flash = entry.finished_at_ms.is_some()
-        && !rail_animated
+    let fallback_animated = (projection.group_running || entry.finish == DshRenderFinish::Running)
+        && entry.finish != DshRenderFinish::Failed;
+    let accent_flash = entry.finished_at_ms.is_some()
+        && !fallback_animated
         && matches!(
             entry.kind,
             DshRenderKind::Thinking | DshRenderKind::ToolCall
         );
-    let collapsed_rail = !rail_animated
+    let flash_accent = accent_flash.then_some(match entry.kind {
+        DshRenderKind::Thinking => theme.accent_thinking,
+        DshRenderKind::ToolCall if entry.finish == DshRenderFinish::Failed => theme.accent_error,
+        DshRenderKind::ToolCall => theme.accent_success,
+        _ => fallback_color,
+    });
+    let collapsed_rail = !fallback_animated
         && ((projection.group_header && !projection.group_expanded)
             || (entry.kind == DshRenderKind::ToolCall
                 && projection.mode == DisplayMode::Collapsed));
-    for semantic_line in semantic {
-        let line_rail = projection.rail || semantic_line.rail;
-        let reserve_timestamp = timestamp_pending.is_some();
-        let wrap_width = width
-            .saturating_sub(ENTRY_CHROME_WIDTH)
-            .saturating_sub(usize::from(reserve_timestamp) * TIMESTAMP_RESERVED_WIDTH)
-            .max(1);
-        for wrapped_line in word_wrap_line(&semantic_line.line, wrap_width) {
-            let copy_text = wrapped_line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            let line = decorate_line(
-                wrapped_line,
-                width,
-                line_rail,
-                collapsed_rail,
-                rail_accent,
-                projection.background,
-                theme,
-            );
-            lines.push(RichPaintLine {
-                entry_id: entry.id,
-                block_index: semantic_line.block_index,
-                line_index: lines.len(),
-                header: semantic_line.header,
-                group_header: projection.group_header && semantic_line.header,
-                rail: line_rail,
-                rail_animated: line_rail && rail_animated,
-                rail_flash: line_rail && rail_flash,
-                rail_accent: line_rail.then_some(rail_accent),
-                rail_wave_row: 0,
-                rail_wave_len: 0,
-                selectable: semantic_line.selectable,
-                background: projection.background,
-                copy_text,
-                content_offset: if semantic_line.selectable {
-                    ENTRY_CHROME_WIDTH as u16
-                } else {
-                    0
-                },
-                timestamp: timestamp_pending.take(),
-                screen_y: 0,
-                line,
-            });
-        }
-    }
-    if projection.background.is_some() {
-        let blank = Line::from(Span::styled(
-            " ".repeat(width),
-            Style::default().bg(projection.background.unwrap_or(theme.bg_base)),
-        ));
-        let content_len = lines.len();
-        for line in &mut lines {
-            line.line_index = line.line_index.saturating_add(1);
-        }
-        lines.insert(
-            0,
-            RichPaintLine {
-                entry_id: entry.id,
-                block_index: None,
-                line_index: 0,
-                header: false,
-                group_header: false,
-                rail: false,
-                rail_animated: false,
-                rail_flash: false,
-                rail_accent: None,
-                rail_wave_row: 0,
-                rail_wave_len: 0,
-                selectable: false,
-                background: projection.background,
-                copy_text: String::new(),
-                content_offset: 0,
-                timestamp: None,
-                screen_y: 0,
-                line: blank.clone(),
-            },
-        );
-        lines.push(RichPaintLine {
-            entry_id: entry.id,
-            block_index: None,
-            line_index: content_len.saturating_add(1),
-            header: false,
-            group_header: false,
-            rail: false,
-            rail_animated: false,
-            rail_flash: false,
-            rail_accent: None,
-            rail_wave_row: 0,
-            rail_wave_len: 0,
-            selectable: false,
-            background: projection.background,
-            copy_text: String::new(),
-            content_offset: 0,
-            timestamp: None,
-            screen_y: 0,
-            line: blank,
-        });
-    }
-    assign_rail_wave_geometry(&mut lines);
-    lines
+    let fallback_accent = if fallback_animated {
+        AccentStyle::animated(fallback_color)
+    } else {
+        AccentStyle::static_color(fallback_color)
+    };
+    let source = semantic
+        .into_iter()
+        .map(|line| EntrySourceLine {
+            content: line.line,
+            block_index: line.block_index,
+            rail: projection.rail || line.rail,
+            header: line.header,
+            selectable: line.selectable,
+            accent: line.accent,
+            bullet: line.bullet,
+            background: line.background,
+            accent_background: line.accent_background,
+            joiner: line.joiner,
+        })
+        .collect();
+    let group_header = projection.group_header.then(|| GroupHeaderSpec {
+        label: projection
+            .group_label
+            .clone()
+            .unwrap_or_else(|| "1 more".into()),
+        expanded: projection.group_expanded,
+        running: projection.group_running,
+        failed: projection.group_failed,
+        tool_accent: appearance.scrollback.blocks.execute.running_accent,
+        error_accent: theme.accent_error,
+        muted: theme.gray,
+        text: theme.gray_bright,
+    });
+    EntryRenderer::render_entry(
+        source,
+        EntryLayoutSpec {
+            width,
+            layout: appearance.scrollback.layout,
+            fallback_accent,
+            collapsed_accent: collapsed_rail,
+            fallback_background: projection.background,
+            base_background: theme.bg_base,
+            flash_accent,
+            accent_flash,
+            timestamp,
+            group_header,
+        },
+        0,
+        None,
+    )
+    .into_iter()
+    .map(|rendered| RichPaintLine {
+        entry_id: entry.id,
+        block_index: rendered.block_index,
+        line_index: rendered.line_index,
+        header: rendered.header,
+        group_header: rendered.group_header,
+        rail: rendered.accent.is_some() || rendered.flash_accent.is_some(),
+        accent: rendered.accent,
+        flash_accent: rendered.flash_accent,
+        bullet: rendered.bullet,
+        accent_flash: rendered.accent_flash,
+        accent_wave_row: rendered.line_index.min(u16::MAX as usize) as u16,
+        bullet_span: rendered.bullet_span,
+        pending_user_input: false,
+        selectable: rendered.selectable,
+        background: rendered.background,
+        copy_text: rendered.copy_text,
+        content_offset: rendered.content_offset,
+        content_width: rendered.content_width,
+        timestamp: rendered.timestamp,
+        joiner_to_previous: rendered.joiner_to_previous,
+        screen_y: 0,
+        line: rendered.line,
+    })
+    .collect()
 }
 
-fn assign_rail_wave_geometry(lines: &mut [RichPaintLine]) {
-    let mut start = 0;
-    while start < lines.len() {
-        if !lines[start].rail_animated {
-            start += 1;
-            continue;
-        }
-        let mut end = start + 1;
-        while end < lines.len() && lines[end].rail_animated {
-            end += 1;
-        }
-        let len = (end - start).min(u16::MAX as usize) as u16;
-        for (row, line) in lines[start..end].iter_mut().enumerate() {
-            line.rail_wave_row = row.min(u16::MAX as usize) as u16;
-            line.rail_wave_len = len;
-        }
-        start = end;
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SemanticLine {
-    line: Line<'static>,
-    block_index: Option<usize>,
-    rail: bool,
-    header: bool,
-    selectable: bool,
-}
-
-/// Upstream Grok's horizontal entry chrome: accent column + two left-pad
-/// columns. The local pane has its own outer border, so these three columns
-/// are painted as either `│  ` for operational rows or `   ` for plain text.
-const ENTRY_CHROME_WIDTH: usize = 3;
-const TIMESTAMP_RESERVED_WIDTH: usize = 10;
 fn is_local_foldable_block(block: &DshRenderBlock) -> bool {
     matches!(
         block,
@@ -769,35 +728,29 @@ fn is_operational_block(block: &DshRenderBlock) -> bool {
     is_local_foldable_block(block)
 }
 
-fn collapsed_block_line(
+fn collapsed_operational_line(
     block: &DshRenderBlock,
     entry: &DshRenderEntry,
     theme: Theme,
 ) -> Line<'static> {
     match block {
-        DshRenderBlock::Reasoning { .. } => {
-            let label = if entry.finish == DshRenderFinish::Running {
-                "Thinking…".to_string()
-            } else if let Some(elapsed) = thinking_elapsed_ms(entry) {
-                format!("Thought for {}", format_elapsed_ms(elapsed))
-            } else {
-                "Thought".to_string()
-            };
-            Line::from(Span::styled(
-                format!("{} {label}", crate::glyphs::diamond_filled()),
-                Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
-            ))
-        }
-        DshRenderBlock::ToolCall { .. } => execute_summary_line(block, entry.finish, theme, 120)
-            .unwrap_or_else(|| {
-                tool_summary_line(
-                    "",
-                    "›",
-                    &tool_header_text(block),
-                    tool_accent(block, entry.finish, theme),
+        DshRenderBlock::ToolCall { .. } => project_tool(block)
+            .and_then(|tool| {
+                let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+                tool.render(ToolBlockContext {
+                    mode: DisplayMode::Collapsed,
+                    is_running: entry.finish == DshRenderFinish::Running,
+                    width: 120,
+                    appearance: &appearance,
                     theme,
-                )
-            }),
+                })
+                .output
+                .lines
+                .into_iter()
+                .next()
+                .map(|line| line.content)
+            })
+            .unwrap_or_else(|| Line::from("Tool")),
         DshRenderBlock::ToolResult { is_error, .. } => Line::from(Span::styled(
             if *is_error {
                 "✗ result"
@@ -843,17 +796,6 @@ fn thinking_elapsed_ms(entry: &DshRenderEntry) -> Option<u64> {
     ended.checked_sub(started)
 }
 
-fn format_elapsed_ms(elapsed_ms: u64) -> String {
-    let seconds = elapsed_ms as f64 / 1_000.0;
-    if seconds < 60.0 {
-        format!("{seconds:.1}s")
-    } else {
-        let minutes = (seconds / 60.0).floor() as u64;
-        let remaining = (seconds - minutes as f64 * 60.0).round() as u64;
-        format!("{minutes}m{remaining}s")
-    }
-}
-
 /// Build the block-level projection that the upstream Grok scrollback gets
 /// from `ThinkingBlock`, `ToolCallBlock` and `AgentMessageBlock`. The host
 /// keeps one stable streaming surface, but its typed blocks still receive
@@ -864,43 +806,144 @@ fn render_semantic_lines(
     theme: Theme,
     width: usize,
     expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
+    appearance: &ScrollbackAppearance,
+    entry_mode: DisplayMode,
 ) -> Vec<SemanticLine> {
+    let content_width = width
+        .saturating_sub(EntryRenderer::chrome_width(&appearance.scrollback.layout))
+        .max(1);
+    let projected_entry = project_entry(entry, entry_mode);
     let has_foldable_blocks = row.kind == DshRenderKind::Assistant
         && (entry.group_key.is_some() || row.content.blocks.len() > 1)
         && row.content.blocks.iter().any(is_local_foldable_block);
     if !has_foldable_blocks {
-        if row.kind == DshRenderKind::Thinking
-            && entry.finish == DshRenderFinish::Running
-            && let Some(block) = row
-                .content
-                .blocks
-                .iter()
-                .find(|block| matches!(block, DshRenderBlock::Reasoning { .. }))
-        {
-            return thinking_running_lines(entry, block, theme, width);
+        match projected_entry.blocks.as_slice() {
+            [projected_block] if matches!(projected_block.block, ProjectedBlock::User { .. }) => {
+                let ProjectedBlock::User { text } = &projected_block.block else {
+                    unreachable!()
+                };
+                let block = UserPromptBlock::new(text).render(UserPromptContext {
+                    mode: projected_entry.display_mode,
+                    width: content_width,
+                    appearance,
+                    theme,
+                });
+                return materialize_block(block, content_width, theme, None);
+            }
+            [projected_block]
+                if matches!(projected_block.block, ProjectedBlock::Thinking { .. }) =>
+            {
+                let ProjectedBlock::Thinking { text } = &projected_block.block else {
+                    unreachable!()
+                };
+                let body = render_markdown_body(text, theme, content_width);
+                let block = ThinkingBlock::new(body, thinking_elapsed_ms(entry)).render(
+                    ThinkingBlockContext {
+                        mode: projected_entry.display_mode,
+                        is_running: projected_entry.is_running,
+                        appearance,
+                        theme,
+                    },
+                );
+                return materialize_block(
+                    block,
+                    content_width,
+                    theme,
+                    projected_block.source_index,
+                );
+            }
+            [projected_block]
+                if matches!(projected_block.block, ProjectedBlock::AgentMarkdown { .. }) =>
+            {
+                let ProjectedBlock::AgentMarkdown { block, fallback } = &projected_block.block
+                else {
+                    unreachable!()
+                };
+                let body = render_agent_projection(*block, fallback, theme, content_width);
+                return materialize_block(
+                    AgentMessageBlock::new(body).render(),
+                    content_width,
+                    theme,
+                    projected_block.source_index,
+                );
+            }
+            [projected_block]
+                if matches!(projected_block.block, ProjectedBlock::Unsupported { .. }) =>
+            {
+                let ProjectedBlock::Unsupported { label } = &projected_block.block else {
+                    unreachable!()
+                };
+                return vec![SemanticLine {
+                    line: Line::from(Span::styled(
+                        *label,
+                        Style::default().fg(theme.accent_error),
+                    )),
+                    block_index: projected_block.source_index,
+                    rail: false,
+                    header: true,
+                    selectable: true,
+                    accent: None,
+                    bullet: None,
+                    background: None,
+                    accent_background: false,
+                    joiner: None,
+                }];
+            }
+            [projected_block] if matches!(projected_block.block, ProjectedBlock::Tool { .. }) => {
+                let ProjectedBlock::Tool { block } = projected_block.block else {
+                    unreachable!()
+                };
+                if let Some(tool) = project_tool(block) {
+                    let rendered = tool.render(ToolBlockContext {
+                        mode: projected_entry.display_mode,
+                        is_running: projected_entry.is_running,
+                        width: content_width,
+                        appearance,
+                        theme,
+                    });
+                    return materialize_block(
+                        rendered,
+                        content_width,
+                        theme,
+                        projected_block.source_index,
+                    );
+                }
+            }
+            _ => {}
         }
-        return render_row_at_width(row, theme, width.saturating_sub(ENTRY_CHROME_WIDTH))
-            .into_iter()
-            .enumerate()
-            .map(|(index, line)| SemanticLine {
-                line,
-                block_index: None,
-                rail: false,
-                header: index == 0,
-                selectable: true,
-            })
-            .collect();
+        if row.kind != DshRenderKind::Assistant {
+            return render_generic_row_at_width(row, theme, content_width)
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| SemanticLine {
+                    line,
+                    block_index: None,
+                    rail: false,
+                    header: index == 0,
+                    selectable: true,
+                    accent: None,
+                    bullet: None,
+                    background: None,
+                    accent_background: false,
+                    joiner: None,
+                })
+                .collect();
+        }
     }
 
     let mut semantic = Vec::new();
-    let blocks = &row.content.blocks;
-    for (index, block) in blocks.iter().enumerate() {
-        let expanded = expanded_blocks.contains(&(entry.id, index));
-        if index > 0 {
-            let previous = &blocks[index - 1];
-            let previous_expanded = expanded_blocks.contains(&(entry.id, index - 1));
-            let dense_operational_run = is_local_foldable_block(previous)
-                && is_local_foldable_block(block)
+    for (position, projected_block) in projected_entry.blocks.iter().enumerate() {
+        let block_index = projected_block.source_index;
+        let expanded = !has_foldable_blocks
+            || block_index.is_some_and(|index| expanded_blocks.contains(&(entry.id, index)));
+        if position > 0 {
+            let previous_index = projected_entry.blocks[position - 1].source_index;
+            let previous = previous_index.and_then(|index| row.content.blocks.get(index));
+            let current = block_index.and_then(|index| row.content.blocks.get(index));
+            let previous_expanded =
+                previous_index.is_some_and(|index| expanded_blocks.contains(&(entry.id, index)));
+            let dense_operational_run = previous.is_some_and(is_local_foldable_block)
+                && current.is_some_and(is_local_foldable_block)
                 && !previous_expanded
                 && !expanded;
             if !dense_operational_run {
@@ -910,94 +953,180 @@ fn render_semantic_lines(
                     rail: false,
                     header: false,
                     selectable: false,
+                    accent: None,
+                    bullet: None,
+                    background: None,
+                    accent_background: false,
+                    joiner: None,
                 });
             }
         }
-        let lines = if matches!(block, DshRenderBlock::Reasoning { .. })
-            && entry.finish == DshRenderFinish::Running
-            && !expanded
-        {
-            thinking_running_lines(entry, block, theme, width)
-                .into_iter()
-                .map(|line| line.line)
-                .collect::<Vec<_>>()
-        } else if is_local_foldable_block(block) && !expanded {
-            vec![collapsed_block_line(block, entry, theme)]
-        } else {
-            let mut rendered = Vec::new();
-            render_block(
-                &mut rendered,
-                block,
-                theme,
-                0,
-                width.saturating_sub(ENTRY_CHROME_WIDTH),
-            );
-            rendered
+        let (lines, rail) = match &projected_block.block {
+            ProjectedBlock::Thinking { text } => {
+                let mode = if expanded {
+                    DisplayMode::Expanded
+                } else if projected_entry.is_running {
+                    DisplayMode::Truncated
+                } else {
+                    DisplayMode::Collapsed
+                };
+                let body = render_markdown_body(text, theme, content_width);
+                let rendered = ThinkingBlock::new(body, thinking_elapsed_ms(entry)).render(
+                    ThinkingBlockContext {
+                        mode,
+                        is_running: projected_entry.is_running,
+                        appearance,
+                        theme,
+                    },
+                );
+                semantic.extend(materialize_block(
+                    rendered,
+                    content_width,
+                    theme,
+                    block_index,
+                ));
+                continue;
+            }
+            ProjectedBlock::AgentMarkdown { block, fallback } => {
+                let rendered = render_agent_projection(*block, fallback, theme, content_width);
+                semantic.extend(materialize_block(
+                    AgentMessageBlock::new(rendered).render(),
+                    content_width,
+                    theme,
+                    block_index,
+                ));
+                continue;
+            }
+            ProjectedBlock::Unsupported { label } => (
+                vec![Line::from(Span::styled(
+                    *label,
+                    Style::default().fg(theme.accent_error),
+                ))],
+                false,
+            ),
+            ProjectedBlock::Tool { block } => {
+                if let Some(tool) = project_tool(block) {
+                    let mode = if expanded {
+                        DisplayMode::Expanded
+                    } else {
+                        DisplayMode::Collapsed
+                    };
+                    semantic.extend(materialize_block(
+                        tool.render(ToolBlockContext {
+                            mode,
+                            is_running: projected_entry.is_running,
+                            width: content_width,
+                            appearance,
+                            theme,
+                        }),
+                        content_width,
+                        theme,
+                        block_index,
+                    ));
+                    continue;
+                }
+                let mut rendered = Vec::new();
+                render_block(&mut rendered, block, theme, 0, content_width);
+                (rendered, is_operational_block(block))
+            }
+            ProjectedBlock::Generic {
+                block: Some(block), ..
+            } => {
+                let lines = if is_local_foldable_block(block) && !expanded {
+                    vec![collapsed_operational_line(block, entry, theme)]
+                } else {
+                    let mut rendered = Vec::new();
+                    render_block(&mut rendered, block, theme, 0, content_width);
+                    rendered
+                };
+                (lines, is_operational_block(block))
+            }
+            ProjectedBlock::User { text } => {
+                let rendered = UserPromptBlock::new(text).render(UserPromptContext {
+                    mode: projected_entry.display_mode,
+                    width: content_width,
+                    appearance,
+                    theme,
+                });
+                semantic.extend(materialize_block(
+                    rendered,
+                    content_width,
+                    theme,
+                    block_index,
+                ));
+                continue;
+            }
+            ProjectedBlock::Generic {
+                block: None,
+                fallback,
+            } => (vec![Line::from((*fallback).to_string())], false),
         };
-        let rail = is_operational_block(block);
         for (line_index, line) in lines.into_iter().enumerate() {
             semantic.push(SemanticLine {
                 line,
-                block_index: Some(index),
+                block_index,
                 rail,
                 header: line_index == 0,
                 selectable: true,
+                accent: None,
+                bullet: None,
+                background: None,
+                accent_background: false,
+                joiner: None,
             });
         }
     }
     semantic
 }
 
-fn thinking_running_lines(
-    entry: &DshRenderEntry,
-    block: &DshRenderBlock,
+fn render_markdown_body(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
+    let mut body = Vec::new();
+    render_markdown(&mut body, text, theme, "", width);
+    body
+}
+
+fn render_agent_projection(
+    block: Option<&DshRenderBlock>,
+    fallback: &str,
     theme: Theme,
     width: usize,
-) -> Vec<SemanticLine> {
+) -> Vec<Line<'static>> {
+    let Some(block) = block else {
+        return render_markdown_body(fallback, theme, width);
+    };
     let mut body = Vec::new();
-    render_block(
-        &mut body,
-        block,
-        theme,
-        0,
-        width.saturating_sub(ENTRY_CHROME_WIDTH),
-    );
-    let mut lines = vec![SemanticLine {
-        line: collapsed_block_line(block, entry, theme),
-        block_index: None,
-        rail: true,
-        header: true,
-        selectable: true,
-    }];
-    let max_body = 3usize;
-    if body.len() > max_body {
-        lines.push(SemanticLine {
-            line: Line::from(Span::styled("…", theme.gray)),
-            block_index: None,
-            rail: true,
-            header: false,
-            selectable: true,
-        });
-        body = body.split_off(body.len().saturating_sub(max_body));
+    render_block(&mut body, block, theme, 0, width);
+    body
+}
+
+fn render_agent_body(row: &TranscriptRow, theme: Theme, width: usize) -> Vec<Line<'static>> {
+    if row.content.blocks.is_empty() {
+        return render_markdown_body(&row.text, theme, width);
     }
-    lines.extend(body.into_iter().map(|line| SemanticLine {
-        line,
-        block_index: None,
-        rail: true,
-        header: false,
-        selectable: true,
-    }));
-    lines
+    let mut body = Vec::new();
+    for block in &row.content.blocks {
+        render_block(&mut body, block, theme, 0, width);
+    }
+    body
 }
 
 impl RichTranscript {
     pub fn new(entries: &[DshRenderEntry], width: usize, theme: Theme) -> Self {
         let width = width.max(1);
+        let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
         let mut projected = Vec::with_capacity(entries.len());
         let mut start_y = 0usize;
         for entry in entries {
             let projection = ProjectionInfo::plain(entry, width, theme);
-            let lines = semantic_lines(entry, width, theme, projection, &HashSet::new(), true);
+            let lines = semantic_lines(
+                entry,
+                width,
+                theme,
+                &projection,
+                &HashSet::new(),
+                true,
+                &appearance,
+            );
             if lines.is_empty() {
                 continue;
             }
@@ -1067,6 +1196,25 @@ impl RichTranscript {
                 }
                 let mut line = line.clone();
                 line.screen_y = (virtual_y.saturating_sub(top)) as u16;
+                let theme = *Theme::current();
+                let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+                EntryRenderer::paint_dynamic(
+                    &mut line.line,
+                    DynamicAccentSpec {
+                        tick: 0,
+                        logical_row: line.accent_wave_row,
+                        wave_rows: appearance.animation.wave_rows,
+                        wave_speed: GROK_WAVE_SPEED,
+                        background: line.background.unwrap_or(theme.bg_base),
+                        accent: line.accent,
+                        flash_accent: line.flash_accent,
+                        bullet: line.bullet,
+                        bullet_span: line.bullet_span,
+                        selected: false,
+                        flash: false,
+                        pending_user_input: false,
+                    },
+                );
                 painted.push(line);
             }
             if entry.start_y >= bottom {
@@ -1115,10 +1263,41 @@ pub fn style_for_paint(kind: DshRenderKind, header: bool, text: &str, theme: The
 /// Grok block widgets. User and assistant messages render their content
 /// directly; operational rows retain a stable semantic header.
 pub fn render_row(row: &TranscriptRow, theme: Theme) -> Vec<Line<'static>> {
-    render_row_at_width(row, theme, 120)
+    let width = 120;
+    let mut appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+    appearance.scrollback.blocks.prompt.vpad = false;
+    appearance.scrollback.blocks.prompt.bg = BlockBackground::None;
+    let block = match row.kind {
+        DshRenderKind::User => UserPromptBlock::new(&row.text).render(UserPromptContext {
+            mode: DisplayMode::Expanded,
+            width,
+            appearance: &appearance,
+            theme,
+        }),
+        DshRenderKind::Assistant => {
+            AgentMessageBlock::new(render_agent_body(row, theme, width)).render()
+        }
+        _ => return render_generic_row_at_width(row, theme, width),
+    };
+    BlockRenderer::render(
+        block,
+        BlockRenderSpec {
+            width,
+            base_background: theme.bg_base,
+        },
+    )
+    .output
+    .lines
+    .into_iter()
+    .map(|line| line.content)
+    .collect()
 }
 
-fn render_row_at_width(row: &TranscriptRow, theme: Theme, width: usize) -> Vec<Line<'static>> {
+fn render_generic_row_at_width(
+    row: &TranscriptRow,
+    theme: Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     let color = if row.kind == DshRenderKind::ToolCall {
         match row.finish {
             DshRenderFinish::Failed => theme.accent_error,
@@ -1129,38 +1308,26 @@ fn render_row_at_width(row: &TranscriptRow, theme: Theme, width: usize) -> Vec<L
     };
     if row.kind == DshRenderKind::ToolCall && row.content.blocks.is_empty() && row.text.is_empty() {
         let header = row.label.strip_prefix("› ").unwrap_or(&row.label);
-        return vec![tool_summary_line("", "›", header, color, theme)];
+        return vec![Line::from(vec![
+            Span::styled(
+                format!("{} ", glyphs::diamond_filled()),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                header.to_string(),
+                Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
+            ),
+        ])];
     }
 
-    let mut lines = if matches!(row.kind, DshRenderKind::User | DshRenderKind::Assistant) {
-        Vec::new()
-    } else {
-        vec![Line::from(Span::styled(
-            row.label.clone(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ))]
-    };
-
-    if row.kind == DshRenderKind::User {
-        push_plain_lines(
-            &mut lines,
-            &row.text,
-            Style::default().fg(theme.text_primary),
-            "",
-        );
-        for (index, line) in lines.iter_mut().enumerate() {
-            line.spans.insert(
-                0,
-                Span::styled(
-                    if index == 0 { "❯ " } else { "  " },
-                    Style::default()
-                        .fg(theme.accent_user)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            );
-        }
-        return lines;
-    }
+    debug_assert!(!matches!(
+        row.kind,
+        DshRenderKind::User | DshRenderKind::Assistant | DshRenderKind::Thinking
+    ));
+    let mut lines = vec![Line::from(Span::styled(
+        row.label.clone(),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))];
 
     if row.content.blocks.is_empty() {
         push_plain_lines(&mut lines, &row.text, Style::default().fg(color), "");
@@ -1193,15 +1360,12 @@ fn projected_row(entry: &DshRenderEntry, mode: DisplayMode, width: usize) -> Opt
         return Some(row);
     }
     if mode == DisplayMode::Collapsed {
-        if let Some(tool) = entry
+        if entry
             .content
             .blocks
             .iter()
-            .find(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
+            .any(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
         {
-            row.label = format!("› {}", tool_header_text(tool));
-            row.text.clear();
-            row.content = DshRenderContent::default();
             return Some(row);
         }
         let summary = entry
@@ -1296,152 +1460,7 @@ fn default_display_mode(entry: &DshRenderEntry, width: usize, theme: Theme) -> D
     }
 }
 
-fn group_header_label(
-    kind: Option<GroupKind>,
-    count: usize,
-    counts: VerbCounts,
-    running: bool,
-    failed: bool,
-    expanded: bool,
-    single_read_detail: Option<&str>,
-) -> String {
-    let count = count.max(1);
-    match (kind, expanded) {
-        (Some(GroupKind::Context), false) => format!("◆ Context · {count} injected messages"),
-        (Some(GroupKind::Context), true) => format!("▾ Context · {count} injected messages"),
-        (Some(GroupKind::VerbRun), false)
-            if count == 1 && counts.read == 1 && single_read_detail.is_some() =>
-        {
-            format!("◆ Read · {}", single_read_detail.unwrap_or_default())
-        }
-        (Some(GroupKind::VerbRun), _) => {
-            let mut parts = Vec::new();
-            let mut push = |calls: usize, done: &str, doing: &str, one: &str, many: &str| {
-                if calls > 0 {
-                    parts.push(format!(
-                        "{} {calls} {}",
-                        if running { doing } else { done },
-                        if calls == 1 { one } else { many }
-                    ));
-                }
-            };
-            push(counts.read, "Read", "Reading", "file", "files");
-            push(
-                counts.search,
-                "Searched",
-                "Searching",
-                "pattern",
-                "patterns",
-            );
-            push(counts.web_fetch, "Fetched", "Fetching", "page", "pages");
-            push(
-                counts.web_search,
-                "Searched",
-                "Searching",
-                "web query",
-                "web queries",
-            );
-            let mut label = parts.join(", ");
-            if failed {
-                label.push_str(" · failed");
-            }
-            format!("{} {label}", if expanded { "▾" } else { "◆" })
-        }
-        (None, false) => format!("◆ {count} more"),
-        (None, true) => format!("▾ {count} messages"),
-    }
-}
-
-fn decorate_line(
-    mut line: Line<'static>,
-    width: usize,
-    rail: bool,
-    collapsed_rail: bool,
-    rail_accent: Color,
-    background: Option<Color>,
-    theme: Theme,
-) -> Line<'static> {
-    // EntryRenderer always reserves accent + left padding.  Operational rows
-    // use the accent column as a continuous rail; plain Markdown keeps those
-    // columns as spaces so its first glyph lands exactly where a tool diamond
-    // would land.
-    let prefix = if !rail {
-        "   "
-    } else if collapsed_rail {
-        "❙  "
-    } else {
-        "┃  "
-    };
-    line.spans.insert(
-        0,
-        Span::styled(
-            prefix,
-            Style::default()
-                .fg(rail_accent)
-                .bg(background.unwrap_or(theme.bg_base)),
-        ),
-    );
-    if let Some(background) = background {
-        for span in &mut line.spans {
-            span.style = span.style.bg(background);
-        }
-        let used = line.width();
-        if used < width {
-            line.spans.push(Span::styled(
-                " ".repeat(width.saturating_sub(used)),
-                Style::default().bg(background),
-            ));
-        }
-    }
-    line
-}
-
-const WAVE_ROWS_PER_SECOND: f64 = 8.0;
-/// Spatial support of the traveling envelope, in terminal rows.
-///
-/// The bright core is much thinner than this window. The extra length is a
-/// gray ramp so adjacent rows and 33ms frames do not jump from black to white.
-const WAVE_BAND_ROWS: f64 = 16.0;
-const WAVE_GAP_ROWS: f64 = 6.0;
 const FINISH_FLASH_DURATION_MS: u64 = 400;
-const WAVE_FRAME_MS: u64 = 33;
-
-fn wave_cycle_seconds(rail_len: u16) -> f64 {
-    (f64::from(rail_len.max(1)) + WAVE_BAND_ROWS + WAVE_GAP_ROWS) / WAVE_ROWS_PER_SECOND
-}
-
-fn wave_brightness(elapsed_ms: u64, row: u16, rail_len: u16) -> f32 {
-    let rail_len = rail_len.max(row.saturating_add(1)).max(1);
-    let travel_rows = wave_cycle_seconds(rail_len) * WAVE_ROWS_PER_SECOND;
-    let traveled_rows = (elapsed_ms as f64 / 1_000.0 * WAVE_ROWS_PER_SECOND) % travel_rows;
-    let half_band = WAVE_BAND_ROWS / 2.0;
-    let band_center = traveled_rows - half_band;
-    let row_center = f64::from(row) + 0.5;
-    let distance = (row_center - band_center).abs();
-    if distance >= half_band {
-        return 0.0;
-    }
-    // 3σ equals the half-band, so the clipped edge is ~0.01. The peak stays
-    // a thin core; the tails supply extra gray steps.
-    let sigma = half_band / 3.0;
-    let envelope = (-0.5 * (distance / sigma) * (distance / sigma)).exp();
-    envelope as f32
-}
-
-fn blend_color(base: Color, foreground: Color, opacity: f32) -> Option<Color> {
-    let (Color::Rgb(br, bg, bb), Color::Rgb(fr, fg, fb)) = (base, foreground) else {
-        return None;
-    };
-    let opacity = opacity.clamp(0.0, 1.0);
-    let channel = |base: u8, foreground: u8| {
-        (base as f32 + (foreground as f32 - base as f32) * opacity).round() as u8
-    };
-    Some(Color::Rgb(
-        channel(br, fr),
-        channel(bg, fg),
-        channel(bb, fb),
-    ))
-}
 
 fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
     match target {
@@ -1461,70 +1480,13 @@ fn line_matches_target(line: &RichPaintLine, target: &HitTarget) -> bool {
     }
 }
 
-fn apply_dynamic_accent(
-    line: &mut RichPaintLine,
-    wave_elapsed_ms: u64,
-    theme: Theme,
-    finished_at_ms: Option<u64>,
-    now_ms: Option<u64>,
-    selected: bool,
-) {
-    if !line.rail || (!line.rail_animated && !line.rail_flash && !selected) {
-        return;
-    }
-    let accent = line.rail_accent.unwrap_or(theme.gray);
-    let error_accent = accent == theme.accent_error;
-    let background = line.background.unwrap_or(theme.bg_base);
-    let flashing = line.rail_flash && finish_flash_active(finished_at_ms, now_ms);
-    if !line.rail_animated && !flashing && !selected {
-        return;
-    }
-    let rail_color = if flashing {
-        accent
-    } else if selected {
-        if error_accent {
-            accent
-        } else {
-            theme.text_primary
-        }
-    } else {
-        blend_color(
-            background,
-            theme.text_primary,
-            wave_brightness(wave_elapsed_ms, line.rail_wave_row, line.rail_wave_len),
-        )
-        .unwrap_or(theme.text_primary)
-    };
-    let text_color = if error_accent {
-        accent
-    } else if selected || line.rail_animated {
-        theme.text_primary
-    } else {
-        theme.gray
-    };
-
-    if let Some(prefix) = line.line.spans.first_mut() {
-        // Only the left rail receives the animated color.
-        prefix.style = prefix.style.fg(rail_color);
-    }
-
-    // Right-side content is a static role: muted gray when settled, primary
-    // white when selected or running. It must not inherit the rail's wave
-    // phase.
-    if selected || line.rail_animated {
-        for span in line.line.spans.iter_mut().skip(1) {
-            span.style = span.style.fg(text_color);
-        }
-    }
-}
-
-fn build_projection(
+fn entry_projections(
     entries: &[DshRenderEntry],
     width: usize,
     theme: Theme,
     expanded_entries: &HashSet<DshRenderEntryId>,
-    _expanded_blocks: &HashSet<(DshRenderEntryId, usize)>,
     expanded_groups: &HashSet<DshRenderEntryId>,
+    pending_entry: Option<DshRenderEntryId>,
 ) -> HashMap<DshRenderEntryId, ProjectionInfo> {
     let mut projections = entries
         .iter()
@@ -1536,82 +1498,29 @@ fn build_projection(
             (entry.id, projection)
         })
         .collect::<HashMap<_, _>>();
-
-    let mut index = 0usize;
-    while index < entries.len() {
-        if entries[index].visibility == DshRenderVisibility::Hidden {
-            index += 1;
-            continue;
-        }
-        let context = matches!(
-            entries[index].kind,
-            DshRenderKind::AgentContext | DshRenderKind::Context | DshRenderKind::Compaction
-        );
-        let verb_member = tool_verb(&entries[index]).is_some();
-        if !context && !verb_member {
-            index += 1;
-            continue;
-        }
-        let kind = if context {
-            GroupKind::Context
-        } else {
-            GroupKind::VerbRun
-        };
-        let start = index;
-        index += 1;
-        while index < entries.len() && entries[index].visibility != DshRenderVisibility::Hidden {
-            let joins = match kind {
-                GroupKind::Context => matches!(
-                    entries[index].kind,
-                    DshRenderKind::AgentContext
-                        | DshRenderKind::Context
-                        | DshRenderKind::Compaction
-                ),
-                GroupKind::VerbRun => tool_verb(&entries[index]).is_some(),
-            };
-            if !joins {
-                break;
-            }
-            index += 1;
-        }
-        let count = index.saturating_sub(start);
-        if kind == GroupKind::Context && count < 2 {
-            continue;
-        }
-        let mut verb_counts = VerbCounts::default();
-        let mut group_running = false;
-        let mut group_failed = false;
-        if kind == GroupKind::VerbRun {
-            for entry in &entries[start..index] {
-                if let Some(verb) = tool_verb(entry) {
-                    verb_counts.add(verb);
-                }
-                group_running |= entry.finish == DshRenderFinish::Running;
-                group_failed |= entry.finish == DshRenderFinish::Failed;
-            }
-        }
-        let anchor = entries[start].id;
-        let expanded = expanded_groups.contains(&anchor);
-        for (offset, entry) in entries[start..index].iter().enumerate() {
-            let projection = projections
-                .get_mut(&entry.id)
-                .expect("projection exists for canonical entry");
-            projection.group_anchor = Some(anchor);
-            projection.group_header = offset == 0;
-            projection.group_hidden = !expanded && offset > 0;
-            projection.group_expanded = expanded;
-            projection.group_last_visible = if expanded {
-                offset + 1 == count
-            } else {
-                offset == 0
-            };
-            projection.group_kind = Some(kind);
-            projection.group_count = count;
-            projection.verb_counts = verb_counts;
-            projection.group_running = group_running;
-            projection.group_failed = group_failed;
-            projection.rail = true;
-        }
+    let display_modes = projections
+        .iter()
+        .map(|(id, projection)| (*id, projection.mode))
+        .collect::<HashMap<_, _>>();
+    for (id, group) in project_groups(
+        entries,
+        &display_modes,
+        expanded_groups,
+        pending_entry,
+        theme,
+    ) {
+        let projection = projections
+            .get_mut(&id)
+            .expect("group projection references a canonical entry");
+        projection.group_anchor = Some(group.anchor);
+        projection.group_header = group.header;
+        projection.group_hidden = group.hidden;
+        projection.group_expanded = group.expanded;
+        projection.group_last_visible = group.last_visible;
+        projection.group_label = group.label;
+        projection.group_running = group.running;
+        projection.group_failed = group.failed;
+        projection.rail = true;
     }
     projections
 }
@@ -1630,622 +1539,41 @@ fn copy_content(content: &DshRenderContent, fallback: &str) -> String {
     }
 }
 
-fn tool_block(entry: &DshRenderEntry) -> Option<&DshRenderBlock> {
-    entry
-        .content
-        .blocks
-        .iter()
-        .find(|block| matches!(block, DshRenderBlock::ToolCall { .. }))
-}
-
-fn tool_verb(entry: &DshRenderEntry) -> Option<ToolVerb> {
-    let DshRenderBlock::ToolCall {
-        name, view, result, ..
-    } = tool_block(entry)?
-    else {
-        return None;
-    };
-    if let Some(result_view) = result.as_ref().and_then(|result| result.view.as_ref()) {
-        match result_view {
-            DshToolResultView::Read { .. } => return Some(ToolVerb::Read),
-            DshToolResultView::SearchMatches { .. } | DshToolResultView::SearchPaths { .. } => {
-                return Some(ToolVerb::Search);
-            }
-            DshToolResultView::WebSearch { .. } => return Some(ToolVerb::WebSearch),
-            DshToolResultView::WebFetch { .. } => return Some(ToolVerb::WebFetch),
-            _ => {}
-        }
-    }
-    match view.as_ref().map(DshToolCallView::kind) {
-        Some(DshToolKind::Read) => Some(ToolVerb::Read),
-        Some(DshToolKind::Search) => Some(ToolVerb::Search),
-        Some(DshToolKind::Fetch) => Some(ToolVerb::WebFetch),
-        _ if name == "read" => Some(ToolVerb::Read),
-        _ => None,
-    }
-}
-
-fn tool_diffs<'a>(
-    view: Option<&'a DshToolCallView>,
-    result: Option<&'a DshToolResult>,
-) -> Option<&'a [DshToolDiff]> {
-    if let Some(DshToolResultView::Diff { diffs, .. }) =
-        result.and_then(|result| result.view.as_ref())
-    {
-        return Some(diffs);
-    }
-    if let Some(DshToolCallView::Diff { diffs, .. }) = view {
-        return Some(diffs);
-    }
-    None
-}
-
-fn diffstat(diffs: &[DshToolDiff]) -> (usize, usize) {
-    diffs.iter().fold((0, 0), |(added, removed), diff| {
-        (
-            added + diff.new_text.lines().count(),
-            removed
-                + diff
-                    .old_text
-                    .as_deref()
-                    .map(str::lines)
-                    .map(Iterator::count)
-                    .unwrap_or(0),
-        )
-    })
-}
-
-fn tool_header_text(block: &DshRenderBlock) -> String {
-    if let Some(execute) = project_execute_tool(block) {
-        let theme = Theme::current();
-        let is_running = matches!(block, DshRenderBlock::ToolCall { result: None, .. });
-        let output = execute.output(&ExecuteBlockContext::new(
-            ExecuteDisplayMode::Collapsed,
-            is_running,
-            4096,
-            theme,
-        ));
-        return output
-            .lines
-            .first()
-            .map(|line| line.content.to_string())
-            .unwrap_or_else(|| "Run …".to_string());
-    }
-    let DshRenderBlock::ToolCall {
-        name, view, result, ..
-    } = block
-    else {
-        return String::new();
-    };
-    let completed_title = result
-        .as_ref()
-        .and_then(|result| result.view.as_ref())
-        .and_then(DshToolResultView::title);
-    let title = completed_title
-        .or_else(|| view.as_ref().map(DshToolCallView::title))
-        .map(str::to_string)
-        .or_else(|| read_summary_detail(block).map(|detail| format!("Read {detail}")))
-        .unwrap_or_else(|| name.to_string());
-    let mut label = title;
-    if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
-        let (added, removed) = diffstat(diffs);
-        if added > 0 || removed > 0 {
-            label.push_str(&format!(" +{added}/-{removed}"));
-        }
-    }
-    label
-}
-
-/// DSH Web uses the call arguments as the stable one-line summary for read
-/// tools. The presenter title/result path remain replay-safe fallbacks for
-/// events recorded before those arguments were available to the renderer.
-fn read_summary_detail(block: &DshRenderBlock) -> Option<String> {
-    let DshRenderBlock::ToolCall {
-        name,
-        arguments,
-        view,
-        result,
-        ..
-    } = block
-    else {
-        return None;
-    };
-    let is_read = name == "read"
-        || view
-            .as_ref()
-            .is_some_and(|view| view.kind() == DshToolKind::Read)
-        || matches!(
-            result.as_ref().and_then(|result| result.view.as_ref()),
-            Some(DshToolResultView::Read { .. })
-        );
-    if !is_read {
-        return None;
-    }
-
-    if let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments)
-        && let Some(summary) = ["path", "file_path", "url"].iter().find_map(|key| {
-            arguments
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .and_then(nonempty_first_line)
-        })
-    {
-        return Some(summary.to_string());
-    }
-    if let Some(DshToolResultView::Read { path, .. }) =
-        result.as_ref().and_then(|result| result.view.as_ref())
-        && let Some(path) = nonempty_first_line(path)
-    {
-        return Some(path.to_string());
-    }
-    view.as_ref()
-        .map(DshToolCallView::title)
-        .and_then(|title| title.strip_prefix("Read "))
-        .and_then(nonempty_first_line)
-        .map(str::to_string)
-}
-
-fn nonempty_first_line(value: &str) -> Option<&str> {
-    value
-        .lines()
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn tool_accent(block: &DshRenderBlock, finish: DshRenderFinish, theme: Theme) -> Color {
-    let failed = match block {
-        DshRenderBlock::ToolCall { result, .. } => {
-            result.as_deref().is_some_and(|result| result.is_error)
-        }
-        _ => false,
-    } || finish == DshRenderFinish::Failed;
-    if failed {
-        theme.accent_error
-    } else {
-        theme.gray
-    }
-}
-
-fn execute_summary_line(
-    block: &DshRenderBlock,
-    finish: DshRenderFinish,
-    theme: Theme,
-    width: usize,
-) -> Option<Line<'static>> {
-    let execute = project_execute_tool(block)?;
-    let context = ExecuteBlockContext::new(
-        ExecuteDisplayMode::Collapsed,
-        finish == DshRenderFinish::Running,
-        width.saturating_sub(2).max(1),
-        &theme,
-    );
-    let mut context = context;
-    // Grok's collapsed Execute header uses the muted role; the selected or
-    // running paint pass lifts it to primary/white.
-    context.muted_command_collapsed = true;
-    let accent = if finish == DshRenderFinish::Failed {
-        theme.accent_error
-    } else {
-        theme.gray
-    };
-    let mut line = execute.output(&context).lines.into_iter().next()?.content;
-    line.spans.insert(
-        0,
-        Span::styled(
-            "› ",
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-    );
-    Some(line)
-}
-
-fn tool_summary_line(
-    prefix: &str,
-    marker: &str,
-    header: &str,
-    accent: Color,
-    theme: Theme,
-) -> Line<'static> {
-    let mut spans = Vec::with_capacity(4);
-    if !prefix.is_empty() {
-        spans.push(Span::raw(prefix.to_string()));
-    }
-    spans.push(Span::styled(
-        format!("{marker} "),
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    ));
-    if let Some(description) = header.strip_prefix("Run ") {
-        spans.push(Span::styled(
-            "Run ",
-            Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            description.to_string(),
-            Style::default().fg(theme.gray),
-        ));
-    } else if let Some(command) = header.strip_prefix("$ ") {
-        spans.push(Span::styled("$ ", Style::default().fg(theme.gray)));
-        spans.push(Span::styled(
-            command.to_string(),
-            Style::default().fg(theme.gray),
-        ));
-    } else {
-        spans.push(Span::styled(
-            header.to_string(),
-            Style::default().fg(theme.gray).add_modifier(Modifier::BOLD),
-        ));
-    }
-    Line::from(spans)
-}
-
-fn push_panel_lines(
-    lines: &mut Vec<Line<'static>>,
-    text: &str,
-    prefix: &str,
-    foreground: Color,
-    theme: Theme,
-) {
-    for line in text.split('\n') {
-        lines.push(Line::from(Span::styled(
-            format!("{prefix}{line}"),
-            Style::default().fg(foreground).bg(theme.bg_terminal),
-        )));
-    }
-}
-
-fn render_tool_children(
-    lines: &mut Vec<Line<'static>>,
-    blocks: &[DshRenderBlock],
-    theme: Theme,
-    indent: usize,
-    width: usize,
-) {
-    for child in blocks {
-        render_block(lines, child, theme, indent, width);
-    }
-}
-
-fn paint_execute_component_line(
-    mut component_line: ExecuteBlockLine,
-    prefix: &str,
-    first: bool,
-    accent: Color,
-    width: usize,
-    theme: Theme,
-) -> Line<'static> {
-    let mut spans = Vec::with_capacity(component_line.content.spans.len() + 3);
-    if !prefix.is_empty() {
-        spans.push(Span::raw(prefix.to_string()));
-    }
-    if first {
-        spans.push(Span::styled(
-            format!("{} ", glyphs::disclosure_open()),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ));
-    } else if let Some(background) = component_line.panel_background {
-        spans.push(Span::styled("  ", Style::default().bg(background)));
-    } else {
-        spans.push(Span::raw("  "));
-    }
-    if let Some(background) = component_line.panel_background {
-        for span in &mut component_line.content.spans {
-            span.style = span.style.bg(background);
-        }
-    }
-    spans.extend(component_line.content.spans);
-    let mut line = Line::from(spans);
-    if let Some(background) = component_line.panel_background {
-        let used = line.width();
-        if used < width {
-            line.spans.push(Span::styled(
-                " ".repeat(width - used),
-                Style::default().bg(background),
-            ));
-        }
-    } else if !first && line.spans.len() == usize::from(!prefix.is_empty()) + 1 {
-        line.spans
-            .push(Span::styled("", Style::default().fg(theme.text_primary)));
-    }
-    line
-}
-
-fn render_execute_tool_call(
-    lines: &mut Vec<Line<'static>>,
-    block: &DshRenderBlock,
-    theme: Theme,
-    indent: usize,
-    width: usize,
-) -> bool {
-    let Some(execute) = project_execute_tool(block) else {
-        return false;
-    };
-    let finish = match block {
-        DshRenderBlock::ToolCall {
-            result: Some(result),
-            ..
-        } if result.is_error => DshRenderFinish::Failed,
-        DshRenderBlock::ToolCall {
-            result: Some(_), ..
-        } => DshRenderFinish::Completed,
-        _ => DshRenderFinish::Running,
-    };
-    let prefix = " ".repeat(indent.saturating_mul(2));
-    let component_width = width.saturating_sub(prefix.len()).saturating_sub(2).max(1);
-    let context = ExecuteBlockContext::new(
-        ExecuteDisplayMode::Expanded,
-        finish == DshRenderFinish::Running,
-        component_width,
-        &theme,
-    );
-    let accent = if finish == DshRenderFinish::Failed {
-        theme.accent_error
-    } else {
-        theme.gray
-    };
-    for (index, component_line) in execute.output(&context).lines.into_iter().enumerate() {
-        lines.push(paint_execute_component_line(
-            component_line,
-            &prefix,
-            index == 0,
-            accent,
-            width,
-            theme,
-        ));
-    }
-    true
-}
-
-fn render_tool_call(
+fn render_projected_tool_lines(
     lines: &mut Vec<Line<'static>>,
     block: &DshRenderBlock,
     theme: Theme,
     indent: usize,
     width: usize,
 ) {
-    if render_execute_tool_call(lines, block, theme, indent, width) {
-        return;
-    }
-    let DshRenderBlock::ToolCall {
-        arguments,
-        edit,
-        view,
-        result,
-        ..
-    } = block
-    else {
+    let Some(tool) = project_tool(block) else {
         return;
     };
-    let prefix = " ".repeat(indent.saturating_mul(2));
-    let finish = match result {
-        Some(result) if result.is_error => DshRenderFinish::Failed,
-        Some(_) => DshRenderFinish::Completed,
-        None => DshRenderFinish::Running,
-    };
-    lines.push(tool_summary_line(
-        &prefix,
-        glyphs::disclosure_open(),
-        &tool_header_text(block),
-        tool_accent(block, finish, theme),
+    let is_running = matches!(block, DshRenderBlock::ToolCall { result: None, .. });
+    let appearance = GrokAppearanceSnapshot::default().scrollback(theme);
+    let rendered = tool.render(ToolBlockContext {
+        mode: DisplayMode::Expanded,
+        is_running,
+        width: width.saturating_sub(indent.saturating_mul(2)).max(1),
+        appearance: &appearance,
         theme,
-    ));
-
-    match view {
-        // Terminal cards are always projected into ExecuteToolCallBlock by
-        // `render_execute_tool_call` above. Keeping this arm data-only makes a
-        // future enum extension exhaustive without reintroducing a second
-        // terminal renderer here.
-        Some(DshToolCallView::Terminal { .. }) => {}
-        Some(DshToolCallView::Diff { .. }) => {
-            if let Some(diffs) = tool_diffs(view.as_ref(), result.as_deref()) {
-                for diff in diffs {
-                    render_diff(
-                        lines,
-                        Some(&diff.path),
-                        diff.old_text.as_deref().unwrap_or(""),
-                        &diff.new_text,
-                        theme,
-                        indent + 1,
-                    );
-                }
+    });
+    let prefix = " ".repeat(indent.saturating_mul(2));
+    for (index, mut block_line) in rendered.output.lines.into_iter().enumerate() {
+        let mut spans = Vec::with_capacity(block_line.content.spans.len() + 2);
+        if !prefix.is_empty() {
+            spans.push(Span::raw(prefix.clone()));
+        }
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        if let Some(background) = block_line.background {
+            for span in &mut block_line.content.spans {
+                span.style = span.style.bg(background);
             }
         }
-        Some(DshToolCallView::Generic {
-            raw_input, content, ..
-        }) => {
-            if let Some(raw_input) = raw_input {
-                let raw = raw_input.as_str().map(str::to_string).unwrap_or_else(|| {
-                    serde_json::to_string_pretty(raw_input)
-                        .unwrap_or_else(|_| raw_input.to_string())
-                });
-                push_panel_lines(
-                    lines,
-                    &raw,
-                    &format!("{prefix}  "),
-                    theme.text_secondary,
-                    theme,
-                );
-            }
-            render_tool_children(lines, content, theme, indent + 1, width);
-            match result.as_ref().and_then(|result| result.view.as_ref()) {
-                Some(DshToolResultView::Generic { content, .. }) => {
-                    render_tool_children(lines, content, theme, indent + 1, width)
-                }
-                Some(DshToolResultView::Read {
-                    path,
-                    lines: read_lines,
-                    total_lines,
-                    ..
-                }) => {
-                    let number_width = read_lines
-                        .last()
-                        .map(|line| line.number.to_string().len())
-                        .unwrap_or(1);
-                    for line in read_lines {
-                        push_panel_lines(
-                            lines,
-                            &format!(
-                                "{:>width$} │ {}",
-                                line.number,
-                                line.text,
-                                width = number_width
-                            ),
-                            &format!("{prefix}  "),
-                            theme.text_secondary,
-                            theme,
-                        );
-                    }
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "{prefix}  {path} · {} of {total_lines} lines",
-                            read_lines.len()
-                        ),
-                        Style::default().fg(theme.gray_dim),
-                    )));
-                }
-                Some(DshToolResultView::SearchMatches {
-                    files,
-                    truncated,
-                    total,
-                    ..
-                }) => {
-                    for file in files {
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}  {}", file.path),
-                            Style::default().fg(theme.path).add_modifier(Modifier::BOLD),
-                        )));
-                        for matched in &file.matches {
-                            push_panel_lines(
-                                lines,
-                                &format!("{} │ {}", matched.line_number, matched.line),
-                                &format!("{prefix}    "),
-                                theme.text_secondary,
-                                theme,
-                            );
-                        }
-                    }
-                    if *truncated {
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}  showing capped results · {total} total"),
-                            Style::default().fg(theme.warning),
-                        )));
-                    }
-                }
-                Some(DshToolResultView::SearchPaths {
-                    paths,
-                    truncated,
-                    total,
-                    ..
-                }) => {
-                    for path in paths {
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}  {path}"),
-                            Style::default().fg(theme.path),
-                        )));
-                    }
-                    if *truncated {
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}  showing {} of {total} paths", paths.len()),
-                            Style::default().fg(theme.warning),
-                        )));
-                    }
-                }
-                Some(DshToolResultView::WebSearch {
-                    sources,
-                    answer,
-                    truncated,
-                    ..
-                }) => {
-                    if let Some(answer) = answer {
-                        push_plain_lines(
-                            lines,
-                            answer,
-                            Style::default().fg(theme.text_secondary),
-                            &format!("{prefix}  "),
-                        );
-                    }
-                    for (index, source) in sources.iter().enumerate() {
-                        let title = source.title.as_deref().unwrap_or(&source.url);
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("{prefix}  [{}] ", index + 1),
-                                Style::default().fg(theme.gray_dim),
-                            ),
-                            Span::styled(title.to_string(), Style::default().fg(theme.link_fg)),
-                        ]));
-                        if source.title.is_some() {
-                            lines.push(Line::from(Span::styled(
-                                format!("{prefix}      {}", source.url),
-                                Style::default().fg(theme.gray_dim),
-                            )));
-                        }
-                    }
-                    if *truncated {
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}  source list truncated"),
-                            Style::default().fg(theme.warning),
-                        )));
-                    }
-                }
-                Some(DshToolResultView::WebFetch {
-                    url,
-                    status_code,
-                    truncated,
-                    ..
-                }) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{prefix}  HTTP {status_code} · "),
-                            Style::default().fg(theme.gray_dim),
-                        ),
-                        Span::styled(url.clone(), Style::default().fg(theme.link_fg)),
-                        Span::styled(
-                            if *truncated { " · truncated" } else { "" },
-                            Style::default().fg(theme.warning),
-                        ),
-                    ]));
-                    if let Some(result) = result {
-                        render_tool_children(lines, &result.blocks, theme, indent + 1, width);
-                    }
-                }
-                Some(DshToolResultView::Diff { diffs, .. }) => {
-                    for diff in diffs {
-                        render_diff(
-                            lines,
-                            Some(&diff.path),
-                            diff.old_text.as_deref().unwrap_or(""),
-                            &diff.new_text,
-                            theme,
-                            indent + 1,
-                        );
-                    }
-                }
-                Some(DshToolResultView::Terminal { .. }) => {}
-                None => {
-                    if let Some(result) = result {
-                        render_tool_children(lines, &result.blocks, theme, indent + 1, width);
-                    }
-                }
-            }
-        }
-        None => {
-            if !arguments.is_empty() {
-                push_panel_lines(lines, arguments, &format!("{prefix}  "), theme.gray, theme);
-            }
-            if let Some(edit) = edit {
-                render_diff(
-                    lines,
-                    edit.path.as_deref(),
-                    &edit.old_text,
-                    &edit.new_text,
-                    theme,
-                    indent + 1,
-                );
-            }
-            if let Some(result) = result {
-                render_tool_children(lines, &result.blocks, theme, indent + 1, width);
-            }
-        }
+        spans.extend(block_line.content.spans);
+        lines.push(Line::from(spans));
     }
 }
 
@@ -2288,7 +1616,9 @@ fn render_block(
                 Style::default().fg(theme.accent_assistant),
             )));
         }
-        DshRenderBlock::ToolCall { .. } => render_tool_call(lines, block, theme, indent, width),
+        DshRenderBlock::ToolCall { .. } => {
+            render_projected_tool_lines(lines, block, theme, indent, width)
+        }
         DshRenderBlock::ToolResult {
             blocks, is_error, ..
         } => {
@@ -2399,6 +1729,7 @@ fn color_for_kind(kind: DshRenderKind, theme: Theme) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{scrollback_adapter::tick::DEFAULT_WAVE_ROWS, theme::wave_brightness};
     use dsh_pager::{
         DshRenderBlock, DshRenderContent, DshRenderEntryId, DshRenderFinish, DshRenderVisibility,
     };
@@ -2606,7 +1937,7 @@ mod tests {
         let rich = RichTranscript::new(std::slice::from_ref(&entry), 80, theme);
         let initial = rich.visible_lines(0, 20);
         assert!(initial.iter().any(|line| line.copy_text == "◆ Thinking…"));
-        assert!(initial.iter().any(|line| line.copy_text == "› shell"));
+        assert!(initial.iter().any(|line| line.copy_text == "◆ shell"));
         assert!(initial.iter().any(|line| line.copy_text == "final answer"));
         assert!(
             initial
@@ -2619,7 +1950,7 @@ mod tests {
                 .iter()
                 .filter(|line| line.block_index.is_some())
                 .filter(|line| {
-                    line.copy_text == "◆ Thinking…" || line.copy_text == "› shell"
+                    line.copy_text == "◆ Thinking…" || line.copy_text == "◆ shell"
                 })
                 .all(|line| line.rail)
         );
@@ -2780,7 +2111,7 @@ mod tests {
             .find(|line| line.copy_text == "◆ Thought for 10.0s")
             .expect("completed thinking header");
         assert_eq!(
-            header.line.spans.first().and_then(|span| span.style.fg),
+            header.line.spans.get(1).and_then(|span| span.style.fg),
             Some(Theme::current().gray)
         );
         assert!(
@@ -2788,64 +2119,24 @@ mod tests {
                 .line
                 .spans
                 .iter()
-                .skip(1)
+                .skip(2)
                 .all(|span| { span.style.fg == Some(Theme::current().gray) })
         );
     }
 
     #[test]
-    fn rail_wave_cycle_scales_with_length_at_fixed_row_speed() {
-        assert!((wave_cycle_seconds(1) - 2.875).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(4) - 3.25).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(12) - 4.25).abs() < f64::EPSILON);
-        assert!((wave_cycle_seconds(24) - 5.75).abs() < f64::EPSILON);
+    fn rail_wave_uses_the_fixed_grok_phase_contract() {
+        let top = wave_brightness(0, 0, DEFAULT_WAVE_ROWS, GROK_WAVE_SPEED);
+        let quarter = wave_brightness(0, 8, DEFAULT_WAVE_ROWS, GROK_WAVE_SPEED);
+        let next_tick = wave_brightness(1, 0, DEFAULT_WAVE_ROWS, GROK_WAVE_SPEED);
 
-        let row_zero_peak = wave_brightness(1_063, 0, 24);
-        let row_eight_peak_one_second_later = wave_brightness(2_063, 8, 24);
-        assert!(row_zero_peak > 0.999);
-        assert!(row_eight_peak_one_second_later > 0.999);
+        assert!(top.abs() < f32::EPSILON);
+        assert!((quarter - 1.0).abs() < 1e-6);
+        assert!(next_tick > top);
     }
 
     #[test]
-    fn rail_wave_uses_a_long_gray_ramp_instead_of_chunky_jumps() {
-        let peak_at_row_eight_ms = 2_063;
-        let mid_ramp: Vec<f32> = (0..16)
-            .map(|row| wave_brightness(peak_at_row_eight_ms, row, 24))
-            .collect();
-        let distinct_steps = mid_ramp
-            .iter()
-            .filter(|brightness| **brightness > 0.02 && **brightness < 0.98)
-            .count();
-        assert!(
-            distinct_steps >= 8,
-            "traveling highlight should expose many intermediate grays, got {mid_ramp:?}"
-        );
-
-        let mut max_adjacent = 0.0f32;
-        let mut max_frame = 0.0f32;
-        for elapsed_ms in (0..6_000).step_by(5) {
-            for row in 0..24u16 {
-                let now = wave_brightness(elapsed_ms, row, 24);
-                let next_frame = wave_brightness(elapsed_ms.saturating_add(WAVE_FRAME_MS), row, 24);
-                max_frame = max_frame.max((now - next_frame).abs());
-                if row < 23 {
-                    let neighbor = wave_brightness(elapsed_ms, row + 1, 24);
-                    max_adjacent = max_adjacent.max((now - neighbor).abs());
-                }
-            }
-        }
-        assert!(
-            max_adjacent < 0.25,
-            "adjacent rows jumped {max_adjacent} of full brightness"
-        );
-        assert!(
-            max_frame < 0.08,
-            "a 33ms frame jumped {max_frame} of full brightness"
-        );
-    }
-
-    #[test]
-    fn running_rail_geometry_uses_its_contiguous_rendered_length() {
+    fn running_rail_phase_uses_logical_line_rows() {
         let mut scrollback = Scrollback::default();
         for (seq, data) in [
             (
@@ -2888,24 +2179,17 @@ mod tests {
         let animated = pane
             .visible_lines(&mut scrollback, 0, 20)
             .into_iter()
-            .filter(|line| line.rail_animated)
+            .filter(|line| line.accent.is_some_and(|accent| accent.animated))
             .collect::<Vec<_>>();
-        let expected_len = animated.len().min(u16::MAX as usize) as u16;
         assert!(
-            expected_len >= 4,
-            "header and reasoning rows should animate"
+            animated.len() >= 3,
+            "header, header gap, and reasoning body should animate; got {animated:#?}"
         );
         assert!(
             animated
                 .iter()
-                .all(|line| line.rail_wave_len == expected_len)
-        );
-        assert_eq!(
-            animated
-                .iter()
-                .map(|line| line.rail_wave_row)
-                .collect::<Vec<_>>(),
-            (0..expected_len).collect::<Vec<_>>()
+                .all(|line| line.accent_wave_row == line.line_index.min(u16::MAX as usize) as u16),
+            "wave phase must follow the stable logical row, not rail length"
         );
     }
 
@@ -2934,20 +2218,23 @@ mod tests {
         let theme = *Theme::current();
         let mut pane = ScrollbackPane::default();
         pane.sync(&mut scrollback, 80, theme);
-        pane.set_wave_elapsed(Duration::ZERO);
+        pane.set_wave_tick(0);
         let first = pane
             .visible_lines(&mut scrollback, 0, 20)
             .into_iter()
-            .find(|line| line.rail_animated)
+            .find(|line| line.accent.is_some_and(|accent| accent.animated))
             .expect("running rail");
-        pane.set_wave_elapsed(Duration::from_millis(313));
+        pane.set_wave_tick(9);
         let second = pane
             .visible_lines(&mut scrollback, 0, 20)
             .into_iter()
-            .find(|line| line.rail_animated)
+            .find(|line| line.accent.is_some_and(|accent| accent.animated))
             .expect("running rail after elapsed time");
-        assert_eq!(first.rail_wave_row, 0);
-        assert_eq!(first.rail_wave_len, 1);
+        assert_eq!(first.accent_wave_row, 0);
+        assert_eq!(
+            first.accent,
+            Some(AccentStyle::animated(theme.accent_running))
+        );
         assert_ne!(
             first.line.spans.first().and_then(|span| span.style.fg),
             second.line.spans.first().and_then(|span| span.style.fg),
@@ -2956,67 +2243,60 @@ mod tests {
         assert_ne!(
             first.line.spans.first().and_then(|span| span.style.fg),
             Some(theme.accent_running),
-            "running tools use a neutral gray-to-white wave, not the legacy purple accent"
+            "the traveling wave starts between background and the configured running accent"
         );
         assert_eq!(
             first
                 .line
                 .spans
                 .iter()
-                .skip(1)
+                .skip(2)
                 .map(|span| span.style.fg)
                 .collect::<Vec<_>>(),
             second
                 .line
                 .spans
                 .iter()
-                .skip(1)
+                .skip(2)
                 .map(|span| span.style.fg)
                 .collect::<Vec<_>>(),
-            "running right-side text must not inherit the rail wave phase"
+            "running text after the synchronized bullet must not inherit the wave phase"
         );
-        assert!(
-            first
-                .line
-                .spans
-                .iter()
-                .skip(1)
-                .all(|span| { span.style.fg == Some(theme.text_primary) })
-        );
-
+        assert_ne!(first.line.spans[1].style.fg, second.line.spans[1].style.fg);
         pane.set_selected_target(Some(HitTarget::TranscriptEntry(DshRenderEntryId::Event {
             seq: 40,
         })));
         let selected = pane
             .visible_lines(&mut scrollback, 0, 20)
             .into_iter()
-            .find(|line| line.rail_animated && line.header)
+            .find(|line| line.accent.is_some_and(|accent| accent.animated) && line.header)
             .expect("selected running header");
         assert_eq!(
             selected.line.spans.first().and_then(|span| span.style.fg),
-            Some(theme.text_primary)
-        );
-        assert!(
-            selected
-                .line
-                .spans
-                .iter()
-                .skip(1)
-                .all(|span| { span.style.fg == Some(theme.text_primary) })
+            Some(theme.accent_running)
         );
 
         let mut failed = selected.clone();
-        failed.rail_animated = false;
-        failed.rail_flash = false;
-        failed.rail_accent = Some(theme.accent_error);
-        apply_dynamic_accent(&mut failed, 0, theme, None, None, true);
-        assert!(
-            failed
-                .line
-                .spans
-                .iter()
-                .all(|span| { span.style.fg == Some(theme.accent_error) })
+        failed.accent = Some(AccentStyle::static_color(theme.accent_error));
+        failed.accent_flash = false;
+        EntryRenderer::paint_dynamic(
+            &mut failed.line,
+            DynamicAccentSpec {
+                tick: 0,
+                logical_row: failed.accent_wave_row,
+                wave_rows: DEFAULT_WAVE_ROWS,
+                wave_speed: GROK_WAVE_SPEED,
+                background: theme.bg_base,
+                accent: failed.accent,
+                flash_accent: failed.flash_accent,
+                bullet: None,
+                bullet_span: None,
+                selected: true,
+                flash: false,
+                pending_user_input: false,
+            },
         );
+        assert_eq!(failed.line.spans[0].style.fg, Some(theme.accent_error));
     }
 
     #[test]
@@ -3257,7 +2537,7 @@ mod tests {
         for expected in [
             "markdown",
             "thinking",
-            "▾ shell",
+            "◆ shell",
             "✗ result",
             "output",
             "[image: image/png]",
@@ -3323,16 +2603,16 @@ mod tests {
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(terminal_text.contains("▾ Run show workspace"));
+        assert!(terminal_text.contains("◆ Run show workspace"));
         assert!(!terminal_text.contains('⌄'));
         let terminal_header = terminal
             .iter()
             .find(|line| line.to_string().contains("Run show workspace"))
             .expect("expanded terminal header");
-        assert_eq!(terminal_header.to_string(), "▾ Run show workspace");
+        assert_eq!(terminal_header.to_string(), "◆ Run show workspace");
         assert_eq!(
             terminal_header.spans[0].content,
-            format!("{} ", glyphs::disclosure_open())
+            format!("{} ", glyphs::diamond_filled())
         );
         assert!(terminal_text.contains("$ pwd"));
         assert!(terminal_text.contains("/work"));
@@ -3403,8 +2683,8 @@ mod tests {
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(read_text.contains("7 │ fn main() {}"));
-        assert!(read_text.contains("1 of 42 lines"));
+        assert!(read_text.contains("7  fn main() {}"));
+        assert!(read_text.contains("(7-7 of 42)"));
 
         let search = render(DshRenderBlock::ToolCall {
             name: "grep".into(),
@@ -3441,7 +2721,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(search_text.contains("src/lib.rs"));
-        assert!(search_text.contains("9 │ // TODO"));
+        assert!(search_text.contains("9  // TODO"));
         assert!(search_text.contains("3 total"));
 
         let web = render(DshRenderBlock::ToolCall {
@@ -3657,7 +2937,7 @@ mod tests {
         );
         assert_eq!(scrollback.layout(80).entries[1].height, 0);
 
-        assert!(pane.toggle_fold_or_group(DshRenderEntryId::Event { seq: 20 }));
+        assert!(pane.toggle_fold_or_group_at(DshRenderEntryId::Event { seq: 20 }, Some(0)));
         pane.sync(&mut scrollback, 80, theme);
         let expanded = pane.visible_lines(&mut scrollback, 0, 20);
         assert!(
@@ -3718,7 +2998,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.copy_text.contains("Read · a.rs"))
+                .any(|line| line.copy_text.contains("Reading 1 file"))
         );
         assert!(
             lines
@@ -3782,17 +3062,17 @@ mod tests {
             .expect("collapsed execute summary");
         assert_eq!(
             summary.copy_text,
-            "› Run retry jobs and inspect recent worker logs"
+            "◆ Run retry jobs and inspect recent worker logs"
         );
         assert!(!summary.copy_text.contains("node worker.js"));
-        assert!(summary.line.to_string().starts_with("┃  › Run "));
-        assert!(summary.rail_animated);
+        assert!(summary.line.to_string().starts_with("┃  ◆ Run "));
+        assert!(summary.accent.is_some_and(|accent| accent.animated));
         assert!(
             summary
                 .line
                 .spans
                 .iter()
-                .any(|span| { span.content.contains('›') && span.style.fg.is_some() })
+                .any(|span| { span.content.contains('◆') && span.style.fg.is_some() })
         );
         assert!(summary.line.spans.iter().any(|span| {
             span.content == "Run " && span.style.add_modifier.contains(Modifier::BOLD)
@@ -3802,7 +3082,7 @@ mod tests {
                 && !span.style.add_modifier.contains(Modifier::BOLD)
         }));
 
-        assert!(pane.toggle_fold_or_group(id));
+        assert!(pane.toggle_fold_or_group_at(id, Some(0)));
         pane.sync(&mut scrollback, 80, theme);
         let expanded = pane.visible_lines(&mut scrollback, 0, 20);
         let expanded_text = expanded
@@ -3810,7 +3090,7 @@ mod tests {
             .map(|line| line.copy_text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(expanded_text.contains("▾ Run retry jobs and inspect recent worker logs"));
+        assert!(expanded_text.contains("◆ Run retry jobs and inspect recent worker logs"));
         assert!(!expanded_text.contains('⌄'));
         assert!(expanded_text.contains("$ node worker.js"));
         assert_eq!(
@@ -3862,7 +3142,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| { line.group_header && line.copy_text.contains("Read · src/lib.rs") })
+                .any(|line| { line.group_header && line.copy_text.contains("Reading 1 file") })
         );
         assert!(
             !lines

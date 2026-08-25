@@ -19,6 +19,7 @@ dsh-grok-inline = { path = "../dsh-grok-inline" }
 ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+similar = { workspace = true }
 textwrap = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }

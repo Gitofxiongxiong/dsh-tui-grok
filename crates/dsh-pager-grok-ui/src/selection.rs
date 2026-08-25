@@ -191,7 +191,7 @@ impl SelectionModel {
                 .take(end.saturating_sub(start))
                 .collect::<String>();
             if !first {
-                output.push('\n');
+                output.push_str(line.joiner_to_previous.as_deref().unwrap_or("\n"));
             }
             first = false;
             output.push_str(&text);
@@ -264,6 +264,7 @@ mod tests {
             target: HitTarget::TranscriptEntry(DshRenderEntryId::Event { seq: id }),
             line_index: index,
             text: text.into(),
+            joiner_to_previous: None,
             rect: Rect::new(2, index as u16, 20, 1),
         }
     }
@@ -297,5 +298,21 @@ mod tests {
         let point = SelectionModel::point_for_line(&line.target, &line, 5).unwrap();
         assert_eq!(point.grapheme_index, 2);
         assert!(line.rect.contains(Position::new(3, 0)));
+    }
+
+    #[test]
+    fn copy_reconstructs_soft_wrap_joiners_instead_of_visual_newlines() {
+        let mut first = line(1, 0, "hello");
+        let mut second = line(1, 1, "world");
+        first.joiner_to_previous = None;
+        second.joiner_to_previous = Some("  ".into());
+        let selection = ResolvedSelection {
+            start: SelectionPoint::new(DshRenderEntryId::Event { seq: 1 }, 0, 0),
+            end: SelectionPoint::new(DshRenderEntryId::Event { seq: 1 }, 1, 5),
+        };
+        assert_eq!(
+            SelectionModel::default().copy_lines(&[first, second], &selection),
+            "hello  world"
+        );
     }
 }

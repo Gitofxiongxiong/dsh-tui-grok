@@ -13,8 +13,9 @@ pub mod agent_status;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/context_bar.rs"]
 pub mod context_bar;
 pub mod dashboard;
-#[path = "../../vendor/grok/xai-grok-pager/src/scrollback/blocks/tool/execute.rs"]
-pub mod execute_tool;
+pub mod execute_tool {
+    pub use crate::scrollback::tool::execute::*;
+}
 pub mod execute_tool_adapter;
 pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]

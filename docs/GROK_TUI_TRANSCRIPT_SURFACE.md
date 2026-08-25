@@ -1,7 +1,7 @@
 # Grok TUI 转录表面：用户消息、思考、工具调用
 
 > 用途：DSH pager 与 Grok Build TUI 做视觉/交互对齐时的功能点契约。
-> 上游：`/home/leo/code/grok-build`（pager crate `xai-grok-pager`）。
+> 上游：`/home/leo/aidreamschool/grok-build`（pager crate `xai-grok-pager`）。
 > 证据：源码 + 本机 `ttyd + xterm.js + Playwright` 对隔离 sandbox 会话的 `.xterm` 截图。
 > 截图会话：`grok --always-approve --effort medium --cwd /tmp/grok-tui-doc-sandbox`，无真实凭据。
 > 第二轮 prompt 被脚本误键入了前缀 `el`，只影响用户文案，不影响 chrome 语义。
@@ -30,8 +30,8 @@ Grok 的 transcript 不是“三种气泡”。每条历史是一个 `RenderBloc
 | Agent 正文 `AgentMessage` | 无 | 有，同用户消息 | 不可折叠 | 无 |
 
 用户口语里的“正在思考/跑工具时左边竖条会闪”，Grok 源码里不是开关闪烁，
-而是 **accent rail 的 `sin²` 行波**。DSH 本地按用户确认的节奏适配成固定线速度
-的移动高光带，仍保留连续的明暗包络：
+而是 **accent rail 的 `sin²` 行波**。DSH S1 已恢复同一固定空间相位和速度；
+仅把 runtime 的单调经过时间确定性换算为约 30 FPS tick，不修改上游公式：
 
 - 多行思考块：高光沿 `┃` 往下走。
 - 单行工具摘要：同一公式作用在一行上，看起来就是竖条明暗闪烁。
@@ -158,6 +158,14 @@ ACP/session event
 
 `ToolCallBlock` 是 sum type。折叠、accent、完成态都委托给变体。bullet 由 appearance 的 tool bullet（默认菱形）统一前置。
 
+S5 后这不再只是 Grok 行为说明：DSH production 已通过
+`scrollback_adapter::project_tool` 投到 vendor
+`ToolCallBlock::{Execute,Read,Edit,ListDir,Search,WebFetch,WebSearch,Other}`，再由同一
+tool family 输出 header/detail/accent；`transcript.rs` 不再有平行
+`render_tool_call`。只有 DTO 映射留在 adapter，vendor 文件不引用 `dsh_pager`。
+Grok tool execution、MCP/hook/media process 与 edit 的全文件 syntect/source-map
+worker没有 DSH 中性真源，按 B/D 边界排除；它们不是继续在 view 中自写的理由。
+
 ### 5.1 各变体标题（collapsed 一行）
 
 | 种类 | 标题形态 | 默认折叠 | 运行中左侧 `┃` |
@@ -237,23 +245,27 @@ brightness = sin²(tick * 0.15 + row_phase)
 period ≈ π / 0.15 ≈ 21 ticks ≈ 0.7s  （30fps）
 ```
 
-DSH 节奏适配不再让所有长度共享上述单点周期，而是把每个连续 animated rail
-投影为 `(local_row, rail_len)`，并用单调经过时间驱动高光中心：
+DSH production 使用同一公式；adapter 只负责把单调时间转成 tick：
 
 ```text
-speed = 8 rows/s
-band = 16 rows          # 3σ support of a Gaussian; bright core is thinner
-gap = 6 rows
-cycle = (rail_len + band + gap) / speed
-brightness = exp(-½ (distance / σ)²)   σ = band / 6
+tick = floor(elapsed_seconds * 30)
+row_phase = 2π * logical_row / 32
+brightness = sin²(tick * 0.15 + row_phase)
 ```
 
-因此 1/4/12/24 行 rail 的完整周期约为 2.875/3.25/4.25/5.75 秒；相邻长度
-只改变完整遍历时间，不改变高光每秒经过的终端行数。包络比旧的 4 行 `cos²`
-更长、亮核更细，相邻行和 33ms 帧之间走灰度阶梯而不是色块跳变。单行工具
-摘要自然退化为一次缓慢明暗脉冲。渲染仍保持 33ms poll 以保证平滑度，实际
-相位来自 `Instant` 而不是重绘计数，所以输入或通知导致的额外重绘不会加速
-行波。
+rail 实际长度不进入周期；单点可见明暗周期约 0.7 秒，多行通过固定 32 行相位
+呈现空间行波，单行工具摘要自然退化为同公式的明暗脉冲。渲染仍保持 33ms poll
+以保证平滑度，实际相位来自 `Instant` 而不是重绘计数，所以输入或通知导致的
+额外重绘不会加速行波。S2 已接入 `AccentStyle + Appearance`：thinking rail 使用
+`ThinkingConfig.accent = gray_dim`，running execute 使用
+`ExecuteConfig.running_accent = accent_running`；颜色与公式现在分别由 appearance
+和 EntryRenderer 拥有，不能再通过修改公式或引入 `rail_len` 补偿。
+
+S3/S4 同步完成了生产 renderer/message-block 接线；S5 又把全部 DSH-presentable
+tool family 与 verb-group 接入同一 chrome。accent 列、`◆` bullet、prompt vpad/
+背景由 `EntryRenderer`/`BlockRenderer` 物化，`Thinking…`、`Thought for Xs`、last-N
+截断及 user/agent/tool 输出来自 vendor B 闭包。sticky/Buffer-direct window 和最终
+`RichTranscript` 收尾仍属于 S6–S7，不能据此宣称整个 N2/pixel parity 已闭包。
 
 特殊态：
 
@@ -410,3 +422,11 @@ Btw（`/btw`）与 Agent 正文同类，走同一套 overlay 资格；触发仍�
 | `assets/grok-tui-transcript/09-turn-complete.png` | 思考/工具/多条时钟/Worked for |
 
 未稳定截到：时间戳 hover 长格式、Read 单条展开后的带行号正文、权限卡冻结 rail。这三项以第 7–10 节源码为准，补拍时另开进度记录。
+
+S5 的工作区外最终证据位于 `/tmp/dsh-grok-s5-browser-20260825/`：DSH Edit
+collapsed/expanded、Read+Search verb-run collapsed/expanded、真实 Grok Edit+Read、
+并排图、绝对像素 diff、screen text、browser errors 和 `result.json`。两端固定
+1200×800、DPR1、DejaVu Sans Mono 16px；browser errors 全空。整屏 diff 主要来自
+DSH fixture 固有的 Tasks/Subagents/Queue 与 Grok 的 Thought/timestamps/Worked-for，
+以及 manifest 已声明的 typed `+/-` diff 对 contextual hunk/syntect 排除；不能把该
+diff 比率解释为 S7 parity 分数。

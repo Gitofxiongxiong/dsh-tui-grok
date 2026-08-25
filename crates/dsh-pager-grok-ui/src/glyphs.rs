@@ -22,6 +22,26 @@ pub fn diamond_filled() -> &'static str {
     "◆"
 }
 
+/// Grok's default collapsed accent glyph.
+pub fn collapsed_accent() -> &'static str {
+    "❙"
+}
+
+/// Grok's fullscreen scrollback accent rail.
+pub fn accent_bar() -> &'static str {
+    "┃"
+}
+
+/// Grok's synthetic group-header diamond.
+pub fn diamond_dotted() -> &'static str {
+    "◈"
+}
+
+/// Grok's filled status/selection dot for the modern-terminal DSH target.
+pub fn filled_dot() -> &'static str {
+    "●"
+}
+
 pub fn dot_spinner_frames() -> &'static [&'static str] {
     &["·", "•", "●", "•"]
 }

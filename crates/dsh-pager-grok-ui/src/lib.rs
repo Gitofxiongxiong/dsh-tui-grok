@@ -27,6 +27,8 @@ pub mod media;
 pub mod parity;
 pub mod runtime;
 pub mod scheduler;
+pub mod scrollback;
+pub mod scrollback_adapter;
 pub mod selection;
 pub mod session_mode;
 

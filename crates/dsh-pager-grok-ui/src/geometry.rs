@@ -147,6 +147,7 @@ pub struct GeometryLine {
     pub target: HitTarget,
     pub line_index: usize,
     pub text: String,
+    pub joiner_to_previous: Option<String>,
     pub rect: Rect,
 }
 
@@ -162,6 +163,7 @@ pub fn insert_text_line(
     y: u16,
     width: u16,
     text: &str,
+    joiner_to_previous: Option<String>,
     link: Option<LinkTarget>,
 ) -> GeometryLine {
     let rect = Rect::new(x, y, width, 1);
@@ -189,6 +191,7 @@ pub fn insert_text_line(
         target,
         line_index,
         text: text.to_string(),
+        joiner_to_previous,
         rect,
     }
 }
@@ -314,6 +317,7 @@ mod tests {
             0,
             80,
             "see https://example.test/path",
+            None,
             Some(link),
         );
         assert!(map.link_at(6, 0).is_some());

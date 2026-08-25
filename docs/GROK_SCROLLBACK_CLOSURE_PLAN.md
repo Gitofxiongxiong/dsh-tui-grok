@@ -9,6 +9,11 @@
 > `7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa`。
 > 本文只规划，不宣称闭包已迁完，也不授权继续在 `transcript.rs` 里发明视觉算法。
 
+> 路线纠偏（2026-08-25）：档 3 的“复用”默认含义是**复制固定上游的原文件、
+> 目录边界和测试，再在边界做适配**，不是阅读上游后重写一个较小的同职责实现。
+> 当前 S2–S4 只证明一条核心纵切能够接入 production，不满足闭包完成条件；后续
+> 必须先完成 S2R–S4R 上游重基，再进入 S5。
+
 ## 1. 为什么现在写
 
 2026-08-25 同一上午，运行态左侧 `┃` 在 `transcript.rs` 里被连续改了三轮：
@@ -58,8 +63,9 @@ Codex 独立审核确认：整列突然变黑再从头亮，是这段自造包�
    fold chrome、verb-run header、vpad、timestamp overlay 几何。
 2. **禁止** 再调 `WAVE_ROWS_PER_SECOND` / `WAVE_BAND_ROWS` / `WAVE_GAP_ROWS`
    作为产品方案。这三个常数是自造彗星的旋钮，档 3 要删掉它们。
-3. **禁止** 把 Grok `scrollback/` 的某一文件「简化重写」进 `views/`。
-   允许的是 vendor 原文件 + adapter。
+3. **禁止** 把 Grok `scrollback/` 的某一文件「简化重写」到任何本地目录，
+   包括把小型抽取放进 `vendor/grok/` 后称作 vendor。允许的是固定 snapshot 原文件
+   + A1 接线，或保留原组件边界、行为分支、不变量和测试矩阵的 B 适配。
 4. **允许** 的 `transcript.rs` 改动只有：
    - 修 DSH identity/layout 接线 bug；
    - 把一整块职责搬到 vendor/adapter 后删除对应函数；
@@ -73,6 +79,26 @@ Codex 独立审核确认：整列突然变黑再从头亮，是这段自造包�
 
 违反冻结 = 继续漂移。行波三连补丁已经证明，在神文件里「先看一眼再改常数」
 会把错误模型写进测试，之后更难替换。
+
+### 3.1 upstream-first 执行法
+
+每个 scrollback 切片固定按以下顺序执行：
+
+1. 先把锁定 revision 的上游文件、同目录模块声明和该文件测试复制到对应 vendor
+   路径，保留上游命名和主要函数形状；
+2. 编译列出依赖闭包：同职责 UI/render/layout/state 依赖继续复制，Grok agent、
+   persistence、telemetry、全局 runtime 等 D 类依赖才在入口切断；
+3. DSH 差异只能收敛在 `project_entry.rs`、`host_pane.rs`、`tick.rs` 或明确的
+   renderer-neutral trait/DTO；vendor 文件不得理解 `DshRenderEntry`；
+4. B 适配必须附“保留/排除能力矩阵”和上游测试对应关系。删除一个上游行为分支
+   不能只用“当前 DSH 暂时没数据”解释，必须有显式 unsupported 投影或后续切片；
+5. SOURCE_MANIFEST 登记原 hash 和本地 patch 原因，并用 diff 审计 A0/A1/B；
+6. production 切换后删除同职责旧实现。复制代码尚未接 production 不能算完成，
+   production 仍走 mini extract 也不能算闭包完成。
+
+适配超过 100 行不是改写上游的理由。若一个原文件因依赖尚不能编译，应扩大该刀
+的 Grok 依赖闭包或把切点上移到类型/trait 入口，不得退回“摘出看起来够用的
+100–200 行”。
 
 ## 4. 两边现在各是什么
 
@@ -147,6 +173,25 @@ event_loop 30fps
 Grok `ScrollbackState` **不**作为 DSH 历史真源。Harness 事件 → `DshRenderEntry`
 这条链不动。迁的是「给定一条 entry，像素怎么画」。
 
+### 4.4 2026-08-25 对当前 S2–S4 的代码审计
+
+当前 production 纵切可以运行、测试也通过，但它不是上述“vendor 原文件 + adapter”
+的完成形态：
+
+| 模块 | 当前本地 / 固定上游 | 缺失的上游职责 | 结论 |
+|---|---:|---|---|
+| `wrappers/entry_renderer.rs` | 182 / 1954 行；1 / 32 个测试 | appearance layout、right pad、pending-input freeze、整块 timestamp reserve、`skip_rows`、group header、Buffer 直绘等 | B mini extract，S3 未闭合 |
+| `blocks/thinking.rs` | 204 / 738 行；2 / 7 个测试 | 上游完整 mode/output/chrome 分支和测试矩阵 | 核心表面已接，S4 未闭合 |
+| `blocks/user.rs` | 113 / 1166 行；1 / 41 个测试 | 上游 prompt layout、wrap/copy/selection 等分支 | 核心表面已接，S4 未闭合 |
+| `blocks/agent.rs` | 35 / 492 行；1 / 11 个测试 | 上游 agent output、metadata/annotation 等分支 | 仅适配壳，S4 未闭合 |
+| `appearance.rs` | 本地重新声明 renderer subset | 与上游 `AppearanceConfig.scrollback.layout/blocks/display` 类型树不一致，且 `block_pad_right` 投影为 0 | 合理 seam 意图，错误的平行类型落点 |
+| `project_entry.rs` | 只返回 User/Thinking/Agent/Generic | 没有形成带稳定 ID、`RenderBlock`、display mode、running/finished 的目标 entry | 投影契约尚未实现 |
+
+`transcript.rs` 在该批次只从 3799 行降到 3793 行；identity/Fenwick host 胶水、
+投影、grouping、timestamp 几何、wrap 和大量 block 输出仍混在文件中。因此此前
+“S2–S4 已完成”降级为：**S2–S4 核心纵切已接入，闭包未完成**。已有代码可作为
+迁移期间的 parity oracle 和临时 production fallback，不得继续扩成 S5 的基础。
+
 ## 5. 目标拓扑
 
 ```text
@@ -206,7 +251,7 @@ DSH 把运行波混到 `theme.text_primary`、右侧文字锁白，是另一次�
 |---|---|---|---|
 | `theme/tokyonight.rs` 的 `wave_brightness` / `pulse_brightness` | A0 | 随 Theme constructors 切片，或先抽 `vendor/.../wave.rs` 再合并 | `transcript.rs` 高斯三常数 |
 | `render/color.rs::blend_color` | A1 | vendor；Indexed 量化可保留 | 本地三通道 round blend |
-| `appearance/config.rs` 的 `AnimationConfig` `ThinkingConfig` `ToolConfig` | B | 已有 Layout 投影上补字段，不要平行 struct | 写死的 gray / text_primary 波 |
+| `appearance/config.rs` 的 scrollback runtime 类型树 | A1/B | 复制 runtime 定义；config store/file watcher 在 host 构造入口切断，主题由 adapter 解析 | 本地平行 `ScrollbackAppearance` 子树 |
 | `glyphs.rs` 剩余 registry | A1 | 扩 `src/glyphs.rs` 或 vendor 全表 | 继续硬编码 `⌘`/`⌄` 等 |
 
 `tokyonight.rs` 整文件还带着 Theme 构造。生产主题已是
@@ -219,7 +264,7 @@ DSH 把运行波混到 `theme.text_primary`、右侧文字锁白，是另一次�
 |---|---|---|
 | `scrollback/types.rs` | A1 | `AccentStyle` `DisplayMode` `BlockContext` |
 | `scrollback/layout.rs` | A1 | accent 列几何 |
-| `wrappers/entry_renderer.rs` | B | 保留 WAVE_SPEED、pending 冻结、bullet 同步；tick 从 adapter 注入 |
+| `wrappers/entry_renderer.rs` | A1/B | 以原文件为基线，保留 layout、WAVE_SPEED、pending 冻结、timestamp reserve、`skip_rows`、group header、bullet 同步和上游测试；tick/entry source 从入口注入 |
 | `wrappers/block_renderer.rs` | A1 | |
 | `wrappers/padded.rs` `accented.rs` | A1 | 若 EntryRenderer 仍引用 |
 
@@ -229,7 +274,9 @@ execute + markdown。
 
 ### 6.3 blocks（按现在生产里真正会画的切）
 
-第一刀覆盖当前 `transcript.rs` 已经在画、且用户每天看见的：
+第一刀覆盖当前 `transcript.rs` 已经在画、且用户每天看见的。这里的“覆盖”指复制
+所列上游文件的完整行为形状和相关测试，不是从每个文件摘一个能画 happy path 的
+小函数：
 
 - `blocks/thinking.rs`
 - `blocks/user.rs`
@@ -279,6 +326,11 @@ ScrollbackEntry
   is_running / finished_at ← DshRenderFinish
 ```
 
+过渡期的 `ProjectedEntry::{User,Thinking,Agent,Generic}` 不满足这个契约，因为它
+没有稳定 ID、block 列表、display mode 和 finish state。S2R–S4R 必须先建立真正的
+renderer-neutral projected entry，再由复制的 Grok renderer 消费；不得把剩余
+identity/fold/group/timestamp 逻辑继续留在 `transcript.rs` 里补齐。
+
 硬规则：
 
 - vendor 文件不得 `use dsh_pager::` 或 `SessionState`。
@@ -287,7 +339,7 @@ ScrollbackEntry
   负责「这个 entry 现在多少行」。
 - generation / 幂等键不进 renderer。
 
-## 8. 切片顺序（每一刀都要缩小 transcript.rs）
+## 8. 切片顺序（先重基，再继续功能）
 
 每一刀的验收：**本刀迁走的职责在 `transcript.rs` 里对应函数删除或变为
 `#[cfg(test)]` oracle 调用，禁止双路径 production。**
@@ -296,15 +348,64 @@ ScrollbackEntry
 |---|---|---|---|
 | S0 | 本文 + 冻结 | 无代码 | 新视觉 PR 不再进神文件 |
 | S1 | Grok `wave_brightness` + Instant→tick | 高斯、`WAVE_BAND_*`、`WAVE_GAP_*`、`rail_wave_len` 周期 | 灭灯消失，短 rail 呈 32 行相位 `sin²` |
-| S2 | `AccentStyle` + Appearance thinking/tool 色 | `apply_dynamic_accent` 里写死 primary 波 | thinking/execute 波色与 Grok 一致 |
-| S3 | `EntryRenderer` + `BlockRenderer` + 最小 `project_entry`（thinking/execute/markdown） | `decorate_line` 生产路径 | ┃ ◆ vpad 由 EntryRenderer 画 |
-| S4 | thinking/user/agent 全量 block | `thinking_running_lines` 等 | Thought for / 截断规则来自上游 |
+| S2R | 复制上游 appearance scrollback runtime 类型树；host 只负责构造 resolved value | 本地平行 `ScrollbackAppearance` 子树 | layout/blocks/display 字段与上游同形 |
+| S3R | 复制 `layout.rs`、完整 `EntryRenderer` / `BlockRenderer` 结构和测试；以 trait/DTO 切断 D 类依赖 | 当前 182 行 mini EntryRenderer、transcript timestamp/chrome 几何 | pending/timestamp/skip_rows/padding/group header 不再缺支 |
+| S4R | 复制 thinking/user/agent 原文件及其依赖闭包和测试；建立真实 projected entry | 当前三个 mini block、`ProjectedEntry` 四分支壳 | block output/mode/wrap/copy 来自上游 |
 | S5 | 其余 tool blocks + `verb_group` | `GroupKind` `render_tool_call` 生产路径 | Read 2 files 等 header 来自上游 |
-| S6 | `render.rs` + sticky + 改名后的 host glue | 手写 visible_lines 上色循环 | skip_rows/窗口与 Grok 一致 |
+| S6A | 给 DSH host 增加 revision/range/borrow 接口，缓存只物化 viewport + overscan | `render_entries()` 全历史 clone/materialize | 50k history 重绘与窗口大小成正比 |
+| S6B | 复制 `render.rs` + sticky + 改名后的 host glue，直接写 `Buffer` | 手写 visible_lines/Paragraph 上色循环 | clipped skip_rows/窗口与 Grok 一致 |
 | S7 | 删除 `RichTranscript` 生产路径 | 文件降到 glue 或移除 | N2 出口：glyph/颜色/wrap/copy 对齐 |
 
 S1 可以单独先做，因为它删除的是已经被证伪的模型，且不扩大神文件（只替换函数体，
 随后 S3 会连函数一起删）。S1 **不是** 档 3 完成。
+
+> 执行状态（2026-08-25）：S1 已完成并通过 source/Rust/PTY/浏览器多帧门禁。
+> Production 已调用 vendor `theme::wave_brightness` 与 Indexed-aware
+> `render::color::blend_color`，`Instant` 在 `scrollback_adapter::tick` 转为 30 FPS
+> tick；旧高斯、长度周期、`rail_wave_len` 和 `assign_rail_wave_geometry` 已删除。
+> 证据见
+> `docs/开发进度记录/2026-08-25_12-44-20_S1-Grok行波与混色闭包.md`。
+>
+> 执行状态续（2026-08-25，已由后续审计纠偏）：S2–S4 的核心纵切已接入，
+> **但 S2–S4 未完成闭包**。Production 现经
+> `scrollback_adapter/project_entry → Thinking/User/Agent block → BlockRenderer →
+> EntryRenderer` 物化；`AccentStyle` 与每帧 scrollback appearance 已接入，thinking
+> 使用 `gray_dim`、execute 使用 `accent_running`，rail 与 `◆` bullet 同步行波。
+> `transcript.rs` 中的本地 `DisplayMode`、`decorate_line`、
+> `apply_dynamic_accent`、`thinking_running_lines`、`collapsed_block_line` 及
+> user/agent 专用行渲染已删除。这个结果证明接缝可行，但当前 renderer/block 是
+> 大幅裁剪的 B extract，不包含上游完整结构和测试矩阵；`project_entry` 也尚未实现
+> 第 7 节目标类型。原执行事实见
+> `docs/开发进度记录/2026-08-25_14-08-00_S2-S4-Grok滚动渲染器闭包.md`。
+> 该历史记录保留，不静默改写；完成结论由本节的新审计覆盖。必须先完成 S2R–S4R，
+> 再进入 S5；S5–S7 也仍未完成，因此不得宣称整个 scrollback closure 完成。
+>
+> 执行状态续（2026-08-25 15:09 +0800，覆盖上段的阶段性结论）：S2R 已复制
+> scrollback appearance runtime 类型树；S3R 已接入原样 `layout.rs` 和
+> renderer-neutral EntryRenderer/BlockRenderer，并补齐最终浏览器门禁；S4R 已完成
+> stable projected entry/ordered block topology，以及 Thinking/User/Agent 的 B 级
+> production closure。S4R 的 B 文件保留/排除矩阵已写回对应记录，明确不把 Grok
+> agent/session/streaming/media process runtime 冒充 A0 UI 代码。
+>
+> S5 现已完成 DSH-presentable tool family 与 verb-group production closure：
+> Read/Search/Edit/ListDir/WebSearch/WebFetch/Other/Execute 统一经 `ToolCallBlock`，
+> `state/{verb_group,groups}.rs` 接管 Member/ThoughtMember/Transparent/Break 与 label；
+> `transcript.rs` 的本地 `GroupKind`、`build_projection`、`group_header_label` 和
+> `render_tool_call` 已删除。package 427/427、workspace、source 69 rows/0 drift、PTY
+> 与固定 1200×800 浏览器 DSH/Grok 对照通过。证据见
+> `docs/开发进度记录/2026-08-25_14-31-20_S5-tool-family与verb-group闭包.md`。
+> S6A/S6B/S7 仍开放，因此本状态只表示“执行到 S5”，不表示 50k 窗口、sticky、
+> Buffer-direct 或整个 scrollback pixel parity 完成。
+>
+> 执行状态续（2026-08-25 15:42 +0800）：此前 S3R–S5 的“完成”结论已做第二次
+> 代码级收口。`EntryRenderer` 现在实际接管动态 padding、group header、timestamp
+> reserve/narrow/hover、clipped `skip_rows`、gutter ownership 和 direct-Buffer API；
+> block/selection 贯通 soft-wrap joiner；Edit 使用真实 bounded-context line diff，
+> 而非整文件 `old=-`/`new=+`。package 测试由 427 增至 444，workspace/Clippy/
+> source(70 rows)/PTY 均通过。证据见
+> `docs/开发进度记录/2026-08-25_15-26-51_S3R-S5上游闭包整合.md`。生产窗口仍会在
+> S6 开始前 clone/materialize 全历史，runtime 仍有 Paragraph/overlay glue；因此
+> S6A/S6B 和 50k 验收继续开放，不能声称 N2/S7 pixel parity。
 
 禁止的顺序：先把 `transcript.rs` 拆成 `wave.rs` `tools.rs` `thinking.rs` 三个
 本地文件再谈 vendor。那是把平行宇宙正规化，漂移不会减。
@@ -352,7 +453,13 @@ Grok 全部功能」，这是已经写在 N2 里、现在必须当真执行的�
 5. `SOURCE_MANIFEST.md` 为迁入的每个 scrollback 文件登记 hash 与 B 接缝原因；
 6. 行波/折叠/thinking 截断有确定性测试；浏览器静帧不能证明行波，但必须证明
    不再整列消隐（连续多帧采样，全 rail 亮度不同时为 0 超过 Grok `sin²` 窗口
-   所允许的范围）。
+   所允许的范围）；
+7. vendor 的 `EntryRenderer` 保留上游 padding、pending-input freeze、timestamp
+   reserve、clipped `skip_rows`、group header、bullet/accent 分支和对应测试矩阵；
+8. 任一 B 文件都附保留/排除能力矩阵。不能再以“本地文件也叫 EntryRenderer”或
+   happy-path 截图通过来代替原文件结构、行为分支和测试的闭包证据；
+9. 50k entries 的窗口测试证明同步/绘制只物化 viewport + overscan；不得在每次
+   content revision 后先 clone 全历史再裁窗口。
 
 未完成 S7 不得写「pixel parity 完成」。
 
@@ -362,13 +469,6 @@ Grok 全部功能」，这是已经写在 N2 里、现在必须当真执行的�
 
 | 项 | 现在位置 | 删除切片 |
 |---|---|---|
-| 高斯行波 | `transcript.rs` `wave_brightness` | S1 |
-| `rail_wave_len` 周期 | 同上 + `assign_rail_wave_geometry` | S1 |
-| 本地 `blend_color` | `transcript.rs` | S1/S2 |
-| `apply_dynamic_accent` | `transcript.rs` | S3 |
-| `decorate_line` | `transcript.rs` | S3 |
-| `thinking_running_lines` | `transcript.rs` | S4 |
-| `GroupKind` / `build_projection` | `transcript.rs` | S5 |
 | DSH `ScrollbackPane` 这个名字 | `transcript.rs` | S6 改名 |
 
 新增 TEMPORARY 必须改本表，不能只在 PR 描述里写「以后再迁」。

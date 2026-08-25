@@ -501,6 +501,7 @@ pub fn render_semantic(
             layout.scrollback.y.saturating_add(paint.screen_y),
             layout.scrollback.width.saturating_sub(1),
             &text,
+            paint.joiner_to_previous.clone(),
             crate::geometry::first_link_target(&text),
         );
     }

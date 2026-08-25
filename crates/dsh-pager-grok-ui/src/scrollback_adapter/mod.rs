@@ -1,0 +1,6 @@
+//! DSH authority/time adapters for the Grok-derived scrollback renderer.
+
+pub mod project_entry;
+pub mod project_groups;
+pub mod project_tool;
+pub mod tick;
