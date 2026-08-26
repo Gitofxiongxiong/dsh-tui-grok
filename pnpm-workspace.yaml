@@ -3,5 +3,13 @@ packages:
   - packages/dsh-tui-server
   - packages/dsh-tui-embedded
   - packages/dsh-tui-session-projection-recovery
+  - packages/dsh-pager-runtime
+  - packages/dsh-pager-cli
+  - packages/native/*
 allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
   esbuild: true
+  koffi: false
+  node-pty: false
+  protobufjs: true

@@ -1,0 +1,44 @@
+{
+  "name": "@dsh-pager-grok/cli",
+  "version": "0.1.0",
+  "description": "Product launcher for the dsh-pager native TUI",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",
+    "directory": "packages/dsh-pager-cli"
+  },
+  "type": "module",
+  "bin": {
+    "dsh-pager": "./bin/dsh-pager.js"
+  },
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "vitest run tests"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.8",
+    "@dsh-pager-grok/runtime": "workspace:*",
+    "pnpm": "11.20.0"
+  },
+  "optionalDependencies": {
+    "@dsh-pager-grok/native-darwin-arm64": "workspace:*",
+    "@dsh-pager-grok/native-darwin-x64": "workspace:*",
+    "@dsh-pager-grok/native-linux-arm64-gnu": "workspace:*",
+    "@dsh-pager-grok/native-linux-x64-gnu": "workspace:*",
+    "@dsh-pager-grok/native-win32-x64": "workspace:*"
+  }
+}

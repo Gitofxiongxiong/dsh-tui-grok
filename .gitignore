@@ -5,6 +5,8 @@
 scripts/__pycache__/
 /packages/dsh-tui-*/lib/
 /packages/dsh-tui-*/node_modules/
+/packages/dsh-pager-runtime/lib/
+.vitest-dsh-home/
 node_modules/
 **/*.rs.bk
 .idea/

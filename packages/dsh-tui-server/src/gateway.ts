@@ -6,6 +6,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { ApiProxy, HostFrame, MuxFrame } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -41,7 +44,33 @@ export interface TuiNotifyPeer {
 }
 
 /** Package version advertised in hello `serverInfo.version`. */
-export const TUI_SERVER_VERSION = '0.1.0-rc.8'
+export const TUI_SERVER_VERSION = readOwningPackageVersion()
+
+function readOwningPackageVersion(): string {
+  const here = dirname(fileURLToPath(import.meta.url))
+  for (const candidate of [
+    join(here, '../package.json'),
+    join(here, '../../package.json'),
+    join(here, '../../../package.json'),
+  ]) {
+    try {
+      const pkg = JSON.parse(readFileSync(candidate, 'utf8')) as {
+        name?: string
+        version?: string
+      }
+      if (
+        typeof pkg.version === 'string' &&
+        typeof pkg.name === 'string' &&
+        pkg.name.startsWith('@dsh-pager-grok/')
+      ) {
+        return pkg.version
+      }
+    } catch {
+      // Walk toward the package root; missing parents are expected.
+    }
+  }
+  return '0.0.0'
+}
 
 function sessionIdOfMux(frame: MuxFrame): SessionId | undefined {
   if ('sessionId' in frame && typeof frame.sessionId === 'string') {

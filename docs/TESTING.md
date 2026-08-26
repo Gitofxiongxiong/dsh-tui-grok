@@ -14,6 +14,11 @@ OS-portable; `scripts/pty-smoke.py` remains Unix-only and is not in that job.
 Native pager tarballs are built with `node scripts/pack-native.mjs` (and the
 `release-native` workflow). Pack with `npm pack`, not `pnpm pack`.
 
+The v2 runtime tarball is assembled by `node scripts/assemble-runtime.mjs` and
+checked by `node scripts/verify-runtime-pack.mjs` (zero `workspace:*`, server
+and recovery entries present). CLI launcher unit tests live in
+`packages/dsh-pager-cli/tests`.
+
 M0/M1 的可重建基线使用仓库脚本：
 
 ```bash

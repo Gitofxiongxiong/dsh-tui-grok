@@ -30,6 +30,17 @@ pnpm install
 pnpm run verify:ts
 ```
 
+## 产品安装（v2）
+
+```bash
+npm install -g @dsh-pager-grok/cli
+dsh-pager
+```
+
+CLI 自带钉死版本的 DeepSeek Harness 与 pnpm，首次运行会把 `@dsh-pager-grok/runtime`
+装进 profile `dsh-pager-grok`，并启动当前平台的预编译 pager。不要在 TTY 上直接
+`dsh --profile dsh-pager-grok`。
+
 ## 启动新对话
 
 本机开发环境可直接运行。首次运行会自动检查并构建三个 TypeScript 包，然后把它们
