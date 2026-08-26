@@ -32,7 +32,7 @@ use ratatui::{
 use crate::actions::{ActionId, ActionRegistry};
 use crate::app::{AppShell, HomeKeyState, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
-use crate::clipboard::{self, ClipboardBackend};
+use crate::clipboard;
 use crate::diag;
 use crate::effects::{
     AsyncEffectExecutor, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectCompletion,
@@ -3108,22 +3108,15 @@ impl UiState {
         let Some(text) = self.pending_copy.take() else {
             return;
         };
-        let result = if self.capabilities.osc52 {
-            terminal.copy_text(&text).map(|_| ClipboardBackend::Osc52)
+        // Grok `clipboard_write_with_route`: native and OSC 52 are both fired.
+        let native = clipboard::system_clipboard_set(&text);
+        let osc52 = if self.capabilities.osc52 {
+            Some(terminal.copy_text(&text))
         } else {
-            clipboard::system_clipboard_set(&text).map(|result| result.backend)
+            None
         };
-        match result {
-            Ok(ClipboardBackend::Osc52 | ClipboardBackend::System) => {
-                self.status = Some("Selection copied".into());
-            }
-            Ok(ClipboardBackend::Unavailable) => {
-                self.status = Some("Clipboard unavailable".into());
-            }
-            Err(error) => {
-                self.status = Some(format!("Clipboard unavailable: {error}"));
-            }
-        }
+        let result = clipboard::merge_copy_legs(native, osc52);
+        self.status = Some(result.message.into());
     }
 
     fn dispatch_local_slash_command(

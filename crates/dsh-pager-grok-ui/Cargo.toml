@@ -25,6 +25,11 @@ unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 xai-grok-markdown = { path = "vendor/grok/xai-grok-markdown" }
 
+# Windows native clipboard is arboard (Grok). macOS uses pbcopy to avoid AppKit;
+# Linux uses wl-copy/xclip so this crate does not link arboard on Linux CI.
+[target.'cfg(windows)'.dependencies]
+arboard = "3.6"
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 serial_test = "3.2"
