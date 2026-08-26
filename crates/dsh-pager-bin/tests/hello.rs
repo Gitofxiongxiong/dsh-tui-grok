@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -157,4 +158,117 @@ fn shared_test_support_runs_the_real_binary_in_a_hermetic_sandbox() {
         .expect("hello must finish within the test deadline");
     assert!(output.status.success(), "stderr: {}", output.stderr);
     assert!(output.stderr.contains("tui.hello ok"));
+}
+
+#[test]
+fn nested_pager_role_refuses_without_allow_nested() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    command.env("DSH_PAGER_ROLE", "pager");
+    command.args([
+        "--hello",
+        "--backend",
+        "node",
+        "--backend-arg",
+        mock_server().to_str().expect("utf-8 path"),
+    ]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("nested refuse");
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("refusing nested dsh-pager"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("tui.hello ok"),
+        "must fail before spawn: {}",
+        output.stderr
+    );
+}
+
+#[test]
+fn nested_pager_role_allows_when_allow_nested() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    command.env("DSH_PAGER_ROLE", "pager");
+    command.env("DSH_PAGER_ALLOW_NESTED", "1");
+    command.args([
+        "--hello",
+        "--backend",
+        "node",
+        "--backend-arg",
+        mock_server().to_str().expect("utf-8 path"),
+    ]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("allow nested");
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert!(output.stderr.contains("tui.hello ok"), "{}", output.stderr);
+}
+
+#[test]
+fn cmd_backend_is_rejected() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    command.args(["--hello", "--backend", "dsh.cmd"]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("cmd reject");
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("Windows script backend"),
+        "{}",
+        output.stderr
+    );
+    assert!(output.stderr.contains("node.exe"), "{}", output.stderr);
+}
+
+#[test]
+fn bat_backend_is_rejected() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    command.args(["--hello", "--backend", r"C:\tools\run.bat"]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("bat reject");
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("Windows script backend"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn nested_pager_backend_basename_is_rejected() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    command.args(["--hello", "--backend", "dsh-pager"]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("basename reject");
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("nested dsh-pager"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn failed_backend_prints_stderr_tail() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let script = sandbox.root().join("fail-stderr.mjs");
+    fs::write(
+        &script,
+        "process.stderr.write('BACKEND_FAIL_MARKER\\n'); process.exit(1);\n",
+    )
+    .expect("write fail backend");
+    let mut command = sandbox.command(pager_bin());
+    command.args([
+        "--hello",
+        "--backend",
+        "node",
+        "--backend-arg",
+        script.to_str().expect("utf-8 path"),
+    ]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("fail backend");
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("BACKEND_FAIL_MARKER"),
+        "failure tail must surface after process exit: {}",
+        output.stderr
+    );
 }

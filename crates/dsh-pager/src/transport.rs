@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -18,11 +19,102 @@ use crate::error::{PagerError, PagerResult};
 use crate::session::{SessionState, SessionUpdate};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const STDERR_TAIL_BYTES: usize = 32 * 1024;
+
+const NESTED_BACKEND_NAMES: &[&str] = &[
+    "dsh-pager",
+    "dsh-pager.exe",
+    "dsh-pager.cmd",
+    "dsh-pager.js",
+];
 
 enum ReaderMessage {
     Frame(JsonRpcLine),
     Error(String),
     Closed,
+}
+
+/// Last N bytes of backend stderr. Live bytes never go to the user TTY.
+#[derive(Debug, Default)]
+struct StderrTail {
+    bytes: Vec<u8>,
+}
+
+impl StderrTail {
+    fn extend(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > STDERR_TAIL_BYTES {
+            let excess = self.bytes.len() - STDERR_TAIL_BYTES;
+            self.bytes.drain(..excess);
+        }
+    }
+
+    fn to_string_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+fn lock_stderr_tail(tail: &Mutex<StderrTail>) -> std::sync::MutexGuard<'_, StderrTail> {
+    tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn drain_backend_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<StderrTail>>) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match stderr.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => lock_stderr_tail(&tail).extend(&buf[..n]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
+fn emit_backend_stderr_tail(tail: &str) {
+    let trimmed = tail.trim_end();
+    if trimmed.is_empty() {
+        return;
+    }
+    eprintln!("--- dsh-pager: backend stderr (tail) ---");
+    eprintln!("{trimmed}");
+}
+
+/// Basename using both `/` and `\` so Windows paths validate on Unix tests too.
+pub fn backend_basename(program: &str) -> &str {
+    program
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(program)
+}
+
+/// `DSH_PAGER_ALLOW_NESTED=1` disables T4 already-pager and T5 nested-basename
+/// checks only. It never allows `.cmd`/`.bat`.
+pub fn nested_backend_allowed() -> bool {
+    std::env::var("DSH_PAGER_ALLOW_NESTED").as_deref() == Ok("1")
+}
+
+/// Reject nested pager binaries and Windows script shims before `Command::new`.
+///
+/// Grok's `plan_stdio_spawn` (`xai-grok-mcp/src/servers.rs` ~4200) documents
+/// that Windows `CreateProcessW` only appends `.exe`, ignores `PATHEXT`, and
+/// that std will then run `.cmd`/`.bat` through `cmd.exe`. That is the recipe
+/// for npm launchers such as `npx.cmd`. It is the reason this pager **refuses**
+/// `.cmd`/`.bat` (CVE-2024-24576): the product backend is PE `node`/`node.exe`
+/// plus an absolute `lib/bin.js`. Do not PATHEXT-search `.cmd`.
+pub fn validate_backend_program(program: &str, allow_nested: bool) -> PagerResult<()> {
+    let basename = backend_basename(program).to_ascii_lowercase();
+    if !allow_nested && NESTED_BACKEND_NAMES.contains(&basename.as_str()) {
+        return Err(PagerError::new(format!(
+            "refusing nested dsh-pager backend `{program}`; pass node/node.exe and an absolute lib/bin.js (set DSH_PAGER_ALLOW_NESTED=1 only for tests)"
+        )));
+    }
+    if basename.ends_with(".cmd") || basename.ends_with(".bat") {
+        return Err(PagerError::new(format!(
+            "refusing Windows script backend `{program}`; pass node.exe and an absolute lib/bin.js (Rust will not CreateProcess .cmd/.bat or wrap cmd.exe)"
+        )));
+    }
+    Ok(())
 }
 
 /// A spawned backend with a persistent JSON-RPC reader.
@@ -33,6 +125,9 @@ pub struct RpcTransport {
     stdin: ChildStdin,
     rx: Receiver<ReaderMessage>,
     reader: Option<JoinHandle<()>>,
+    stderr_reader: Option<JoinHandle<()>>,
+    stderr_tail: Arc<Mutex<StderrTail>>,
+    failed: bool,
     notifications: VecDeque<JsonRpcNotification>,
     pending: HashMap<u64, String>,
     completed: HashMap<u64, PagerResult<Value>>,
@@ -43,11 +138,13 @@ pub struct RpcTransport {
 
 impl RpcTransport {
     pub fn spawn(program: &str, args: &[String]) -> PagerResult<Self> {
+        validate_backend_program(program, nested_backend_allowed())?;
+        // Never shell:true / cmd.exe. Product argv is PE node + absolute bin.js.
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
                 PagerError::new(format!(
@@ -63,8 +160,34 @@ impl RpcTransport {
             .stdout
             .take()
             .ok_or_else(|| PagerError::new("backend stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| PagerError::new("backend stderr was not piped"))?;
+        let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
+        let tail_for_thread = Arc::clone(&stderr_tail);
+        // Pipe + drain: inherit paints the alternate screen on every OS. An
+        // undrained pipe deadlocks Node once the OS buffer fills. Grok's
+        // `xai-tty-utils::restore_native_stderr` (pager `app/mod.rs`,
+        // `signal_handler.rs`) restores the real stderr after leaving the
+        // TUI; we apply the same idea here and only emit a bounded failure
+        // tail from Drop after the terminal is released (or on --hello /
+        // --load-only process exit).
+        let stderr_reader = match thread::Builder::new()
+            .name("dsh-pager-stderr-drain".into())
+            .spawn(move || drain_backend_stderr(stderr, tail_for_thread))
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PagerError::new(format!(
+                    "failed to start stderr drain: {error}"
+                )));
+            }
+        };
         let (tx, rx) = mpsc::channel();
-        let reader = thread::Builder::new()
+        let reader = match thread::Builder::new()
             .name("dsh-pager-rpc-reader".into())
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
@@ -99,8 +222,17 @@ impl RpcTransport {
                         }
                     }
                 }
-            })
-            .map_err(|error| PagerError::new(format!("failed to start RPC reader: {error}")))?;
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_reader.join();
+                return Err(PagerError::new(format!(
+                    "failed to start RPC reader: {error}"
+                )));
+            }
+        };
         Ok(Self {
             program: program.to_string(),
             program_args: args.to_vec(),
@@ -108,6 +240,9 @@ impl RpcTransport {
             stdin,
             rx,
             reader: Some(reader),
+            stderr_reader: Some(stderr_reader),
+            stderr_tail,
+            failed: false,
             notifications: VecDeque::new(),
             pending: HashMap::new(),
             completed: HashMap::new(),
@@ -117,6 +252,29 @@ impl RpcTransport {
         })
     }
 
+    /// Bounded stderr captured from the backend. Empty on the success path.
+    pub fn backend_stderr_tail(&self) -> String {
+        lock_stderr_tail(&self.stderr_tail).to_string_lossy()
+    }
+
+    fn reap_child(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+    }
+
+    fn emit_failure_stderr_tail(&self) {
+        if !self.failed {
+            return;
+        }
+        emit_backend_stderr_tail(&self.backend_stderr_tail());
+    }
+
     /// Replace a failed backend process with a fresh stdio connection.
     ///
     /// The caller owns the protocol baseline: after this returns it must send
@@ -124,12 +282,7 @@ impl RpcTransport {
     pub fn reconnect(&mut self) -> PagerResult<()> {
         let client_id = self.client_id.clone();
         let replacement = Self::spawn(&self.program, &self.program_args)?;
-        let old_reader = self.reader.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(reader) = old_reader {
-            let _ = reader.join();
-        }
+        self.reap_child();
         *self = replacement;
         self.client_id = client_id;
         Ok(())
@@ -280,8 +433,14 @@ impl RpcTransport {
             ReaderMessage::Frame(other) => Err(PagerError::new(format!(
                 "unexpected request frame from backend: {other:?}"
             ))),
-            ReaderMessage::Error(error) => Err(PagerError::new(error)),
-            ReaderMessage::Closed => Err(PagerError::new("backend closed stdout")),
+            ReaderMessage::Error(error) => {
+                self.failed = true;
+                Err(PagerError::new(error))
+            }
+            ReaderMessage::Closed => {
+                self.failed = true;
+                Err(PagerError::new("backend closed stdout"))
+            }
         }
     }
 
@@ -306,10 +465,95 @@ fn response_id(value: &Value) -> PagerResult<u64> {
 
 impl Drop for RpcTransport {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        self.reap_child();
+        self.emit_failure_stderr_tail();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basename_splits_unix_and_windows_separators() {
+        assert_eq!(backend_basename("dsh-pager"), "dsh-pager");
+        assert_eq!(backend_basename("/usr/bin/dsh-pager.exe"), "dsh-pager.exe");
+        assert_eq!(
+            backend_basename(r"C:\Program Files\dsh-pager.cmd"),
+            "dsh-pager.cmd"
+        );
+        assert_eq!(backend_basename("C:/tools/dsh.bat"), "dsh.bat");
+    }
+
+    #[test]
+    fn nested_pager_basenames_fail_closed() {
+        for program in [
+            "dsh-pager",
+            "dsh-pager.exe",
+            "DSH-PAGER.EXE",
+            "/usr/bin/dsh-pager.js",
+            r"C:\npm\dsh-pager.cmd",
+        ] {
+            let error = validate_backend_program(program, false).expect_err(program);
+            assert!(
+                error.to_string().contains("nested dsh-pager"),
+                "{program}: {error}"
+            );
         }
+    }
+
+    #[test]
+    fn allow_nested_does_not_open_cmd_or_bat() {
+        validate_backend_program("dsh-pager", true).expect("nested name allowed");
+        validate_backend_program("dsh-pager.exe", true).expect("exe nested name allowed");
+        validate_backend_program("dsh-pager.js", true).expect("js nested name allowed");
+        let cmd = validate_backend_program("dsh-pager.cmd", true)
+            .expect_err("cmd remains refused under ALLOW_NESTED");
+        assert!(cmd.to_string().contains("node.exe"), "{cmd}");
+        let bat = validate_backend_program("backend.bat", true).expect_err("bat");
+        assert!(bat.to_string().contains("lib/bin.js"), "{bat}");
+    }
+
+    #[test]
+    fn cmd_and_bat_backends_are_rejected() {
+        for program in [
+            "dsh.cmd",
+            "DSH.CMD",
+            r"C:\npm\dsh.cmd",
+            "run.bat",
+            "/tmp/run.BAT",
+        ] {
+            let error = validate_backend_program(program, false).expect_err(program);
+            assert!(
+                error.to_string().contains("Windows script backend"),
+                "{program}: {error}"
+            );
+        }
+        validate_backend_program("node", false).expect("node");
+        validate_backend_program("node.exe", false).expect("node.exe");
+        validate_backend_program(r"C:\Program Files\nodejs\node.exe", false)
+            .expect("absolute node.exe");
+    }
+
+    fn spawn_err(program: &str) -> PagerError {
+        match RpcTransport::spawn(program, &[]) {
+            Ok(_) => panic!("spawn should have been rejected: {program}"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn spawn_rejects_cmd_without_createprocess() {
+        let error = spawn_err("dsh.cmd");
+        assert!(
+            error.to_string().contains("Windows script backend"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn spawn_rejects_nested_pager_basename() {
+        let error = spawn_err("dsh-pager");
+        assert!(error.to_string().contains("nested dsh-pager"), "{error}");
     }
 }

@@ -30,6 +30,17 @@ struct Args {
 }
 
 fn main() {
+    // T4: inspect ROLE before parse/spawn. ALLOW_NESTED=1 disables only this
+    // already-pager check (and T5 basename reject in transport).
+    if already_pager_without_nested_allow() {
+        eprintln!("refusing nested dsh-pager");
+        std::process::exit(1);
+    }
+    // SAFETY: process entry is still single-threaded. Every pager records
+    // ROLE=pager regardless of launcher (T4).
+    unsafe {
+        env::set_var("DSH_PAGER_ROLE", "pager");
+    }
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -37,6 +48,11 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn already_pager_without_nested_allow() -> bool {
+    env::var("DSH_PAGER_ROLE").as_deref() == Ok("pager")
+        && env::var("DSH_PAGER_ALLOW_NESTED").as_deref() != Ok("1")
 }
 
 fn run() -> Result<i32, Box<dyn Error>> {
@@ -161,7 +177,49 @@ fn resume_class_label(class: ResumeClass) -> &'static str {
     }
 }
 
+fn default_backend() -> (String, Vec<String>) {
+    (
+        "dsh".into(),
+        vec!["--profile".into(), "dsh-pager-grok".into()],
+    )
+}
+
+fn resolve_backend(
+    mut program: Option<String>,
+    mut program_args: Vec<String>,
+    tui_server: Option<&str>,
+) -> (String, Vec<String>) {
+    if program.is_none() {
+        if let Some(from_env) = tui_server.filter(|value| !value.is_empty()) {
+            let mut parts = from_env.split_whitespace();
+            if let Some(first) = parts.next() {
+                program = Some(first.to_string());
+                if program_args.is_empty() {
+                    program_args = parts.map(str::to_string).collect();
+                }
+            }
+        }
+    }
+    let program = program.unwrap_or_else(|| default_backend().0);
+    let program_args = if program_args.is_empty() && program == "dsh" {
+        default_backend().1
+    } else {
+        program_args
+    };
+    (program, program_args)
+}
+
 fn parse_args() -> Result<Args, Box<dyn Error>> {
+    parse_args_from(
+        env::args().skip(1),
+        env::var("DSH_TUI_SERVER").ok().as_deref(),
+    )
+}
+
+fn parse_args_from(
+    argv: impl IntoIterator<Item = String>,
+    tui_server: Option<&str>,
+) -> Result<Args, Box<dyn Error>> {
     let mut hello_only = false;
     let mut load_only = false;
     let mut smoke_interactions = false;
@@ -172,7 +230,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     let mut choice = SessionChoice::RecentOrCreate;
     let mut program: Option<String> = None;
     let mut program_args: Vec<String> = Vec::new();
-    let mut argv = env::args().skip(1);
+    let mut argv = argv.into_iter();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -201,26 +259,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
         }
     }
 
-    if program.is_none() {
-        if let Ok(from_env) = env::var("DSH_TUI_SERVER") {
-            if !from_env.is_empty() {
-                let mut parts = from_env.split_whitespace();
-                if let Some(first) = parts.next() {
-                    program = Some(first.to_string());
-                    if program_args.is_empty() {
-                        program_args = parts.map(str::to_string).collect();
-                    }
-                }
-            }
-        }
-    }
-
-    let program = program.unwrap_or_else(|| "dsh".into());
-    let program_args = if program_args.is_empty() && program == "dsh" {
-        vec!["--profile".into(), "tui-embedded".into()]
-    } else {
-        program_args
-    };
+    let (program, program_args) = resolve_backend(program, program_args, tui_server);
     Ok(Args {
         hello_only,
         load_only,
@@ -254,9 +293,11 @@ fn eprint_help() {
         "dsh-pager {} — protocol version {}\n\
          Usage: dsh-pager [--hello|--list-sessions|--dashboard|--load-only|--smoke-interactions|--smoke-queue|--smoke-lifecycle] [--new|--session <id>|--session-search <query>]\n\
                           [--backend <program>] [--backend-arg <arg>]...\n\
-         Default backend: dsh --profile tui-embedded\n\
+         Default backend: dsh --profile dsh-pager-grok (Unix cargo-run convenience only).\n\
+         Product/Windows: --backend <node> --backend-arg <absolute bin.js> --backend-arg --profile --backend-arg <profile>.\n\
          Without --hello, loads the most recent non-subagent session (or creates one)\n\
-         and enters the pager. DSH_TUI_SERVER overrides the default program.",
+         and enters the pager. DSH_TUI_SERVER overrides the default program and args via\n\
+         whitespace split; paths must not contain whitespace.",
         env!("CARGO_PKG_VERSION"),
         TUI_PROTOCOL_VERSION,
     );
@@ -451,4 +492,67 @@ fn run_lifecycle_smoke(
         renamed.title, forked.session_id
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_backend_is_dsh_profile_dsh_pager_grok() {
+        let (program, args) = default_backend();
+        assert_eq!(program, "dsh");
+        assert_eq!(args, ["--profile", "dsh-pager-grok"]);
+    }
+
+    #[test]
+    fn parse_args_without_backend_or_env_uses_default_backend() {
+        let args = parse_args_from(Vec::<String>::new(), None).expect("parse");
+        assert_eq!(args.program, "dsh");
+        assert_eq!(args.program_args, ["--profile", "dsh-pager-grok"]);
+        assert!(!args.hello_only);
+    }
+
+    #[test]
+    fn parse_args_backend_arg_can_start_with_dashes() {
+        let args = parse_args_from(
+            [
+                "--backend".into(),
+                "node".into(),
+                "--backend-arg".into(),
+                "--profile".into(),
+                "--backend-arg".into(),
+                "dsh-pager-grok".into(),
+            ],
+            None,
+        )
+        .expect("parse");
+        assert_eq!(args.program, "node");
+        assert_eq!(args.program_args, ["--profile", "dsh-pager-grok"]);
+    }
+
+    #[test]
+    fn parse_args_dsh_tui_server_splits_on_whitespace() {
+        let args = parse_args_from(
+            Vec::<String>::new(),
+            Some("node /tmp/bin.js --profile dsh-pager-grok"),
+        )
+        .expect("parse");
+        assert_eq!(args.program, "node");
+        assert_eq!(
+            args.program_args,
+            ["/tmp/bin.js", "--profile", "dsh-pager-grok"]
+        );
+    }
+
+    #[test]
+    fn parse_args_explicit_backend_args_keep_env_program_without_env_args() {
+        let args = parse_args_from(
+            ["--backend-arg".into(), "kept.js".into()],
+            Some("node /tmp/ignored.js"),
+        )
+        .expect("parse");
+        assert_eq!(args.program, "node");
+        assert_eq!(args.program_args, ["kept.js"]);
+    }
 }

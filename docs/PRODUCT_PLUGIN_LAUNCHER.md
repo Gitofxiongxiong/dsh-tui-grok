@@ -154,7 +154,7 @@ dsh-pager
 ### 运行时必须同时修正的问题
 
 1. 产品 pager 必须要求 CLI 显式注入 backend；当前 `dsh --profile tui-embedded` 的默认值只可保留在明确的 dev mode，不参与产品 fallback。
-2. Backend stderr 不能继续 `inherit`，否则日志会破坏 alternate screen。改为 pipe 到有上限的 ring buffer/日志文件，仅在 pager 恢复终端后输出失败尾部。
+2. Backend stderr 不能继续 `inherit`，否则日志会破坏 alternate screen。Rust pager 已改为 pipe + draining reader + 有界 ring，仅在 pager 恢复终端后（或 `--hello`/`--load-only` 等非 TUI 路径退出时）输出失败尾部。
 3. `doctor` 同时检查 stdin/stdout TTY，还应运行私有 DSH `--dump-config`，验证需要的 Cordis rows 未被 profile/home patch 意外覆盖。
 4. `TUI_SERVER_VERSION` 不再硬编码 `0.1.0-rc.8`，由 runtime package metadata 生成或注入。
 5. Hello 的 `identity.profile = "tui-embedded"` 是历史线协议常数，今日 server 并未用它验证实际 profile。v1 不可声称它已防止 profile 错配；若需真实身份，以新的可选字段向后兼容演进。
@@ -246,9 +246,9 @@ user TTY
 
 关键实现位置：
 
-- Pager 入口与默认 backend：`crates/dsh-pager-bin/src/main.rs`。未指定 `--backend` 且未设 `DSH_TUI_SERVER` 时，默认 `program = "dsh"`、`program_args = ["--profile", "tui-embedded"]`。
+- Pager 入口与默认 backend：`crates/dsh-pager-bin/src/main.rs`。未指定 `--backend` 且未设 `DSH_TUI_SERVER` 时，默认 `program = "dsh"`、`program_args = ["--profile", "dsh-pager-grok"]`（Unix `cargo run` 方便；产品/Windows 必须显式 `--backend <node> --backend-arg <absolute bin.js> --backend-arg --profile --backend-arg <profile>`，不得依赖 PATH `dsh`）。
 - `DSH_TUI_SERVER` 解析：`main.rs` 对整串做 `split_whitespace()`，路径含空格会拆坏。产品启动器 **不** 使用该变量拼 backend，只使用 `--backend` + 重复的 `--backend-arg`。
-- Backend spawn：`crates/dsh-pager/src/transport.rs` 的 `RpcTransport::spawn`：`stdin/stdout` 为 `Stdio::piped()`，`stderr` 为 `Stdio::inherit()`。`Command::new(program)` **无** `shell`。Windows 上官方 npm `dsh` 是 `.cmd` shim，Win32 `CreateProcess` **不能**直接跑 `.cmd`（CVE-2024-24576 之后 Rust 也不安全地包 `cmd.exe`）。产品启动器因此把 backend 解析成 **PE `node.exe` + 绝对路径 `lib/bin.js`**，与 `start-new-chat.sh` 把 `apps/cli/lib/bin.js` 交给 pager 同一形状（见 KD 14 / 17）。Rust **不**在 `RpcTransport` 里走 PATHEXT 找 `.cmd`。
+- Backend spawn：`crates/dsh-pager/src/transport.rs` 的 `RpcTransport::spawn`：`stdin/stdout/stderr` 均为 `Stdio::piped()`（stderr 由 drain thread 排空，有界 tail 仅在失败且 TUI 已释放或非 TUI 退出时打印）。`Command::new(program)` **无** `shell`。basename 为 `dsh-pager` / `.exe` / `.cmd` / `.js` 时按 T5 拒绝；`.cmd`/`.bat` 一律拒绝。Windows 上官方 npm `dsh` 是 `.cmd` shim，Win32 `CreateProcess` **不能**直接跑 `.cmd`（CVE-2024-24576 之后 Rust 也不安全地包 `cmd.exe`）。产品启动器因此把 backend 解析成 **PE `node.exe` + 绝对路径 `lib/bin.js`**，与 `start-new-chat.sh` 把 `apps/cli/lib/bin.js` 交给 pager 同一形状（见 KD 14 / 17）。Rust **不**在 `RpcTransport` 里走 PATHEXT 找 `.cmd`。
 - Cordis 网关：`packages/dsh-tui-server/src/index.ts` 的 `apply()` 在 Cordis fiber 里调用 `serve(ctx.apiProxy, process.stdin, process.stdout, …)`。stdout 被声明为协议帧专用（`packages/dsh-tui-embedded/cordis.patch.yml` 禁用 `hmr`）。
 - Hello 线协议身份：`embedded_hello_params()`（`crates/dsh-pager-protocol/src/lib.rs`）发送 `identity.profile = "tui-embedded"`。这是历史协议常数，**不**随产品 profile 改名而改（见 API）。
 - Bundle 契约：仅 `packages/dsh-tui-embedded/package.json` 声明 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`。官方 `apps/cli/src/plugin.ts` 的 `reconcilePlugins()` 把带 `dsh.bundle.patch` 的依赖追加进 `dsh.profile.bundles`。
@@ -646,8 +646,8 @@ flowchart LR
   TTY -->|inherit| nodeParent
   nodeParent -->|spawn stdio inherit<br/>forwardExit| pagerProc
   TP -->|piped JSON-RPC| Srv
-  pagerProc -->|stderr inherit| TTY
-  nodeProc -->|stderr inherit| TTY
+  pagerProc -->|pager stderr| TTY
+  nodeProc -->|stderr pipe + bounded tail| TP
 ```
 
 **v1 选定 `spawn` + `forwardExit`，不用 `exec`。** Node 父进程保持存活：把 pager 的退出码/信号转给用户（`dsh-tui.js` 的 `forwardExit`：子进程 `error` → 退出 1；`exit` 带 signal 则 `process.kill(process.pid, signal)`，否则 `process.exit(code ?? 0)`）。这样 `DSH_PAGER_ROLE=launcher` 在父进程有意义，Windows 行为与 Node 全局 shim 一致。
@@ -658,7 +658,7 @@ flowchart LR
 |---|---|---|
 | T1 | 只有 Rust pager 以 `stdio: inherit` 接到用户 TTY。Node `dsh`（backend）的 stdin/stdout 必须是 pipe。 | `tui-server` 把 stdout 当协议帧。 |
 | T2 | 启动器在 Cordis `boot()` 之前 spawn pager。禁止任何 Cordis plugin spawn pager。 | `apply()` 时 Node 已占用 stdio。 |
-| T3 | `RpcTransport::spawn` 保持 `stdin/stdout = piped`、`stderr = inherit`。 | 协议帧必须离开 TTY。 |
+| T3 | `RpcTransport::spawn` 保持 `stdin/stdout = piped`。`stderr` **不得 inherit**；改为 pipe + draining reader + 有界 tail，仅在 TUI 释放终端后（或 `--hello`/`--load-only` 等非 TUI 路径的进程退出时）打印失败尾部。 | 协议帧必须离开 TTY；inherit 会打穿 alternate screen。 |
 | T4 | **Rust：** 进程入口最先读 `DSH_PAGER_ROLE`。若已经是 `pager` 且 `DSH_PAGER_ALLOW_NESTED` 不是 `1`，stderr `refusing nested dsh-pager` 并 exit 1。然后 **无论由谁启动** 都 `set_var("DSH_PAGER_ROLE", "pager")`，再解析 argv / spawn backend。**Node：** 若入口看到 `ROLE=pager`（或已是 `launcher` 的二次进入），exit 1。然后设 `ROLE=launcher`，再 spawn Rust（不预写 `pager`；Rust 自己写）。 | PATH 上 Node shim 也叫 `dsh-pager`。Rust 设好 `pager` 后再误 spawn `dsh-pager` 会先撞到 Node 拒绝，即使没撞到也会被 T5 拦住。 |
 | T5 | Rust 解析出的 backend `program` 的 basename（小写）若是 `dsh-pager` / `dsh-pager.exe` / `dsh-pager.cmd` / `dsh-pager.js`，拒绝，除非 `DSH_PAGER_ALLOW_NESTED=1`。 | 防止 `DSH_TUI_SERVER=dsh-pager` 或 `--backend dsh-pager`。 |
 | T6 | 启动器绝不 `spawn('dsh', ['--profile', 'dsh-pager-grok'])` 作为用户可见 UI。它只 spawn Rust pager，并由 pager 带 `--backend` 链。 | 与 Ink TUI 相反。 |

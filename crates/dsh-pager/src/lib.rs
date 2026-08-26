@@ -53,4 +53,4 @@ pub use session::{
     ConnectionPhase, Diagnostic, DiagnosticLevel, InteractionKind, OperationToken,
     PendingInteraction, SessionState, SessionUpdate,
 };
-pub use transport::RpcTransport;
+pub use transport::{validate_backend_program, RpcTransport};
