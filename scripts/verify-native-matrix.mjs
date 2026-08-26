@@ -36,6 +36,11 @@ for (const pkg of matrix.packages) {
   if (!manifest.files?.includes(expectedFile)) {
     fail(`${pkg.id}: files must include ${expectedFile}`)
   }
+  for (const license of ['LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE']) {
+    if (!manifest.files?.includes(license)) {
+      fail(`${pkg.id}: files must include ${license}`)
+    }
+  }
 }
 
 console.log(`verify-native-matrix: ${matrix.packages.length} packages ok`)

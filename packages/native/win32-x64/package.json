@@ -13,7 +13,7 @@
   },
   "os": ["win32"],
   "cpu": ["x64"],
-  "files": ["bin/dsh-pager.exe", "README.md"],
+  "files": ["bin/dsh-pager.exe", "README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE"],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   }

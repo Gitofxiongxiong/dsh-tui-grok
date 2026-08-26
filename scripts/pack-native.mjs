@@ -7,7 +7,8 @@
  * because pnpm has been observed to strip the Unix executable bit.
  */
 import { spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -17,6 +18,57 @@ const matrixPath = join(repoRoot, 'scripts/pager-platform-matrix.json')
 function fail(message) {
   console.error(`pack-native: ${message}`)
   process.exit(2)
+}
+
+const require = createRequire(import.meta.url)
+
+function resolveNpmCli() {
+  try {
+    return require.resolve('npm/bin/npm-cli.js')
+  } catch {
+    // Node ships npm beside the executable. Never spawn PATH `npm` (Windows .cmd).
+  }
+  const prefix = dirname(process.execPath)
+  const candidates = [
+    join(prefix, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(prefix, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  fail('cannot resolve npm/bin/npm-cli.js next to node; pack-native refuses PATH npm')
+}
+
+function runNpm(args, options = {}) {
+  return run(process.execPath, [resolveNpmCli(), ...args], options)
+}
+
+function copyLicenseFiles(packageDir) {
+  for (const name of ['LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE']) {
+    copyFileSync(join(repoRoot, name), join(packageDir, name))
+  }
+}
+
+function auditTarball(pkg, tarball) {
+  const listing = run('tar', ['-tvf', tarball]).stdout
+  const lines = listing.split('\n').filter(Boolean)
+  for (const name of ['LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE']) {
+    const found = lines.some((line) => line.includes(`package/${name}`) || line.endsWith(name))
+    if (!found) {
+      fail(`tarball is missing ${name}`)
+    }
+  }
+  if (pkg.os === 'win32') {
+    return
+  }
+  const binLine = lines.find((line) => line.includes(`bin/${pkg.bin}`))
+  if (!binLine) {
+    fail(`tarball listing is missing bin/${pkg.bin}`)
+  }
+  const mode = binLine.trim().split(/\s+/)[0]
+  if (!mode.includes('x')) {
+    fail(`tarball bin/${pkg.bin} is not executable: ${binLine}`)
+  }
 }
 
 function run(command, args, options = {}) {
@@ -151,8 +203,9 @@ function main() {
     chmodSync(dest, 0o755)
   }
   stripBinary(pkg, dest)
+  copyLicenseFiles(packageDir)
 
-  const pack = run('npm', ['pack', '--json', '--pack-destination', repoRoot], {
+  const pack = runNpm(['pack', '--json', '--pack-destination', repoRoot], {
     cwd: packageDir,
   })
   let info
@@ -181,6 +234,7 @@ function main() {
       fail(`${dest} is not executable`)
     }
   }
+  auditTarball(pkg, tarball)
 
   const size = info.size ?? statSync(tarball).size
   console.log(

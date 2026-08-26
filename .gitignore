@@ -1,6 +1,9 @@
 /target
 /packages/native/*/bin/dsh-pager
 /packages/native/*/bin/dsh-pager.exe
+/packages/native/*/LICENSE-MIT
+/packages/native/*/LICENSE-APACHE
+/packages/native/*/NOTICE
 /*.tgz
 scripts/__pycache__/
 /packages/dsh-tui-*/lib/

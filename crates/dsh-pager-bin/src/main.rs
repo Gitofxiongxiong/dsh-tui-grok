@@ -45,10 +45,21 @@ fn main() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("dsh-pager: {error}");
-            std::process::exit(1);
+            std::process::exit(if error.is::<UsageError>() { 2 } else { 1 });
         }
     }
 }
+
+#[derive(Debug)]
+struct UsageError(String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for UsageError {}
 
 fn already_pager_without_nested_allow() -> bool {
     env::var("DSH_PAGER_ROLE").as_deref() == Ok("pager")
@@ -184,13 +195,28 @@ fn default_backend() -> (String, Vec<String>) {
     )
 }
 
+fn allow_dev_backend() -> bool {
+    cfg!(debug_assertions) || env::var("DSH_PAGER_DEV_MODE").as_deref() == Ok("1")
+}
+
 fn resolve_backend(
     mut program: Option<String>,
     mut program_args: Vec<String>,
     tui_server: Option<&str>,
-) -> (String, Vec<String>) {
+    allow_dev_default: bool,
+) -> Result<(String, Vec<String>), Box<dyn Error>> {
+    let tui_server = match tui_server {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(UsageError("DSH_TUI_SERVER is empty".into()).into());
+            }
+            Some(trimmed)
+        }
+    };
     if program.is_none() {
-        if let Some(from_env) = tui_server.filter(|value| !value.is_empty()) {
+        if let Some(from_env) = tui_server {
             let mut parts = from_env.split_whitespace();
             if let Some(first) = parts.next() {
                 program = Some(first.to_string());
@@ -200,13 +226,22 @@ fn resolve_backend(
             }
         }
     }
-    let program = program.unwrap_or_else(|| default_backend().0);
-    let program_args = if program_args.is_empty() && program == "dsh" {
-        default_backend().1
-    } else {
-        program_args
-    };
-    (program, program_args)
+    match program {
+        Some(program) => {
+            let program_args = if program_args.is_empty() && program == "dsh" {
+                default_backend().1
+            } else {
+                program_args
+            };
+            Ok((program, program_args))
+        }
+        None if allow_dev_default => Ok(default_backend()),
+        None => Err(UsageError(
+            "no backend; product launches inject --backend <node> --backend-arg <absolute lib/bin.js> --backend-arg --profile --backend-arg dsh-pager-grok (Unix cargo-run: debug build or DSH_PAGER_DEV_MODE=1)"
+                .into(),
+        )
+        .into()),
+    }
 }
 
 fn parse_args() -> Result<Args, Box<dyn Error>> {
@@ -259,7 +294,8 @@ fn parse_args_from(
         }
     }
 
-    let (program, program_args) = resolve_backend(program, program_args, tui_server);
+    let (program, program_args) =
+        resolve_backend(program, program_args, tui_server, allow_dev_backend())?;
     Ok(Args {
         hello_only,
         load_only,
@@ -293,11 +329,11 @@ fn eprint_help() {
         "dsh-pager {} — protocol version {}\n\
          Usage: dsh-pager [--hello|--list-sessions|--dashboard|--load-only|--smoke-interactions|--smoke-queue|--smoke-lifecycle] [--new|--session <id>|--session-search <query>]\n\
                           [--backend <program>] [--backend-arg <arg>]...\n\
-         Default backend: dsh --profile dsh-pager-grok (Unix cargo-run convenience only).\n\
-         Product/Windows: --backend <node> --backend-arg <absolute bin.js> --backend-arg --profile --backend-arg <profile>.\n\
+         Default backend (debug cargo-run or DSH_PAGER_DEV_MODE=1): dsh --profile dsh-pager-grok.\n\
+         Release/product: --backend <node> --backend-arg <absolute bin.js> --backend-arg --profile --backend-arg <profile>.\n\
          Without --hello, loads the most recent non-subagent session (or creates one)\n\
          and enters the pager. DSH_TUI_SERVER overrides the default program and args via\n\
-         whitespace split; paths must not contain whitespace.",
+         whitespace split; empty/whitespace-only values exit 2; paths must not contain whitespace.",
         env!("CARGO_PKG_VERSION"),
         TUI_PROTOCOL_VERSION,
     );
@@ -554,5 +590,40 @@ mod tests {
         .expect("parse");
         assert_eq!(args.program, "node");
         assert_eq!(args.program_args, ["kept.js"]);
+    }
+
+    #[test]
+    fn parse_args_trims_dsh_tui_server() {
+        let args = parse_args_from(
+            Vec::<String>::new(),
+            Some("  node /tmp/bin.js --profile dsh-pager-grok  "),
+        )
+        .expect("parse");
+        assert_eq!(args.program, "node");
+        assert_eq!(
+            args.program_args,
+            ["/tmp/bin.js", "--profile", "dsh-pager-grok"]
+        );
+    }
+
+    #[test]
+    fn parse_args_blank_dsh_tui_server_is_usage_error() {
+        let error = parse_args_from(Vec::<String>::new(), Some(" \t ")).err().expect("blank env");
+        assert!(error.is::<UsageError>(), "{error}");
+        assert!(error.to_string().contains("DSH_TUI_SERVER"), "{error}");
+    }
+
+    #[test]
+    fn release_without_backend_refuses_path_dsh() {
+        let error = resolve_backend(None, Vec::new(), None, false).expect_err("release");
+        assert!(error.is::<UsageError>(), "{error}");
+        assert!(error.to_string().contains("no backend"), "{error}");
+    }
+
+    #[test]
+    fn dev_default_backend_is_dsh_profile() {
+        let (program, args) = resolve_backend(None, Vec::new(), None, true).expect("dev");
+        assert_eq!(program, "dsh");
+        assert_eq!(args, ["--profile", "dsh-pager-grok"]);
     }
 }

@@ -10,6 +10,8 @@ import {
   helpText,
   needBundle,
   productBackendArgs,
+  resolvePagerBinary,
+  userBackendKind,
 } from '../lib/launcher.js'
 import { enginesSatisfied, nativeSpec } from '../lib/platform.js'
 
@@ -28,6 +30,20 @@ describe('cli argv', () => {
     expect(hasUserBackend(['--backend', 'node'])).toBe(true)
     expect(hasUserBackend([], { DSH_TUI_SERVER: 'node ./mock.mjs' })).toBe(true)
     expect(hasUserBackend([], { DSH_TUI_SERVER: '' })).toBe(false)
+    expect(userBackendKind([], { DSH_TUI_SERVER: '' })).toBe('blank')
+    expect(userBackendKind([], { DSH_TUI_SERVER: '  \t' })).toBe('blank')
+    expect(userBackendKind([], { DSH_TUI_SERVER: 'node ./mock.mjs' })).toBe('env')
+    expect(userBackendKind(['--backend', 'node'])).toBe('argv')
+  })
+
+  it('ignores DSH_PAGER_BIN unless DSH_PAGER_DEV_MODE=1', () => {
+    const override = join(tmpdir(), 'not-the-pager')
+    const product = resolvePagerBinary({ env: { ...process.env, DSH_PAGER_BIN: override } })
+    expect(product).not.toBe(override)
+    const forced = resolvePagerBinary({
+      env: { ...process.env, DSH_PAGER_BIN: override, DSH_PAGER_DEV_MODE: '1' },
+    })
+    expect(forced).toBe(override)
   })
 
   it('injects node + bin.js + profile', () => {

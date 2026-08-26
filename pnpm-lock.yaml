@@ -71,7 +71,7 @@ importers:
   packages/dsh-pager-runtime:
     dependencies:
       '@deepseek-ai/cordis':
-        specifier: ^4.0.1
+        specifier: 4.0.1
         version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@deepseek-ai/dsh-agent':
         specifier: 0.1.0-rc.8
@@ -119,7 +119,7 @@ importers:
         specifier: 0.1.0-rc.8
         version: 0.1.0-rc.8(b22e0d48f5e81af272cd56aac64d0d48)
       '@deepseek-ai/schemastery':
-        specifier: ^3.18.1
+        specifier: 3.18.1
         version: 3.18.1
     devDependencies:
       '@deepseek-ai/cordis-plugin-include':

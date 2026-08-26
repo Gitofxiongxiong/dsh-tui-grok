@@ -47,7 +47,7 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-agent": "0.1.0-rc.8",
     "@deepseek-ai/dsh-api-remotes": "0.1.0-rc.8",
     "@deepseek-ai/dsh-brand": "0.1.0-rc.8",
@@ -63,6 +63,6 @@
     "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.8",
     "@deepseek-ai/dsh-storage-json": "0.1.0-rc.8",
     "@deepseek-ai/dsh-workspace": "0.1.0-rc.8",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "3.18.1"
   }
 }

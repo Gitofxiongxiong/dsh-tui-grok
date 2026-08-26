@@ -2,9 +2,7 @@
   "name": "@dsh-pager-grok/tui-session-projection-recovery",
   "description": "Cordis plugin that recovers uncached cold-session projections for session.list",
   "version": "0.1.0",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "repository": {
     "type": "git",
     "directory": "packages/dsh-tui-session-projection-recovery"

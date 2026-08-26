@@ -69,7 +69,7 @@ function readOwningPackageVersion(): string {
       // Walk toward the package root; missing parents are expected.
     }
   }
-  return '0.0.0'
+  throw new Error('unable to read @dsh-pager-grok package version for tui.hello serverInfo')
 }
 
 function sessionIdOfMux(frame: MuxFrame): SessionId | undefined {

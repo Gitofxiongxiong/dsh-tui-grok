@@ -2,9 +2,7 @@
   "name": "@dsh-pager-grok/tui-protocol",
   "description": "External native-TUI wire protocol used by dsh-pager-grok",
   "version": "0.1.0",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",

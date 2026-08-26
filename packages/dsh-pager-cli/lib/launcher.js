@@ -30,10 +30,17 @@ export function profileDir(env = process.env) {
   return join(dshHome(env), 'profiles', PROFILE)
 }
 
-export function hasUserBackend(argv, env = process.env) {
-  if (argv.includes('--backend')) return true
+export function userBackendKind(argv, env = process.env) {
+  if (argv.includes('--backend')) return 'argv'
   const fromEnv = env.DSH_TUI_SERVER
-  return typeof fromEnv === 'string' && fromEnv.length > 0
+  if (fromEnv === undefined) return 'none'
+  if (typeof fromEnv !== 'string' || fromEnv.trim().length === 0) return 'blank'
+  return 'env'
+}
+
+export function hasUserBackend(argv, env = process.env) {
+  const kind = userBackendKind(argv, env)
+  return kind === 'argv' || kind === 'env'
 }
 
 export function commandName(argv) {
@@ -105,7 +112,10 @@ export function resolveDshEntry(env = process.env) {
 
 export function resolvePagerBinary(opts = {}) {
   if (opts.binPath) return opts.binPath
-  if (process.env.DSH_PAGER_BIN) return process.env.DSH_PAGER_BIN
+  const env = opts.env ?? process.env
+  if (env.DSH_PAGER_BIN && env.DSH_PAGER_DEV_MODE === '1') {
+    return env.DSH_PAGER_BIN
+  }
   const spec = nativeSpec()
   if (spec.error) {
     throw new Error(`dsh-pager: ${spec.error}`)
@@ -202,14 +212,13 @@ export function printDoctor(ownVersion, env = process.env) {
     mark(false, 'platform', spec.error)
     hardFail = true
   } else {
-    let nativeOk = false
     try {
-      resolvePagerBinary()
-      nativeOk = true
+      resolvePagerBinary({ env })
+      mark(true, 'native', spec.name)
     } catch (error) {
       mark(false, 'native', error.message.split('\n')[0])
+      hardFail = true
     }
-    if (nativeOk) mark(true, 'native', spec.name)
   }
   const stdinTty = Boolean(process.stdin.isTTY)
   const stdoutTty = Boolean(process.stdout.isTTY)

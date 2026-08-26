@@ -2,9 +2,7 @@
   "name": "@dsh-pager-grok/tui-embedded",
   "description": "External DSH profile bundle for the dsh-pager-grok native TUI",
   "version": "0.1.0",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "repository": {
     "type": "git",
     "directory": "packages/dsh-tui-embedded"

@@ -224,13 +224,28 @@ fn capture_cli(bin: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let status = wait_with_deadline(&mut child, CLIPBOARD_COMMAND_DEADLINE).ok()?;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).ok()?;
+        Some(buf)
+    });
+    let status = wait_with_deadline(&mut child, CLIPBOARD_COMMAND_DEADLINE);
+    let buf = match reader.join() {
+        Ok(Some(buf)) => buf,
+        _ => return None,
+    };
+    let status = status.ok()?;
     if !status.success() {
         return None;
     }
-    let mut stdout = child.stdout.take()?;
-    let mut buf = Vec::new();
-    stdout.read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -440,6 +455,25 @@ mod tests {
         let mut child = spawn_sleep("0");
         let status = wait_with_deadline(&mut child, Duration::from_secs(2)).unwrap();
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_cli_drains_large_stdout_without_deadlock() {
+        let started = Instant::now();
+        let text = capture_cli(
+            "node",
+            &[
+                "-e",
+                "process.stdout.write('x'.repeat(2 * 1024 * 1024))",
+            ],
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stdout must be drained while waiting: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(text.as_deref().map(str::len), Some(2 * 1024 * 1024));
     }
 
     #[cfg(unix)]

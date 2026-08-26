@@ -25,6 +25,8 @@ describe('@dsh-pager-grok/runtime bundle', () => {
       dsh?: { bundle?: { patch?: string } }
     }
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
+    expect(manifest.dependencies?.['@deepseek-ai/cordis']).toBe('4.0.1')
+    expect(manifest.dependencies?.['@deepseek-ai/schemastery']).toBe('3.18.1')
     expect(Object.values(manifest.dependencies ?? {}).some((value) => value.includes('workspace:'))).toBe(
       false,
     )

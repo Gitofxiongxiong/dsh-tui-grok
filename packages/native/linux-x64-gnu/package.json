@@ -14,7 +14,7 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "libc": ["glibc"],
-  "files": ["bin/dsh-pager", "README.md"],
+  "files": ["bin/dsh-pager", "README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE"],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   }

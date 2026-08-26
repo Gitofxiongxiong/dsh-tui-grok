@@ -2,9 +2,7 @@
   "name": "@dsh-pager-grok/tui-server",
   "description": "External Cordis plugin serving the dsh-pager-grok native TUI over ApiProxy",
   "version": "0.1.0",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "repository": {
     "type": "git",
     "directory": "packages/dsh-tui-server"

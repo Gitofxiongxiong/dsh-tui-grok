@@ -349,14 +349,12 @@ impl RpcTransport {
             let message = match self.rx.recv_timeout(RPC_TIMEOUT) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(PagerError::new(format!(
-                        "timed out waiting for {method} response"
-                    )))
+                    return self.fail(format!("timed out waiting for {method} response"));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(PagerError::new(format!(
+                    return self.fail(format!(
                         "backend disconnected while waiting for {method}"
-                    )))
+                    ));
                 }
             };
             self.process_message(message)?;
@@ -372,11 +370,26 @@ impl RpcTransport {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let request = rpc_request(id, method, Some(params));
-        self.stdin
-            .write_all(encode_request_line(&request)?.as_bytes())?;
-        self.stdin.flush()?;
+        let line = encode_request_line(&request)?;
+        if let Err(error) = self
+            .stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| self.stdin.flush())
+        {
+            self.mark_failed();
+            return Err(error.into());
+        }
         self.pending.insert(id, method.to_string());
         Ok(id)
+    }
+
+    fn mark_failed(&mut self) {
+        self.failed = true;
+    }
+
+    fn fail<T>(&mut self, message: impl Into<String>) -> PagerResult<T> {
+        self.mark_failed();
+        Err(PagerError::new(message))
     }
 
     /// Poll one previously started request. This method never waits on the
@@ -395,7 +408,7 @@ impl RpcTransport {
                 Ok(message) => self.process_message(message)?,
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => {
-                    return Err(PagerError::new("backend reader stopped"));
+                    return self.fail("backend reader stopped");
                 }
             }
         }
@@ -433,14 +446,8 @@ impl RpcTransport {
             ReaderMessage::Frame(other) => Err(PagerError::new(format!(
                 "unexpected request frame from backend: {other:?}"
             ))),
-            ReaderMessage::Error(error) => {
-                self.failed = true;
-                Err(PagerError::new(error))
-            }
-            ReaderMessage::Closed => {
-                self.failed = true;
-                Err(PagerError::new("backend closed stdout"))
-            }
+            ReaderMessage::Error(error) => self.fail(error),
+            ReaderMessage::Closed => self.fail("backend closed stdout"),
         }
     }
 

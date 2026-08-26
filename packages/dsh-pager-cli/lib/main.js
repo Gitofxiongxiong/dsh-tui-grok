@@ -1,4 +1,4 @@
-import { PACKAGE, PROFILE, BUNDLE, commandName, hasUserBackend, helpText, needBundle, printDoctor, productBackendArgs, readOwnVersion, repairProfile, resolveDshEntry, runDsh, spawnPager, ensureProfileBundle } from './launcher.js'
+import { PACKAGE, PROFILE, BUNDLE, commandName, helpText, needBundle, printDoctor, productBackendArgs, readOwnVersion, repairProfile, resolveDshEntry, runDsh, spawnPager, ensureProfileBundle, userBackendKind } from './launcher.js'
 import { enginesSatisfied, nativeSpec } from './platform.js'
 
 function refuseNested() {
@@ -63,7 +63,12 @@ function run() {
   }
   requireInteractiveTerminal(command, argv)
 
-  if (hasUserBackend(argv)) {
+  const backendKind = userBackendKind(argv)
+  if (backendKind === 'blank') {
+    console.error('dsh-pager: DSH_TUI_SERVER is empty')
+    process.exit(2)
+  }
+  if (backendKind !== 'none') {
     spawnPager(argv)
     return
   }
