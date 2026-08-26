@@ -10,30 +10,44 @@ dsh_tui_validate_profile_name "$tui_profile"
 timeout_seconds="${REAL_E2E_TIMEOUT:-45}"
 session_id="${REAL_E2E_SESSION:-}"
 install_local="${DSH_TUI_INSTALL_LOCAL:-0}"
-harness_root="$(dsh_tui_resolve_harness_root "$repo_root")"
-harness_entry="$(dsh_tui_require_harness_entry "$harness_root")"
 
 if [[ "$install_local" == "1" && -n "${DSH_TUI_SERVER:-}" ]]; then
   printf 'DSH_TUI_INSTALL_LOCAL=1 cannot be combined with a custom DSH_TUI_SERVER\n' >&2
   exit 2
 fi
 
+use_env_backend=0
 if [[ -n "${DSH_TUI_SERVER:-}" ]]; then
-  server_program="$DSH_TUI_SERVER"
+  use_env_backend=1
+  harness_root="$(dsh_tui_resolve_harness_root "$repo_root")"
+  backend_desc="$DSH_TUI_SERVER"
+  # pty-smoke.py always passes --backend (default node+mock). Translate the
+  # whitespace-split override into argv; paths still cannot contain spaces.
+  # shellcheck disable=SC2206
+  server_parts=($DSH_TUI_SERVER)
+  if (( ${#server_parts[@]} == 0 )); then
+    printf 'DSH_TUI_SERVER is empty after whitespace split.\n' >&2
+    exit 2
+  fi
+  pty_backend_argv=(--backend "${server_parts[0]}")
+  for ((i = 1; i < ${#server_parts[@]}; i++)); do
+    pty_backend_argv+=(--backend-arg "${server_parts[i]}")
+  done
 else
-  server_program="$harness_entry --profile $tui_profile"
-
   if [[ "$install_local" == "1" ]]; then
     "$repo_root/scripts/setup-dev-profile.sh"
   else
     dsh_tui_require_profile "$tui_profile" "$repo_root"
   fi
+  dsh_tui_prepare_pager_backend "$repo_root" "$tui_profile"
+  harness_root="$dsh_tui_harness_root"
+  backend_desc="$dsh_tui_node_program $dsh_tui_harness_entry --profile $tui_profile"
+  pty_backend_argv=("${dsh_tui_pager_backend_argv[@]}")
 fi
 
 cd "$repo_root"
 cargo build -p dsh-pager-bin --locked
 
-export DSH_TUI_SERVER="$server_program"
 binary="$repo_root/target/debug/dsh-pager"
 
 run_pager() {
@@ -41,10 +55,16 @@ run_pager() {
 }
 
 printf 'real Harness root: %s\n' "$harness_root"
-printf 'real Harness command: %s\n' "$server_program"
-run_pager --hello
-run_pager --list-sessions
-run_pager --dashboard
+printf 'real Harness command: %s\n' "$backend_desc"
+if (( use_env_backend == 1 )); then
+  run_pager --hello
+  run_pager --list-sessions
+  run_pager --dashboard
+else
+  run_pager --hello "${dsh_tui_pager_backend_argv[@]}"
+  run_pager --list-sessions "${dsh_tui_pager_backend_argv[@]}"
+  run_pager --dashboard "${dsh_tui_pager_backend_argv[@]}"
+fi
 
 pager_session_args=()
 if [[ -n "$session_id" ]]; then
@@ -54,14 +74,16 @@ else
   pager_session_args=(--new)
   printf 'using an isolated new session (set REAL_E2E_SESSION for read-only attach)\n'
 fi
-run_pager --load-only "${pager_session_args[@]}"
+if (( use_env_backend == 1 )); then
+  run_pager --load-only "${pager_session_args[@]}"
+else
+  run_pager --load-only "${pager_session_args[@]}" "${dsh_tui_pager_backend_argv[@]}"
+fi
 
 python3 scripts/pty-smoke.py \
   --binary "$binary" \
   --pager-arg=--new \
-  --backend "$harness_root/apps/cli/lib/bin.js" \
-  --backend-arg=--profile \
-  --backend-arg "$tui_profile" \
+  "${pty_backend_argv[@]}" \
   --timeout "$timeout_seconds"
 
 printf 'real DeepSeek Harness E2E checks passed (hello/list/dashboard/load/PTY)\n'

@@ -2,6 +2,11 @@
 
 # Shared environment and profile helpers for the local DeepSeek Harness launchers.
 # This file is sourced by scripts; it is not a standalone entry point.
+#
+# Default pager backend is node + absolute apps/cli/lib/bin.js + --profile
+# (step 1 product argv). Launchers pass --backend/--backend-arg; they do not
+# export DSH_TUI_SERVER on the default path. bin.js must exist and be readable;
+# it does not need to be executable.
 
 dsh_tui_repo_root() {
   local script_dir="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
@@ -9,6 +14,12 @@ dsh_tui_repo_root() {
 }
 
 dsh_tui_default_profile="dsh-pager-grok-dev"
+
+# Filled by dsh_tui_prepare_pager_backend for launchers.
+dsh_tui_node_program=""
+dsh_tui_harness_root=""
+dsh_tui_harness_entry=""
+dsh_tui_pager_backend_argv=()
 
 dsh_tui_resolve_harness_root() {
   local repo_root="$1"
@@ -23,7 +34,7 @@ dsh_tui_resolve_harness_root() {
     "$repo_root/../deepseek-harness" \
     "/home/leo/code/deepseek-harness" \
     "/home/leo/aidreamschool/deepseek-harness"; do
-    if [[ -x "$candidate/apps/cli/lib/bin.js" ]]; then
+    if [[ -f "$candidate/apps/cli/lib/bin.js" && -r "$candidate/apps/cli/lib/bin.js" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -36,9 +47,10 @@ dsh_tui_resolve_harness_root() {
 dsh_tui_require_harness_entry() {
   local harness_root="$1"
   local harness_entry="$harness_root/apps/cli/lib/bin.js"
-  if [[ ! -x "$harness_entry" ]]; then
-    printf 'DeepSeek Harness entry is not executable: %s\n' "$harness_entry" >&2
-    printf 'Set DSH_HARNESS_ROOT or DSH_TUI_SERVER to override it.\n' >&2
+  # Node prefixes the entry; the shebang bit is not required (Windows/Git Bash).
+  if [[ ! -f "$harness_entry" || ! -r "$harness_entry" ]]; then
+    printf 'DeepSeek Harness entry is missing or not readable: %s\n' "$harness_entry" >&2
+    printf 'Set DSH_HARNESS_ROOT, or set DSH_TUI_SERVER as a no-whitespace override.\n' >&2
     return 2
   fi
   printf '%s\n' "$harness_entry"
@@ -51,6 +63,26 @@ dsh_tui_resolve_node() {
   fi
   printf 'Node.js was not found; install Node.js or set PATH before running the TUI.\n' >&2
   return 2
+}
+
+# Fill globals used by launchers:
+#   dsh_tui_node_program
+#   dsh_tui_harness_root
+#   dsh_tui_harness_entry
+#   dsh_tui_pager_backend_argv  (pager --backend / --backend-arg flags)
+dsh_tui_prepare_pager_backend() {
+  local repo_root="$1"
+  local profile="${2:-${DSH_TUI_PROFILE:-$dsh_tui_default_profile}}"
+
+  dsh_tui_node_program="$(dsh_tui_resolve_node)" || return
+  dsh_tui_harness_root="$(dsh_tui_resolve_harness_root "$repo_root")" || return
+  dsh_tui_harness_entry="$(dsh_tui_require_harness_entry "$dsh_tui_harness_root")" || return
+  dsh_tui_pager_backend_argv=(
+    --backend "$dsh_tui_node_program"
+    --backend-arg "$dsh_tui_harness_entry"
+    --backend-arg --profile
+    --backend-arg "$profile"
+  )
 }
 
 dsh_tui_pnpm() {
@@ -191,8 +223,10 @@ dsh_tui_install_local_profile() {
   local profile="$3"
   local profile_dir
   local manifest
+  local node_program
   profile_dir="$(dsh_tui_profile_dir "$profile")"
   manifest="$profile_dir/package.json"
+  node_program="$(dsh_tui_resolve_node)" || return
 
   if dsh_tui_profile_manifest_is_ready "$manifest" \
     && dsh_tui_profile_manifest_links_current_repo "$manifest" "$repo_root"; then
@@ -209,7 +243,7 @@ dsh_tui_install_local_profile() {
   fi
 
   printf 'Preparing DSH profile %s under %s...\n' "$profile" "$(dsh_tui_dsh_home)" >&2
-  "$harness_entry" plugin --profile "$profile" add \
+  "$node_program" "$harness_entry" plugin --profile "$profile" add \
     "$repo_root/packages/dsh-tui-protocol" \
     "$repo_root/packages/dsh-tui-server" \
     "$repo_root/packages/dsh-tui-embedded" \

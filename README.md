@@ -53,10 +53,13 @@ backend/profile 是否可用而不创建会话时运行：
 ./scripts/setup-dev-profile.sh
 ```
 
-启动脚本默认会自举 profile；`--skip-setup` 只适合已经准备好 profile 的场景。可用
-`DSH_HARNESS_ROOT`、`DSH_HOME`、`DSH_TUI_PROFILE`、`DSH_TUI_SERVER` 和
-`DSH_TUI_CARGO` 覆盖本机默认路径或命令。指定已有的非本项目 profile 时，初始化脚本
-默认拒绝覆盖；确认后可设置 `DSH_TUI_PROFILE_ALLOW_UPDATE=1`。
+启动脚本默认会自举 profile；`--skip-setup` 只适合已经准备好 profile 的场景。默认
+backend 是 `--backend <node>`、`--backend-arg <absolute apps/cli/lib/bin.js>`、
+`--backend-arg --profile`、`--backend-arg <profile>`，不设置 `DSH_TUI_SERVER`。
+可用 `DSH_HARNESS_ROOT`、`DSH_HOME`、`DSH_TUI_PROFILE` 和 `DSH_TUI_CARGO`
+覆盖本机默认路径。`DSH_TUI_SERVER` 是完整 backend 命令的高级覆盖（空白拆分，
+路径不得含空格）；设置后不再注入默认 `--backend` 链。指定已有的非本项目
+profile 时，初始化脚本默认拒绝覆盖；确认后可设置 `DSH_TUI_PROFILE_ALLOW_UPDATE=1`。
 
 真实 E2E 使用同一套 profile 自举逻辑。下面的命令显式使用隔离 profile；脚本会一次性
 link 本仓库的三个 TypeScript 包：

@@ -16,12 +16,20 @@ usage() {
     'Starts the Grok TUI with a new DeepSeek Harness session.' \
     '  --check  verify the backend handshake without creating a session' \
     '' \
+    'Default backend (pager flags; DSH_TUI_SERVER is not set):' \
+    '  --backend <node|node.exe>' \
+    '  --backend-arg <absolute apps/cli/lib/bin.js>' \
+    '  --backend-arg --profile' \
+    '  --backend-arg <profile>' \
+    '' \
     'Optional overrides:' \
     '  DSH_HARNESS_ROOT  DeepSeek Harness checkout' \
     '  DSH_HOME          Harness home (default: $HOME/.dsh)' \
     '  DSH_TUI_PROFILE   DSH profile (default: dsh-pager-grok-dev)' \
     '  DSH_TUI_PROFILE_ALLOW_UPDATE=1  allow updating a non-project profile' \
-    '  DSH_TUI_SERVER    complete backend command' \
+    '  DSH_TUI_SERVER    advanced override of the complete backend command;' \
+    '                    split on whitespace, so paths must not contain spaces.' \
+    '                    When set, the default --backend flags are not injected.' \
     '  DSH_TUI_CARGO     Cargo executable' \
     '' \
     'By default the local TypeScript packages are built and linked into the profile.' \
@@ -65,29 +73,35 @@ if [[ ! -x "$cargo_program" ]]; then
   exit 2
 fi
 
+use_env_backend=0
 if [[ -n "${DSH_TUI_SERVER:-}" ]]; then
-  server_program="$DSH_TUI_SERVER"
+  use_env_backend=1
 else
-  harness_root="$(dsh_tui_resolve_harness_root "$repo_root")"
-  harness_entry="$(dsh_tui_require_harness_entry "$harness_root")"
   if (( skip_setup == 0 )); then
     "$repo_root/scripts/setup-dev-profile.sh"
   else
     dsh_tui_require_profile "$tui_profile" "$repo_root"
   fi
-  server_program="$harness_entry --profile $tui_profile"
+  dsh_tui_prepare_pager_backend "$repo_root" "$tui_profile"
 fi
 
 cd "$repo_root"
 "$cargo_program" build -p dsh-pager-bin --locked
 
-export DSH_TUI_SERVER="$server_program"
 pager="$repo_root/target/debug/dsh-pager"
 if (( check_only == 1 )); then
-  printf 'Checking TUI backend: %s\n' "$server_program" >&2
-  exec "$pager" --hello
+  if (( use_env_backend == 1 )); then
+    printf 'Checking TUI backend: %s\n' "$DSH_TUI_SERVER" >&2
+    exec "$pager" --hello
+  fi
+  printf 'Checking TUI backend: %s %s --profile %s\n' \
+    "$dsh_tui_node_program" "$dsh_tui_harness_entry" "$tui_profile" >&2
+  exec "$pager" --hello "${dsh_tui_pager_backend_argv[@]}"
 fi
 
 printf 'Starting a new conversation with profile %s. Press Ctrl+C to exit.\n' \
   "$tui_profile" >&2
-exec "$pager" --new
+if (( use_env_backend == 1 )); then
+  exec "$pager" --new
+fi
+exec "$pager" --new "${dsh_tui_pager_backend_argv[@]}"

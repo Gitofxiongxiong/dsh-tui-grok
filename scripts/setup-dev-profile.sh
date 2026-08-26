@@ -50,4 +50,5 @@ printf 'Using Node.js: %s\n' "$node_program" >&2
 printf 'Using DeepSeek Harness: %s\n' "$harness_root" >&2
 printf 'Using DSH_HOME: %s\n' "$(dsh_tui_dsh_home)" >&2
 
+# plugin add is invoked as node + absolute bin.js (not a shebang exec of .js).
 dsh_tui_install_local_profile "$repo_root" "$harness_entry" "$tui_profile"

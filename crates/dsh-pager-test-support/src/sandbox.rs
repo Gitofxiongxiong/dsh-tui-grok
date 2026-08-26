@@ -50,8 +50,14 @@ impl TestSandbox {
         if let Some(path) = std::env::var_os("PATH") {
             environment.insert("PATH".into(), path);
         }
+        // Isolate Unix HOME/TMPDIR and Windows USERPROFILE/TMP/TEMP. Key set
+        // matches grok-build xai-grok-test-support sandbox.rs; DSH does not set
+        // GROK_HOME or Grok telemetry/git hermetic env.
         environment.insert("HOME".into(), home.clone().into_os_string());
+        environment.insert("USERPROFILE".into(), home.clone().into_os_string());
         environment.insert("TMPDIR".into(), tmp.clone().into_os_string());
+        environment.insert("TMP".into(), tmp.clone().into_os_string());
+        environment.insert("TEMP".into(), tmp.clone().into_os_string());
         environment.insert("DSH_TEST_SANDBOX".into(), root.clone().into_os_string());
         environment.insert("NO_COLOR".into(), OsString::from("1"));
         environment.insert("LC_ALL".into(), OsString::from("C"));
@@ -126,6 +132,10 @@ impl Default for TestSandbox {
 mod tests {
     use super::*;
 
+    fn env_value(sandbox: &TestSandbox, key: &str) -> Option<OsString> {
+        sandbox.env().get(OsStr::new(key)).cloned()
+    }
+
     #[test]
     fn sandbox_has_isolated_directories_and_no_ambient_backend() {
         let sandbox = TestSandbox::new().expect("sandbox");
@@ -133,5 +143,18 @@ mod tests {
         assert!(sandbox.workspace().is_dir());
         assert!(sandbox.tmp().is_dir());
         assert!(!sandbox.env().contains_key(OsStr::new("DSH_TUI_SERVER")));
+    }
+
+    #[test]
+    fn cross_platform_home_and_temp_names_are_present() {
+        let sandbox = TestSandbox::new().expect("sandbox");
+        assert_eq!(
+            env_value(&sandbox, "USERPROFILE"),
+            Some(sandbox.home().into())
+        );
+        assert_eq!(env_value(&sandbox, "HOME"), Some(sandbox.home().into()));
+        assert_eq!(env_value(&sandbox, "TEMP"), Some(sandbox.tmp().into()));
+        assert_eq!(env_value(&sandbox, "TMP"), Some(sandbox.tmp().into()));
+        assert_eq!(env_value(&sandbox, "TMPDIR"), Some(sandbox.tmp().into()));
     }
 }

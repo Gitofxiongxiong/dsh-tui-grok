@@ -102,15 +102,23 @@ REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
   DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness scripts/real-e2e.sh
 ```
 
-默认 backend 为
-`<DSH_HARNESS_ROOT>/apps/cli/lib/bin.js --profile dsh-pager-grok-dev`，
-并从 Harness 自己的 `$DSH_HOME` credentials/settings 层读取配置；密钥不写入本仓库。
+默认 backend 由 pager 旗标注入（不设置 `DSH_TUI_SERVER`）：
+
+```text
+--backend <node>
+--backend-arg <DSH_HARNESS_ROOT>/apps/cli/lib/bin.js
+--backend-arg --profile
+--backend-arg dsh-pager-grok-dev
+```
+
+配置从 Harness 自己的 `$DSH_HOME` credentials/settings 层读取；密钥不写入本仓库。
 如果刚修改过 Harness 的 TypeScript 源码，先在该 checkout 重建 host bundle：
 
 ```bash
 (cd /home/leo/code/deepseek-harness && pnpm exec tsdown --env.DSH_BUILD_FACE host)
 ```
 
-也可用 `DSH_TUI_SERVER` 覆盖完整命令字符串。需要验证真实模型 prompt、queue
+`DSH_TUI_SERVER` 可覆盖完整 backend 命令字符串（空白拆分，路径不得含空格）；
+设置后启动脚本不再注入默认 `--backend` 链。需要验证真实模型 prompt、queue
 mutation 或 lifecycle 时，应在确认会话和费用边界后显式运行对应 binary smoke
 flag，而不是让只读门禁隐式改变已有 session。
