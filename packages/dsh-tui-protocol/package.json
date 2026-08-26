@@ -7,6 +7,7 @@
   },
   "repository": {
     "type": "git",
+    "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",
     "directory": "packages/dsh-tui-protocol"
   },
   "type": "module",
@@ -29,8 +30,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js",
-    "lib/invariant.js",
+    "lib/**/*.js",
     "lib/**/*.d.ts"
   ],
   "license": "MIT",
