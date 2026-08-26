@@ -425,6 +425,15 @@ Btw（`/btw`）与 Agent 正文同类，走同一套 overlay 资格；触发仍�
   真实变矮只在物化后的 `settle_frame` 钳到底。
 - resize、估算高度收敛或 fold 改变仍用稳定 entry/block anchor 恢复；同一帧有明确滚动输入时，
   输入优先，不能再用旧 anchor 覆盖它。
+- 原始 `ScrollUp` / `ScrollDown` 不能直接换成固定 3 行。Production 使用固定 Grok snapshot
+  的 `MouseScrollState`：按 terminal/multiplexer profile 归一化 wheel/trackpad，16ms cadence
+  合帧，处理方向翻转、fractional carry、backlog cap/coast；`GROK_SCROLL_MODE`、
+  `GROK_SCROLL_LINES`、`GROK_SCROLL_SPEED` 和 `GROK_INVERT_SCROLL` 保留上游语义。
+- 事件循环遵守 Grok `event_loop.rs` 的输入公平性：每轮先消费已缓冲 terminal input；input
+  backlog 非空时不 drain session notification；通知批次最多 32 条，并在新 input 到达时提前
+  截断。这样 token firehose 和按住键/触控板 flood 都不会单向饿死另一侧。
+- active mouse stream 有独立 scroll clock；即使后续不再收到原始 report，16ms flush 和 80ms
+  stream finalize 仍会唤醒事件循环，不能绑在约 30fps 的内容动画 tick 上。
 
 ## 11. DSH 对齐检查清单
 

@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""PTY regression for Grok-compatible scrolling during a live token stream."""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import importlib.util
+import os
+import pty
+import re
+import select
+import signal
+import time
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SMOKE_PATH = ROOT / "scripts" / "pty-smoke.py"
+SPEC = importlib.util.spec_from_file_location("dsh_pty_smoke", SMOKE_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"cannot load {SMOKE_PATH}")
+SMOKE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(SMOKE)
+
+AnsiScreen = SMOKE.AnsiScreen
+CURSOR_QUERY = SMOKE.CURSOR_QUERY
+CURSOR_REPLY = SMOKE.CURSOR_REPLY
+resize = SMOKE.resize
+
+MARKER_RE = re.compile(r"SCROLL-MARKER-(\d{4})")
+TAIL_RE = re.compile(r"TAIL-LIVE-(\d{4})")
+ROWS = 40
+COLS = 100
+WHEEL_ROW = 15
+WHEEL_COL = 50
+
+
+def wheel(button: int, count: int = 1) -> bytes:
+    report = f"\x1b[<{button};{WHEEL_COL};{WHEEL_ROW}M".encode()
+    return report * count
+
+
+def visible_marker_rows(screen: AnsiScreen) -> list[tuple[int, int]]:
+    rows: list[tuple[int, int]] = []
+    for row, line in enumerate(screen.text().splitlines()):
+        match = MARKER_RE.search(line)
+        if match:
+            rows.append((int(match.group(1)), row))
+    return rows
+
+
+def visible_tail_indices(screen: AnsiScreen) -> list[int]:
+    return [int(value) for value in TAIL_RE.findall(screen.text())]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument(
+        "--mock",
+        type=Path,
+        default=ROOT / "crates" / "dsh-pager-bin" / "tests" / "mock-server.mjs",
+    )
+    parser.add_argument("--timeout", type=float, default=18.0)
+    args = parser.parse_args()
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ["TERM"] = "xterm-256color"
+        os.environ["TERM_PROGRAM"] = "zed"
+        os.environ["GROK_SCROLL_MODE"] = "wheel"
+        os.environ["GROK_SCROLL_LINES"] = "1"
+        os.execv(
+            str(args.binary),
+            [
+                str(args.binary),
+                "--backend",
+                "node",
+                "--backend-arg",
+                str(args.mock),
+            ],
+        )
+
+    resize(fd, ROWS, COLS)
+    screen = AnsiScreen(ROWS, COLS)
+    output = bytearray()
+    deadline = time.monotonic() + args.timeout
+
+    def pump(seconds: float = 0.05) -> None:
+        readable, _, _ = select.select([fd], [], [], seconds)
+        if not readable:
+            return
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError as error:
+            if error.errno in (errno.EIO, errno.EBADF):
+                return
+            raise
+        output.extend(chunk)
+        screen.feed(chunk)
+        if CURSOR_QUERY in chunk:
+            os.write(fd, CURSOR_REPLY)
+
+    def wait_until(predicate, label: str) -> None:
+        while time.monotonic() < deadline:
+            pump()
+            if predicate():
+                return
+        raise RuntimeError(f"timed out waiting for {label}\nscreen:\n{screen.text()}")
+
+    def wait_for_exit() -> None:
+        while time.monotonic() < deadline:
+            pump()
+            waited, status = os.waitpid(pid, os.WNOHANG)
+            if waited != pid:
+                continue
+            code = os.waitstatus_to_exitcode(status)
+            if code != 0:
+                raise RuntimeError(f"dsh-pager exited with {code}")
+            if b"\x1b[?1049l" not in output or b"\x1b[?25h" not in output:
+                raise RuntimeError("terminal surface was not restored")
+            return
+        raise RuntimeError("dsh-pager did not exit before timeout")
+
+    try:
+        wait_until(lambda: "SessionLoaded" in screen.text(), "loaded session")
+        os.write(fd, b"stream scroll smoke\r")
+        wait_until(
+            lambda: bool(visible_marker_rows(screen)) and bool(visible_tail_indices(screen)),
+            "streaming marker fixture",
+        )
+        time.sleep(0.15)
+        pump(0.05)
+
+        before_rows = visible_marker_rows(screen)
+        if not before_rows:
+            raise RuntimeError(f"no baseline marker\nscreen:\n{screen.text()}")
+        top_before, _ = before_rows[0]
+
+        # Grok forced-wheel pricing on a Zed ept=1 profile: one report is one row.
+        os.write(fd, wheel(64))
+        wait_until(
+            lambda: bool(visible_marker_rows(screen))
+            and visible_marker_rows(screen)[0][0] < top_before,
+            "one-row wheel-up movement",
+        )
+        parked_rows = visible_marker_rows(screen)
+        parked_marker, parked_screen_row = parked_rows[0]
+        if top_before - parked_marker != 1:
+            raise AssertionError(
+                "forced wheel report must move exactly one row: "
+                f"{top_before} -> {parked_marker}\nscreen:\n{screen.text()}"
+            )
+
+        # No more input: live deltas continue, but the parked marker must not drift.
+        observe_until = time.monotonic() + 0.7
+        while time.monotonic() < observe_until:
+            pump()
+        later_rows = visible_marker_rows(screen)
+        if not later_rows or later_rows[0] != (parked_marker, parked_screen_row):
+            raise AssertionError(
+                "parked marker moved while live deltas arrived: "
+                f"{(parked_marker, parked_screen_row)} -> "
+                f"{later_rows[0] if later_rows else None}\nscreen:\n{screen.text()}"
+            )
+
+        # Travel to the tail and deliberately overscroll. Once follow is restored,
+        # later stream chunks must enter the screen without any further input.
+        os.write(fd, wheel(65, 80))
+        wait_until(lambda: bool(visible_tail_indices(screen)), "wheel-down tail")
+        tail_after_down = max(visible_tail_indices(screen))
+        follow_until = time.monotonic() + 1.0
+        while time.monotonic() < follow_until:
+            pump()
+        tails_following = visible_tail_indices(screen)
+        if not tails_following or max(tails_following) <= tail_after_down:
+            raise AssertionError(
+                "fully-clamped wheel-down did not restore live follow: "
+                f"tail stayed at {tail_after_down}\nscreen:\n{screen.text()}"
+            )
+
+        # Ctrl+C follows the Grok cancel-then-quit ladder while the mock stream
+        # remains live. The second press exits after the pending cancel receipt.
+        os.write(fd, b"\x03")
+        time.sleep(0.15)
+        pump(0.05)
+        os.write(fd, b"\x03")
+        wait_for_exit()
+        print(
+            "stream scroll PTY ok: "
+            f"top={top_before}->{parked_marker}, tail={tail_after_down}->"
+            f"{max(tails_following)}"
+        )
+        return 0
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        raise
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

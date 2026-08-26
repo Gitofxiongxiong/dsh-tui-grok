@@ -13,6 +13,8 @@ const SESSION_MODES = [
 ]
 let currentMode = SESSION_MODES[0]
 let modeSeq = 20
+let scrollStreamTimer = null
+let scrollStreamSeq = 3
 
 function modeProjections() {
   const currentValue = currentMode.id === 'danger-full-access'
@@ -52,6 +54,90 @@ function emitModeProjections() {
       value: values.permissions,
     },
   })
+}
+
+function emitSessionEvent(event) {
+  write({
+    jsonrpc: '2.0',
+    method: 'events.mux',
+    params: { type: 'session/event', sessionId, event },
+  })
+}
+
+function startScrollStream() {
+  if (scrollStreamTimer !== null) return
+  const markerText = Array.from(
+    { length: 240 },
+    (_, index) =>
+      `SCROLL-MARKER-${String(index).padStart(4, '0')} ${'x'.repeat(72)}  `,
+  ).join('\n')
+
+  scrollStreamSeq += 1
+  emitSessionEvent({ seq: scrollStreamSeq, time: Date.now(), type: 'turn/start', data: { turn: 2 } })
+  scrollStreamSeq += 1
+  emitSessionEvent({
+    seq: scrollStreamSeq,
+    time: Date.now(),
+    type: 'user/message',
+    surfaceOp: 'append',
+    data: {
+      id: 'user-scroll-smoke',
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'stream scroll smoke' }],
+    },
+  })
+  scrollStreamSeq += 1
+  emitSessionEvent({
+    seq: scrollStreamSeq,
+    time: Date.now(),
+    type: 'assistant/chunk',
+    data: {
+      turn: 2,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: `${markerText}\nTAIL-LIVE-0000\n` },
+    },
+  })
+  write({
+    jsonrpc: '2.0',
+    method: 'events.host',
+    params: { type: 'host/session-status', sessionId, running: true },
+  })
+
+  let tick = 0
+  scrollStreamTimer = setInterval(() => {
+    tick += 1
+    scrollStreamSeq += 1
+    emitSessionEvent({
+      seq: scrollStreamSeq,
+      time: Date.now(),
+      type: 'assistant/chunk',
+      data: {
+        turn: 2,
+        step: 0,
+        chunk: {
+          type: 'text-delta',
+          index: 0,
+          text: `TAIL-LIVE-${String(tick).padStart(4, '0')} streamed payload row\n`,
+        },
+      },
+    })
+    if (tick < 2000) return
+    clearInterval(scrollStreamTimer)
+    scrollStreamTimer = null
+    scrollStreamSeq += 1
+    emitSessionEvent({
+      seq: scrollStreamSeq,
+      time: Date.now(),
+      type: 'step/end',
+      data: { turn: 2, step: 0 },
+    })
+    write({
+      jsonrpc: '2.0',
+      method: 'events.host',
+      params: { type: 'host/session-status', sessionId, running: false },
+    })
+  }, 30)
 }
 const events = [
   { seq: 0, time: 1, type: 'turn/start', data: { turn: 1 } },
@@ -433,6 +519,11 @@ rl.on('line', (line) => {
   }
   if (message?.method === 'session.prompt') {
     const promptText = message.params?.content?.[0]?.text ?? ''
+    if (promptText === 'stream scroll smoke') {
+      startScrollStream()
+      success(message.id, { accepted: true })
+      return
+    }
     if (promptText === 'structured smoke') {
       for (const event of events.slice(4)) {
         write({

@@ -1,6 +1,6 @@
 # Grok source manifest
 
-Manifest updated: 2026-08-25 (+0800)
+Manifest updated: 2026-08-26 (+0800)
 DSH protocol fixture revision: `TUI_PROTOCOL_VERSION=1` (checked by
 `scripts/check-protocol-fixtures.py`).
 
@@ -28,6 +28,10 @@ auditable instead of being misreported as upstream drift.
 | `vendor/grok/xai-grok-pager/src/views/timeline.rs` | same | `f537f9df19ed02bda47e2bf147076464a14e8f9015e35d247cb9969e0304390e` | `f537f9df19ed02bda47e2bf147076464a14e8f9015e35d247cb9969e0304390e` | none |
 | `vendor/grok/xai-grok-pager/src/input/line_editor.rs` | same | `0b6fa76994d6b637442a98bc90cd5b539d13ae97dc6602befeb008bb61683d87` | `0b6fa76994d6b637442a98bc90cd5b539d13ae97dc6602befeb008bb61683d87` | none |
 | `vendor/grok/xai-grok-pager/src/input/key.rs` | same | `69d6f7446bf106c33e1dc894ef095c62782dae3d609f6661ef0291046bc754ee` | `2836bde45b5b3dae4bb7ca655c2f463bd1b5066fe8496cb74e32ca1ae96c2db7` | doctest crate path uses `dsh_pager_grok_ui` |
+| `vendor/grok/xai-grok-pager/src/input/mouse.rs` | same | `00ce1db6fb66fedf09d381041b552551c4000e10493b6afd29962f011250d415` | `00ce1db6fb66fedf09d381041b552551c4000e10493b6afd29962f011250d415` | none |
+| `vendor/grok/xai-grok-pager/src/input/mouse/tests.rs` | same | `fdaa77d9a701e8ceeb81e688002c8a04614a6504837a2a34b3a5ef6aabc01dec` | `fdaa77d9a701e8ceeb81e688002c8a04614a6504837a2a34b3a5ef6aabc01dec` | none |
+| `vendor/grok/xai-grok-pager/src/input/scroll_log.rs` | same | `c4c1ddb140a58f44b6eee276a3c9aa2431ad0bc07639bd63bcdd7552fe783043` | `1a8a8965aaaa46abf0641090352f3322301e615f55c867dc8f349600c837af5a` | B adaptation: preserves Grok's JSONL scroll flight recorder and environment trigger; replaces Grok home discovery and tracing runtime with a temp-directory target plus the DSH file-backed diagnostic seam |
+| `vendor/grok/xai-grok-pager-render/src/appearance/scroll_mode.rs` | same | `905741004e168f5e5f3e9c8c4c61a7acb0d2c1152e8bc24f5f9611614a5f1aeb` | `905741004e168f5e5f3e9c8c4c61a7acb0d2c1152e8bc24f5f9611614a5f1aeb` | none |
 | `vendor/grok/xai-grok-pager-render/src/modal_window_state.rs` | same | `023d33dbbacb445a6772eeb687a0e10e79bb93e50dda20ba9f55f23ab1c642df` | `023d33dbbacb445a6772eeb687a0e10e79bb93e50dda20ba9f55f23ab1c642df` | none |
 | `vendor/grok/xai-grok-pager-render/src/theme/wave.rs` | `xai-grok-pager-render/src/theme/tokyonight.rs` | `ae006d433f652c9e6d6533e38ba07ac49ff07770a63a9510a7dc8b1ae3c09f28` | `c2336df606c195f17f2bc66dc2a3984e0b5e79068f3f56b4c5a513754d1ba7e3` | A1 extracted slice: preserves upstream `wave_brightness`/`pulse_brightness` formulas and docs verbatim; adds focused formula/range tests while deferring palette constructors to the Appearance tranche |
 | `vendor/grok/xai-grok-pager-render/src/render/color.rs` | `xai-grok-pager-render/src/render/color.rs` | `e2503529d312b6a6aa4477ab553610b3ba396d2cd43dc145c58c9d43dcd4793b` | `5185da4bd0c206f995f018e9e8b21957f2dbcdea325b7011247240038470bd7f` | A1 extracted slice: retains the upstream RGB/Indexed conversion, nearest xterm-256 quantization, `blend_channel` and `blend_color` with focused tests; line/buffer fade helpers stay with the later renderer tranche |

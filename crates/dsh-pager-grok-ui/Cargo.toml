@@ -28,3 +28,4 @@ xai-grok-markdown = { path = "vendor/grok/xai-grok-markdown" }
 [dev-dependencies]
 pretty_assertions = "1.4"
 serial_test = "3.2"
+tempfile = "3"

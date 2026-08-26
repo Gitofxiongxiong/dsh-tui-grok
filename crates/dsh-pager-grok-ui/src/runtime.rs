@@ -47,7 +47,12 @@ use crate::host_adapter::{
     GrokHostSnapshot, MediaSnapshot, SuggestionSnapshot, child_scrollback_from_history,
     media_snapshot_from_scrollback, resume_picker_entries, resume_picker_search_hits,
 };
-use crate::input::{PromptEditor, key::KeyShortcut, line_editor::LineEditOutcome};
+use crate::input::{
+    PromptEditor,
+    key::KeyShortcut,
+    line_editor::LineEditOutcome,
+    mouse::{MouseScrollState, ScrollConfig as MouseScrollConfig, ScrollDirection},
+};
 use crate::media::{
     MediaPreviewBuffer, MediaPreviewController, MediaPreviewDecision, render_image_preview_content,
 };
@@ -100,7 +105,10 @@ use xai_ratatui_textarea::MouseAction;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ANIMATION_POLL_INTERVAL: Duration = Duration::from_millis(33);
-const NOTIFICATION_BUDGET: usize = 256;
+// Mirrors Grok's ACP_DRAIN_BATCH_MAX: token firehoses stay batched, but
+// queued terminal input waits for at most one small notification batch.
+const NOTIFICATION_BUDGET: usize = 32;
+const INPUT_DRAIN_BATCH_MAX: usize = 256;
 const TRANSCRIPT_DOUBLE_CLICK: Duration = Duration::from_millis(450);
 const CHILD_HISTORY_REFRESH: Duration = Duration::from_millis(400);
 
@@ -270,6 +278,14 @@ pub fn run_interactive(mut transport: RpcTransport, mut session: SessionState) -
         capabilities: terminal.capabilities(),
         ..UiState::default()
     };
+    if let Some(cadence_ms) = std::env::var("GROK_SCROLL_CADENCE_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        ui.mouse_scroll
+            .set_redraw_cadence(Duration::from_millis(cadence_ms));
+    }
     ui.refresh_agent_subagents(&mut transport, &session, true);
     // Restore the terminal before resuming a panic so the payload is not
     // trapped on the alternate screen.
@@ -310,45 +326,58 @@ fn run_loop(
         if let Err(error) = ui.poll_effects(transport, session) {
             ui.status = Some(format!("effect completion error: {error}"));
         }
-        match drain_notifications_bounded(transport, session, NOTIFICATION_BUDGET) {
-            Ok((update, processed)) if update.gap_detected => {
-                ui.scheduler_stats.enqueued =
-                    ui.scheduler_stats.enqueued.saturating_add(processed as u64);
-                ui.scheduler_stats.processed = ui
-                    .scheduler_stats
-                    .processed
-                    .saturating_add(processed as u64);
-                ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
-                if let Err(error) = repair_tail(transport, session) {
-                    ui.status = Some(format!("history repair error: {error}"));
-                }
-            }
-            Ok((update, processed)) if update.changed => {
-                ui.scheduler_stats.enqueued =
-                    ui.scheduler_stats.enqueued.saturating_add(processed as u64);
-                ui.scheduler_stats.processed = ui
-                    .scheduler_stats
-                    .processed
-                    .saturating_add(processed as u64);
-                ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
-                ui.shell.invalidate_content();
-                ui.refresh_agent_subagents(transport, session, false);
-                let _ = ui.dispatch_event(ShellEvent::Notification, transport, session)?;
-            }
-            Ok((_, processed)) => {
-                ui.scheduler_stats.enqueued =
-                    ui.scheduler_stats.enqueued.saturating_add(processed as u64);
-                ui.scheduler_stats.processed = ui
-                    .scheduler_stats
-                    .processed
-                    .saturating_add(processed as u64);
-                ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
-            }
-            Err(error) => {
-                diag::log("notify", format!("error {error}"));
-                ui.status = Some(format!("notification error: {error}"));
+
+        // Grok drains the whole immediately-buffered input backlog in one loop
+        // iteration. Doing this before notifications prevents a token firehose
+        // from keeping wheel/key events parked behind repeated notification
+        // batches, and lets MouseScrollState coalesce one physical gesture.
+        let scroll_tick_changed = ui.tick_mouse_scroll();
+        let input_events = read_buffered_input()?;
+        let had_input = !input_events.is_empty();
+        let mut quit = false;
+        for input_event in input_events {
+            quit |= dispatch_terminal_event(ui, input_event, transport, session)?;
+            if quit {
+                break;
             }
         }
+        if had_input || scroll_tick_changed {
+            ui.flush_copy(terminal);
+        }
+        if quit {
+            break;
+        }
+
+        // Match Grok's input_rx.is_empty() ACP gate. If input was already
+        // buffered, skip notifications for this iteration; while draining,
+        // stop before the next notification as soon as terminal input arrives.
+        if !had_input {
+            match drain_notifications_bounded(
+                transport,
+                session,
+                NOTIFICATION_BUDGET,
+                terminal_input_pending_fail_closed,
+            ) {
+                Ok((update, processed)) if update.gap_detected => {
+                    record_scheduler_batch(ui, processed);
+                    if let Err(error) = repair_tail(transport, session) {
+                        ui.status = Some(format!("history repair error: {error}"));
+                    }
+                }
+                Ok((update, processed)) if update.changed => {
+                    record_scheduler_batch(ui, processed);
+                    ui.shell.invalidate_content();
+                    ui.refresh_agent_subagents(transport, session, false);
+                    let _ = ui.dispatch_event(ShellEvent::Notification, transport, session)?;
+                }
+                Ok((_, processed)) => record_scheduler_batch(ui, processed),
+                Err(error) => {
+                    diag::log("notify", format!("error {error}"));
+                    ui.status = Some(format!("notification error: {error}"));
+                }
+            }
+        }
+
         let frame_links = ui.frame_links.clone();
         if let Err(error) = terminal.draw_with_links(&frame_links, |frame| {
             ui.render(frame, session, transport.control_plane())
@@ -358,7 +387,7 @@ fn run_loop(
         }
         let welcome_animating =
             ui.scrollback_pane.is_empty() && ui.welcome_animation.is_animating(Instant::now());
-        let poll_interval = if session.running()
+        let mut poll_interval = if session.running()
             || ui.scrollback_pane.is_animating()
             || welcome_animating
             || ui.watchers_live
@@ -368,65 +397,92 @@ fn run_loop(
         } else {
             POLL_INTERVAL
         };
+        if let Some(scroll_deadline) = ui.mouse_scroll.scroll_clock_deadline(Instant::now()) {
+            poll_interval = poll_interval.min(scroll_deadline);
+        }
         match event::poll(poll_interval) {
             Ok(false) => continue,
-            Ok(true) => {}
+            // Leave the event in crossterm's queue. The loop-top batch drain
+            // timestamps and handles all buffered events together.
+            Ok(true) => continue,
             Err(error) => {
                 diag::log_always("input", format!("poll {error}"));
                 return Err(PagerError::from(error));
-            }
-        }
-        let event = match event::read() {
-            Ok(event) => event,
-            Err(error) => {
-                diag::log_always("input", format!("read {error}"));
-                return Err(PagerError::from(error));
-            }
-        };
-        match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                let quit = ui.dispatch_event(ShellEvent::Key(key), transport, session)?;
-                ui.flush_copy(terminal);
-                if quit {
-                    break;
-                }
-            }
-            Event::Mouse(mouse) => {
-                let quit = ui.dispatch_event(ShellEvent::Mouse(mouse), transport, session)?;
-                ui.flush_copy(terminal);
-                if quit {
-                    break;
-                }
-            }
-            Event::Paste(text) => {
-                let quit = ui.dispatch_event(ShellEvent::Paste(text), transport, session)?;
-                ui.flush_copy(terminal);
-                if quit {
-                    break;
-                }
-            }
-            Event::Resize(width, height) => {
-                let _ =
-                    ui.dispatch_event(ShellEvent::Resize { width, height }, transport, session)?;
-                ui.flush_copy(terminal);
-            }
-            _ => {
-                let _ = ui.dispatch_event(ShellEvent::Tick, transport, session)?;
-                ui.flush_copy(terminal);
             }
         }
     }
     Ok(())
 }
 
+fn read_buffered_input() -> PagerResult<Vec<Event>> {
+    let mut buffered = Vec::new();
+    while buffered.len() < INPUT_DRAIN_BATCH_MAX {
+        match event::poll(Duration::ZERO) {
+            Ok(false) => break,
+            Ok(true) => match event::read() {
+                Ok(input_event) => buffered.push(input_event),
+                Err(error) => {
+                    diag::log_always("input", format!("read {error}"));
+                    return Err(PagerError::from(error));
+                }
+            },
+            Err(error) => {
+                diag::log_always("input", format!("poll {error}"));
+                return Err(PagerError::from(error));
+            }
+        }
+    }
+    Ok(buffered)
+}
+
+fn dispatch_terminal_event(
+    ui: &mut UiState,
+    input_event: Event,
+    transport: &mut RpcTransport,
+    session: &mut SessionState,
+) -> PagerResult<bool> {
+    match input_event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
+            ui.dispatch_event(ShellEvent::Key(key), transport, session)
+        }
+        Event::Mouse(mouse) if ui.handle_normalized_transcript_scroll(&mouse) => Ok(false),
+        Event::Mouse(mouse) => ui.dispatch_event(ShellEvent::Mouse(mouse), transport, session),
+        Event::Paste(text) => ui.dispatch_event(ShellEvent::Paste(text), transport, session),
+        Event::Resize(width, height) => {
+            ui.dispatch_event(ShellEvent::Resize { width, height }, transport, session)
+        }
+        _ => ui.dispatch_event(ShellEvent::Tick, transport, session),
+    }
+}
+
+fn terminal_input_pending_fail_closed() -> bool {
+    match event::poll(Duration::ZERO) {
+        Ok(pending) => pending,
+        Err(error) => {
+            diag::log("input", format!("notification gate poll failed: {error}"));
+            true
+        }
+    }
+}
+
+fn record_scheduler_batch(ui: &mut UiState, processed: usize) {
+    ui.scheduler_stats.enqueued = ui.scheduler_stats.enqueued.saturating_add(processed as u64);
+    ui.scheduler_stats.processed = ui
+        .scheduler_stats
+        .processed
+        .saturating_add(processed as u64);
+    ui.scheduler_stats.max_pending = ui.scheduler_stats.max_pending.max(processed);
+}
+
 fn drain_notifications_bounded(
     transport: &mut RpcTransport,
     session: &mut SessionState,
     budget: usize,
+    mut input_pending: impl FnMut() -> bool,
 ) -> PagerResult<(SessionUpdate, usize)> {
     let mut combined = SessionUpdate::default();
     let mut processed = 0usize;
-    while processed < budget {
+    while processed < budget && !input_pending() {
         let note = match transport.try_notification() {
             Ok(Some(note)) => note,
             Ok(None) => break,
@@ -534,6 +590,8 @@ struct UiState {
     shell: AppShell,
     capabilities: TerminalCapabilities,
     transcript_viewport: TranscriptViewportState,
+    transcript_viewport_height: u16,
+    mouse_scroll: MouseScrollState,
     scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
     scrollback_pane: DshScrollbackHost,
     resume_picker: ResumePickerState,
@@ -611,6 +669,52 @@ struct UiState {
 }
 
 impl UiState {
+    fn mouse_scroll_config(&self) -> MouseScrollConfig {
+        MouseScrollConfig::from_settings().with_viewport_height(self.transcript_viewport_height)
+    }
+
+    /// Route the main transcript's wheel reports through Grok's production
+    /// wheel/trackpad normalizer. Overlay owners retain their existing input
+    /// behavior and never mutate the hidden transcript viewport.
+    fn handle_normalized_transcript_scroll(&mut self, mouse: &MouseEvent) -> bool {
+        if self.shell.overlay() != Overlay::None {
+            return false;
+        }
+        let Some(direction) = ScrollDirection::from_mouse_event(mouse) else {
+            return false;
+        };
+        if self.scrollback_pane.is_empty() {
+            return true;
+        }
+        let config = self.mouse_scroll_config();
+        let update = self.mouse_scroll.on_scroll_event(direction, config);
+        self.apply_transcript_scroll_lines(update.lines);
+        true
+    }
+
+    fn tick_mouse_scroll(&mut self) -> bool {
+        if self.shell.overlay() != Overlay::None {
+            self.mouse_scroll.cancel_stream();
+            return false;
+        }
+        let update = self.mouse_scroll.on_tick();
+        self.apply_transcript_scroll_lines(update.lines)
+    }
+
+    fn apply_transcript_scroll_lines(&mut self, lines: i32) -> bool {
+        if lines == 0 {
+            return false;
+        }
+        if lines < 0 {
+            self.transcript_viewport
+                .scroll_up(lines.unsigned_abs() as usize);
+        } else {
+            self.transcript_viewport.scroll_down(lines as usize);
+        }
+        self.scroll_anchor = None;
+        true
+    }
+
     /// Refresh the child catalog outside rendering. Views only consume the
     /// `AgentSnapshot` projection; RPC and protocol details stay here.
     fn refresh_agent_subagents(
@@ -1488,6 +1592,7 @@ impl UiState {
             .timestamps_enabled
             .unwrap_or(appearance.show_timestamps);
         let content = layout.scrollback_content;
+        self.transcript_viewport_height = content.height;
         let rail = Rect::new(
             layout.timeline_x,
             layout.scrollback.y,
@@ -2449,13 +2554,8 @@ impl UiState {
 
     fn handle_transcript_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.transcript_viewport.scroll_up(3);
-                self.scroll_anchor = None;
-            }
-            MouseEventKind::ScrollDown => {
-                self.transcript_viewport.scroll_down(3);
-                self.scroll_anchor = None;
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let _ = self.handle_normalized_transcript_scroll(&mouse);
             }
             MouseEventKind::Moved => {
                 self.transcript_mouse_pos = Some((mouse.column, mouse.row));
@@ -4451,8 +4551,9 @@ mod tests {
     use super::render_transcript_selection_box;
     use super::steer_capability_available;
     use super::{
-        MediaPreviewBuffer, TranscriptViewportState, UiState, agent_overlay_close_click,
-        agent_overlay_key_closes, render_agent_tasks_content, render_image_preview_content,
+        MediaPreviewBuffer, NOTIFICATION_BUDGET, TranscriptViewportState, UiState,
+        agent_overlay_close_click, agent_overlay_key_closes, render_agent_tasks_content,
+        render_image_preview_content,
     };
     use crate::app::Overlay;
     use crate::effects::UiEffectStatus;
@@ -4463,6 +4564,11 @@ mod tests {
     };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
+
+    #[test]
+    fn notification_batch_matches_grok_streaming_input_fairness_contract() {
+        assert_eq!(NOTIFICATION_BUDGET, 32);
+    }
     use crate::views::agent_panes::{AgentItemId, AgentPaneController};
     use crate::views::modal_window::{
         ModalSizing, ModalWindowConfig, Shortcut, render_modal_window,

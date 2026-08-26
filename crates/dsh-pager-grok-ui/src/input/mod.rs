@@ -3,6 +3,10 @@ pub mod key;
 #[path = "../../vendor/grok/xai-grok-pager/src/input/line_editor.rs"]
 #[allow(dead_code)]
 pub(crate) mod line_editor;
+#[path = "../../vendor/grok/xai-grok-pager/src/input/mouse.rs"]
+pub mod mouse;
+#[path = "../../vendor/grok/xai-grok-pager/src/input/scroll_log.rs"]
+pub(crate) mod scroll_log;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use xai_ratatui_textarea::{TextArea, classify_key_event};

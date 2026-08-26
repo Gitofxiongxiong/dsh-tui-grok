@@ -2,9 +2,12 @@
 
 use ratatui::layout::Rect;
 
+#[path = "../vendor/grok/xai-grok-pager-render/src/appearance/scroll_mode.rs"]
+mod scroll_mode;
 #[path = "../vendor/grok/xai-grok-pager-render/src/appearance/scrollback_config.rs"]
 mod scrollback_config;
 
+pub use scroll_mode::ScrollMode;
 pub use scrollback_config::*;
 
 /// Value-only subset needed by the scrollback renderer.
@@ -103,6 +106,7 @@ impl Default for GrokAppearanceSnapshot {
 }
 
 pub mod cache {
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static VIM_MODE: AtomicBool = AtomicBool::new(false);
@@ -113,6 +117,109 @@ pub mod cache {
 
     pub fn set_vim_mode(enabled: bool) {
         VIM_MODE.store(enabled, Ordering::Relaxed);
+    }
+
+    const SCROLL_SPEED_DEFAULT: u8 = 50;
+    const SCROLL_LINES_MIN: u8 = 1;
+    const SCROLL_LINES_MAX: u8 = 10;
+    const SCROLL_LINES_UNSET: u8 = 0;
+
+    thread_local! {
+        static SCROLL_SPEED_CURRENT: Cell<u8> = const { Cell::new(SCROLL_SPEED_DEFAULT) };
+        static SCROLL_SPEED_LOADED: Cell<bool> = const { Cell::new(false) };
+        static SCROLL_MODE_CURRENT: Cell<super::ScrollMode> = const { Cell::new(super::ScrollMode::Auto) };
+        static SCROLL_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
+        static INVERT_SCROLL_CURRENT: Cell<bool> = const { Cell::new(false) };
+        static INVERT_SCROLL_LOADED: Cell<bool> = const { Cell::new(false) };
+        static SCROLL_LINES_CURRENT: Cell<u8> = const { Cell::new(SCROLL_LINES_UNSET) };
+        static SCROLL_LINES_LOADED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn load_scroll_speed() -> u8 {
+        SCROLL_SPEED_LOADED.with(|loaded| {
+            if !loaded.get() {
+                let value = std::env::var("GROK_SCROLL_SPEED")
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u8>().ok())
+                    .unwrap_or(SCROLL_SPEED_DEFAULT)
+                    .clamp(1, 100);
+                SCROLL_SPEED_CURRENT.with(|current| current.set(value));
+                loaded.set(true);
+            }
+        });
+        SCROLL_SPEED_CURRENT.with(Cell::get)
+    }
+
+    pub fn set_scroll_speed(speed: u8) {
+        SCROLL_SPEED_CURRENT.with(|current| current.set(speed.clamp(1, 100)));
+        SCROLL_SPEED_LOADED.with(|loaded| loaded.set(true));
+    }
+
+    pub fn load_scroll_mode() -> super::ScrollMode {
+        SCROLL_MODE_LOADED.with(|loaded| {
+            if !loaded.get() {
+                let value = std::env::var("GROK_SCROLL_MODE")
+                    .ok()
+                    .and_then(|value| super::ScrollMode::from_canonical(value.trim()))
+                    .unwrap_or_default();
+                SCROLL_MODE_CURRENT.with(|current| current.set(value));
+                loaded.set(true);
+            }
+        });
+        SCROLL_MODE_CURRENT.with(Cell::get)
+    }
+
+    pub fn set_scroll_mode(mode: super::ScrollMode) {
+        SCROLL_MODE_CURRENT.with(|current| current.set(mode));
+        SCROLL_MODE_LOADED.with(|loaded| loaded.set(true));
+    }
+
+    pub fn load_invert_scroll() -> bool {
+        INVERT_SCROLL_LOADED.with(|loaded| {
+            if !loaded.get() {
+                let value = std::env::var("GROK_INVERT_SCROLL")
+                    .ok()
+                    .and_then(|value| match value.trim() {
+                        "1" | "true" => Some(true),
+                        "0" | "false" => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                INVERT_SCROLL_CURRENT.with(|current| current.set(value));
+                loaded.set(true);
+            }
+        });
+        INVERT_SCROLL_CURRENT.with(Cell::get)
+    }
+
+    pub fn set_invert_scroll(enabled: bool) {
+        INVERT_SCROLL_CURRENT.with(|current| current.set(enabled));
+        INVERT_SCROLL_LOADED.with(|loaded| loaded.set(true));
+    }
+
+    pub fn load_scroll_lines() -> Option<u8> {
+        SCROLL_LINES_LOADED.with(|loaded| {
+            if !loaded.get() {
+                let value = std::env::var("GROK_SCROLL_LINES")
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u8>().ok())
+                    .map(|lines| lines.clamp(SCROLL_LINES_MIN, SCROLL_LINES_MAX))
+                    .unwrap_or(SCROLL_LINES_UNSET);
+                SCROLL_LINES_CURRENT.with(|current| current.set(value));
+                loaded.set(true);
+            }
+        });
+        SCROLL_LINES_CURRENT.with(|current| match current.get() {
+            SCROLL_LINES_UNSET => None,
+            lines => Some(lines),
+        })
+    }
+
+    pub fn set_scroll_lines(lines: u8) {
+        SCROLL_LINES_CURRENT.with(|current| {
+            current.set(lines.clamp(SCROLL_LINES_MIN, SCROLL_LINES_MAX));
+        });
+        SCROLL_LINES_LOADED.with(|loaded| loaded.set(true));
     }
 }
 
