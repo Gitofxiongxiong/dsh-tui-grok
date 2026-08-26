@@ -93,11 +93,11 @@ impl From<Output> for CommandOutput {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn bounded_runner_reaps_successful_child_and_captures_output() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "printf ok"]).current_dir("/");
+        crate::require_node().expect("node is required for process timeout tests");
+        let mut command = Command::new("node");
+        command.args(["-e", "process.stdout.write('ok')"]);
         let output = run_with_timeout(&mut command, Duration::from_secs(2)).expect("command");
         assert!(output.status.success());
         assert_eq!(output.stdout, "ok");

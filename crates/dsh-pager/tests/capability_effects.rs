@@ -1,29 +1,16 @@
-#![cfg(unix)]
-
-use std::fs;
-
 use dsh_pager::{fetch_attachment, list_file_references, RpcTransport};
-use dsh_pager_test_support::TestSandbox;
+use dsh_pager_test_support::NodeStdioMock;
 
-fn scripted_transport(response: &str) -> (RpcTransport, TestSandbox) {
-    let sandbox = TestSandbox::new().expect("sandbox");
-    let script = sandbox.root().join("backend.sh");
-    fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' '{}'\ndone\n",
-            response
-        ),
-    )
-    .expect("write backend");
-    let transport = RpcTransport::spawn("sh", &[script.to_string_lossy().into_owned()])
-        .expect("spawn scripted backend");
-    (transport, sandbox)
+fn scripted_transport(response: &str) -> (RpcTransport, NodeStdioMock) {
+    let mock = NodeStdioMock::echo_line(response).expect("write node protocol mock");
+    let transport = RpcTransport::spawn(mock.program(), &[mock.script_arg()])
+        .expect("spawn node protocol mock");
+    (transport, mock)
 }
 
 #[test]
 fn file_reference_results_keep_path_and_kind() {
-    let (mut transport, _sandbox) = scripted_transport(
+    let (mut transport, _mock) = scripted_transport(
         r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true,"value":{"items":[{"path":"src/main.rs","kind":"file"},{"path":"src","kind":"directory"}]}}}"#,
     );
     let value =
@@ -35,7 +22,7 @@ fn file_reference_results_keep_path_and_kind() {
 
 #[test]
 fn attachment_preview_parses_authoritative_metadata_and_data() {
-    let (mut transport, _sandbox) = scripted_transport(
+    let (mut transport, _mock) = scripted_transport(
         r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true,"value":{"attachment":{"attachmentId":"img-1","mediaType":"image/png","bytes":5,"width":4,"height":3,"name":"plot"},"data":"aGVsbG8="}}}"#,
     );
     let preview =

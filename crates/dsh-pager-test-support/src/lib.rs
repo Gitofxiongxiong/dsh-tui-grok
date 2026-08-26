@@ -5,6 +5,7 @@
 //! be reused by unit, binary, and PTY layers without process-global state.
 
 mod fixture;
+mod node_mock;
 mod parity;
 mod process;
 mod sandbox;
@@ -12,6 +13,7 @@ mod scenario;
 mod screen;
 
 pub use fixture::{read_jsonl, write_jsonl, JsonlFixture};
+pub use node_mock::{require_node, utf8_path_arg, NodeStdioMock};
 pub use parity::{ParityManifest, ParityReport, ParityScenario, ReferenceMatrix};
 pub use process::{run_with_timeout, CommandOutput, ProcessError};
 pub use sandbox::TestSandbox;

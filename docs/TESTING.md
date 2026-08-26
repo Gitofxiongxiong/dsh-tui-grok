@@ -27,7 +27,7 @@ fallback；它们不是 Grok reference golden，M10 reference runner 会替换�
 
 - Grok vendor 模块：保留上游已有单元测试，确认复制时行为不漂移。
 - host adapter：用固定 `SessionState`/协议 fixture 验证 rows、状态和 effect 映射。
-- runtime：继续运行协议、loader、control-plane、queue、lifecycle smoke。
+- runtime：继续运行协议、loader、control-plane、queue、lifecycle smoke。`cargo test -p dsh-pager` / `dsh-pager-bin` 的协议与 hello 测试用 Node stdio JSON-RPC mock，不依赖 `/bin/sh`，在 Windows 上同样编译运行；`scripts/pty-smoke.py` 仍使用 Unix `pty`/`termios`/`fcntl`，保持 Unix-only。
 - binary：`--hello`、`--load-only`、`--dashboard` 和各 smoke flag 不进入终端 UI。
 
 ## 终端检查

@@ -3,10 +3,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use dsh_pager_test_support::{run_with_timeout, TestSandbox};
+use dsh_pager_test_support::{run_with_timeout, utf8_path_arg, TestSandbox};
 
 fn mock_server() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/mock-server.mjs")
+}
+
+fn mock_server_arg() -> String {
+    utf8_path_arg(&mock_server())
 }
 
 fn pager_bin() -> PathBuf {
@@ -15,14 +19,9 @@ fn pager_bin() -> PathBuf {
 
 #[test]
 fn hello_against_mock_server_exits_zero() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
-        .args([
-            "--hello",
-            "--backend",
-            "node",
-            "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
-        ])
+        .args(["--hello", "--backend", "node", "--backend-arg", &mock])
         .output()
         .expect("spawn dsh-pager");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -34,14 +33,9 @@ fn hello_against_mock_server_exits_zero() {
 
 #[test]
 fn load_barrier_against_mock_server_exits_zero() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
-        .args([
-            "--load-only",
-            "--backend",
-            "node",
-            "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
-        ])
+        .args(["--load-only", "--backend", "node", "--backend-arg", &mock])
         .output()
         .expect("spawn dsh-pager");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -55,13 +49,14 @@ fn load_barrier_against_mock_server_exits_zero() {
 
 #[test]
 fn prompt_approval_question_round_trip_against_mock_server_exits_zero() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
         .args([
             "--smoke-interactions",
             "--backend",
             "node",
             "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
+            &mock,
         ])
         .output()
         .expect("spawn dsh-pager");
@@ -72,6 +67,7 @@ fn prompt_approval_question_round_trip_against_mock_server_exits_zero() {
 
 #[test]
 fn session_search_selects_the_host_returned_match() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
         .args([
             "--load-only",
@@ -80,7 +76,7 @@ fn session_search_selects_the_host_returned_match() {
             "--backend",
             "node",
             "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
+            &mock,
         ])
         .output()
         .expect("spawn dsh-pager");
@@ -91,14 +87,9 @@ fn session_search_selects_the_host_returned_match() {
 
 #[test]
 fn queue_mutations_converge_on_authoritative_snapshots() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
-        .args([
-            "--smoke-queue",
-            "--backend",
-            "node",
-            "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
-        ])
+        .args(["--smoke-queue", "--backend", "node", "--backend-arg", &mock])
         .output()
         .expect("spawn dsh-pager");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -108,13 +99,14 @@ fn queue_mutations_converge_on_authoritative_snapshots() {
 
 #[test]
 fn session_lifecycle_smoke_round_trips_rename_and_fork() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
         .args([
             "--smoke-lifecycle",
             "--backend",
             "node",
             "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
+            &mock,
         ])
         .output()
         .expect("spawn dsh-pager");
@@ -126,14 +118,9 @@ fn session_lifecycle_smoke_round_trips_rename_and_fork() {
 
 #[test]
 fn dashboard_mode_lists_host_sessions_with_derived_title_and_status() {
+    let mock = mock_server_arg();
     let output = Command::new(pager_bin())
-        .args([
-            "--dashboard",
-            "--backend",
-            "node",
-            "--backend-arg",
-            mock_server().to_str().expect("utf-8 path"),
-        ])
+        .args(["--dashboard", "--backend", "node", "--backend-arg", &mock])
         .output()
         .expect("spawn dsh-pager");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -147,13 +134,8 @@ fn dashboard_mode_lists_host_sessions_with_derived_title_and_status() {
 fn shared_test_support_runs_the_real_binary_in_a_hermetic_sandbox() {
     let sandbox = TestSandbox::new().expect("sandbox");
     let mut command = sandbox.command(pager_bin());
-    command.args([
-        "--hello",
-        "--backend",
-        "node",
-        "--backend-arg",
-        mock_server().to_str().expect("utf-8 path"),
-    ]);
+    let mock = mock_server_arg();
+    command.args(["--hello", "--backend", "node", "--backend-arg", &mock]);
     let output = run_with_timeout(&mut command, Duration::from_secs(5))
         .expect("hello must finish within the test deadline");
     assert!(output.status.success(), "stderr: {}", output.stderr);
@@ -165,13 +147,8 @@ fn nested_pager_role_refuses_without_allow_nested() {
     let sandbox = TestSandbox::new().expect("sandbox");
     let mut command = sandbox.command(pager_bin());
     command.env("DSH_PAGER_ROLE", "pager");
-    command.args([
-        "--hello",
-        "--backend",
-        "node",
-        "--backend-arg",
-        mock_server().to_str().expect("utf-8 path"),
-    ]);
+    let mock = mock_server_arg();
+    command.args(["--hello", "--backend", "node", "--backend-arg", &mock]);
     let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("nested refuse");
     assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
     assert!(
@@ -192,13 +169,8 @@ fn nested_pager_role_allows_when_allow_nested() {
     let mut command = sandbox.command(pager_bin());
     command.env("DSH_PAGER_ROLE", "pager");
     command.env("DSH_PAGER_ALLOW_NESTED", "1");
-    command.args([
-        "--hello",
-        "--backend",
-        "node",
-        "--backend-arg",
-        mock_server().to_str().expect("utf-8 path"),
-    ]);
+    let mock = mock_server_arg();
+    command.args(["--hello", "--backend", "node", "--backend-arg", &mock]);
     let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("allow nested");
     assert!(output.status.success(), "stderr: {}", output.stderr);
     assert!(output.stderr.contains("tui.hello ok"), "{}", output.stderr);
@@ -257,13 +229,8 @@ fn failed_backend_prints_stderr_tail() {
     )
     .expect("write fail backend");
     let mut command = sandbox.command(pager_bin());
-    command.args([
-        "--hello",
-        "--backend",
-        "node",
-        "--backend-arg",
-        script.to_str().expect("utf-8 path"),
-    ]);
+    let script_arg = utf8_path_arg(&script);
+    command.args(["--hello", "--backend", "node", "--backend-arg", &script_arg]);
     let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("fail backend");
     assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
     assert!(
