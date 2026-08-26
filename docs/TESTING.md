@@ -7,6 +7,13 @@ cargo check --workspace
 cargo test --workspace
 ```
 
+GitHub Actions `ci.yml` runs `cargo test --workspace --locked` on ubuntu-24.04,
+macos-14, and windows-2022. Protocol tests use Node stdio mocks and are
+OS-portable; `scripts/pty-smoke.py` remains Unix-only and is not in that job.
+
+Native pager tarballs are built with `node scripts/pack-native.mjs` (and the
+`release-native` workflow). Pack with `npm pack`, not `pnpm pack`.
+
 M0/M1 的可重建基线使用仓库脚本：
 
 ```bash

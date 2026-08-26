@@ -1,4 +1,7 @@
 /target
+/packages/native/*/bin/dsh-pager
+/packages/native/*/bin/dsh-pager.exe
+/*.tgz
 scripts/__pycache__/
 /packages/dsh-tui-*/lib/
 /packages/dsh-tui-*/node_modules/

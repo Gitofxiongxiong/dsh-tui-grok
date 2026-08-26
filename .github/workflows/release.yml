@@ -1,0 +1,56 @@
+# Builds stripped pager binaries and npm-packs native packages as artifacts.
+# Does not npm publish. Publish order (native → runtime → CLI) and OIDC
+# stay a later, explicit job. Runner SKUs match scripts/pager-platform-matrix.json.
+name: release-native
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  pack:
+    name: pack ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64-gnu
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            cross: false
+          - id: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            cross: false
+          - id: darwin-arm64
+            runner: macos-14
+            rust_target: aarch64-apple-darwin
+            cross: false
+          - id: darwin-x64
+            runner: macos-14
+            rust_target: x86_64-apple-darwin
+            cross: true
+          - id: win32-x64
+            runner: windows-2022
+            rust_target: x86_64-pc-windows-msvc
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.rust_target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: pack native tarball
+        shell: bash
+        run: node scripts/pack-native.mjs --id ${{ matrix.id }}
+      - name: upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.id }}
+          path: "*.tgz"
+          if-no-files-found: error

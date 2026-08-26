@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "unsupported": [
+    {
+      "id": "linux-musl",
+      "reason": "musl/Alpine is not supported; do not ship gnu binaries as a fallback"
+    },
+    {
+      "id": "win32-arm64",
+      "reason": "not in the v2 support matrix"
+    }
+  ],
+  "packages": [
+    {
+      "id": "linux-x64-gnu",
+      "npm": "@dsh-pager-grok/native-linux-x64-gnu",
+      "dir": "packages/native/linux-x64-gnu",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "glibc",
+      "rustcTarget": "x86_64-unknown-linux-gnu",
+      "asset": "dsh-pager-x86_64-unknown-linux-gnu",
+      "bin": "dsh-pager",
+      "ci": { "runner": "ubuntu-24.04", "cross": false }
+    },
+    {
+      "id": "linux-arm64-gnu",
+      "npm": "@dsh-pager-grok/native-linux-arm64-gnu",
+      "dir": "packages/native/linux-arm64-gnu",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "glibc",
+      "rustcTarget": "aarch64-unknown-linux-gnu",
+      "asset": "dsh-pager-aarch64-unknown-linux-gnu",
+      "bin": "dsh-pager",
+      "ci": { "runner": "ubuntu-24.04-arm", "cross": false }
+    },
+    {
+      "id": "darwin-x64",
+      "npm": "@dsh-pager-grok/native-darwin-x64",
+      "dir": "packages/native/darwin-x64",
+      "os": "darwin",
+      "cpu": "x64",
+      "libc": null,
+      "rustcTarget": "x86_64-apple-darwin",
+      "asset": "dsh-pager-x86_64-apple-darwin",
+      "bin": "dsh-pager",
+      "ci": { "runner": "macos-14", "cross": true }
+    },
+    {
+      "id": "darwin-arm64",
+      "npm": "@dsh-pager-grok/native-darwin-arm64",
+      "dir": "packages/native/darwin-arm64",
+      "os": "darwin",
+      "cpu": "arm64",
+      "libc": null,
+      "rustcTarget": "aarch64-apple-darwin",
+      "asset": "dsh-pager-aarch64-apple-darwin",
+      "bin": "dsh-pager",
+      "ci": { "runner": "macos-14", "cross": false }
+    },
+    {
+      "id": "win32-x64",
+      "npm": "@dsh-pager-grok/native-win32-x64",
+      "dir": "packages/native/win32-x64",
+      "os": "win32",
+      "cpu": "x64",
+      "libc": null,
+      "rustcTarget": "x86_64-pc-windows-msvc",
+      "asset": "dsh-pager-x86_64-pc-windows-msvc.exe",
+      "bin": "dsh-pager.exe",
+      "ci": { "runner": "windows-2022", "cross": false }
+    }
+  ]
+}

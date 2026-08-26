@@ -1,0 +1,20 @@
+{
+  "name": "@dsh-pager-grok/native-darwin-x64",
+  "version": "0.1.0",
+  "description": "Prebuilt dsh-pager binary for macOS x64",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",
+    "directory": "packages/native/darwin-x64"
+  },
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/dsh-pager", "README.md"],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}

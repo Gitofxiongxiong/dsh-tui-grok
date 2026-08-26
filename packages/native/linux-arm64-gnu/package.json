@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-pager-grok/native-linux-arm64-gnu",
+  "version": "0.1.0",
+  "description": "Prebuilt dsh-pager binary for linux arm64 glibc",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",
+    "directory": "packages/native/linux-arm64-gnu"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "libc": ["glibc"],
+  "files": ["bin/dsh-pager", "README.md"],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}
