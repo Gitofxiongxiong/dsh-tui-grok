@@ -35,4 +35,21 @@ describe('TuiLineTransport backpressure', () => {
     callbacks.shift()?.()
     output.destroy()
   })
+
+  it('reports stdout write errors and closes the transport', async () => {
+    const errors: string[] = []
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error('disk full'))
+      },
+    })
+    output.on('error', () => {})
+    const transport = new TuiLineTransport(undefined as never, output, {
+      onWriteError: error => errors.push(error.message),
+    })
+    transport.notify('x', { value: 1 })
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(errors).toEqual(['disk full'])
+  })
 })

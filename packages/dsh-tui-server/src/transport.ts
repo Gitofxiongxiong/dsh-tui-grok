@@ -25,6 +25,8 @@ export interface TuiLineTransportOptions {
   maxQueuedFrames?: number
   /** Called once when a notification is dropped for backpressure. */
   onBackpressure?: (queuedFrames: number) => void
+  /** Called when a stdout write fails; the transport then closes. */
+  onWriteError?: (error: Error) => void
 }
 
 /**
@@ -40,8 +42,10 @@ export class TuiLineTransport {
   private writeChain: Promise<void> = Promise.resolve()
   private readonly maxQueuedFrames: number
   private readonly onBackpressure: ((queuedFrames: number) => void) | undefined
+  private readonly onWriteError: ((error: Error) => void) | undefined
   private queuedFrames = 0
   private backpressureReported = false
+  private writeFailed = false
 
   constructor(
     private readonly input: Readable,
@@ -50,6 +54,8 @@ export class TuiLineTransport {
   ) {
     this.maxQueuedFrames = Math.max(1, Math.floor(options.maxQueuedFrames ?? 1024))
     this.onBackpressure = options.onBackpressure
+    this.onWriteError = options.onWriteError
+    this.output.on('error', this.onOutputError)
   }
 
   /** Attach input listeners. Idempotent. */
@@ -65,9 +71,10 @@ export class TuiLineTransport {
   close(): void {
     if (this.closed) return
     this.closed = true
-    this.input.off('data', this.onData)
-    this.input.off('error', this.onInputError)
-    this.input.off('end', this.onInputEnd)
+    this.input?.off('data', this.onData)
+    this.input?.off('error', this.onInputError)
+    this.input?.off('end', this.onInputEnd)
+    this.output.off('error', this.onOutputError)
   }
 
   /**
@@ -114,6 +121,17 @@ export class TuiLineTransport {
   private readonly onInputEnd = (): void => {
     this.buffer += this.decoder.end()
     this.drainLines()
+    this.close()
+  }
+
+  private readonly onOutputError = (error: Error): void => {
+    this.failWrite(error)
+  }
+
+  private failWrite(error: Error): void {
+    if (this.writeFailed) return
+    this.writeFailed = true
+    this.onWriteError?.(error)
     this.close()
   }
 
@@ -166,12 +184,30 @@ export class TuiLineTransport {
       // host event pump or other clients.
       return
     }
+    if (this.writeFailed) return
     const line = `${serializeJsonRpcMessage(message)}\n`
     this.queuedFrames += 1
     this.writeChain = this.writeChain
-      .then(() => new Promise<void>((resolve) => {
-        this.output.write(line, () => { resolve() })
+      .then(() => new Promise<void>((resolve, reject) => {
+        if (this.writeFailed) {
+          resolve()
+          return
+        }
+        try {
+          const ok = this.output.write(line)
+          if (ok) {
+            resolve()
+            return
+          }
+          this.output.once('drain', () => resolve())
+          this.output.once('error', reject)
+        } catch (error) {
+          reject(error)
+        }
       }))
+      .catch(error => {
+        this.failWrite(error instanceof Error ? error : new Error(String(error)))
+      })
       .finally(() => {
         this.queuedFrames = Math.max(0, this.queuedFrames - 1)
         if (this.queuedFrames < this.maxQueuedFrames) this.backpressureReported = false

@@ -6,9 +6,11 @@ import {
   BUNDLE,
   PROFILE,
   commandName,
+  extraArgsError,
   hasUserBackend,
   helpText,
   needBundle,
+  printDoctor,
   productBackendArgs,
   resolvePagerBinary,
   userBackendKind,
@@ -38,12 +40,50 @@ describe('cli argv', () => {
 
   it('ignores DSH_PAGER_BIN unless DSH_PAGER_DEV_MODE=1', () => {
     const override = join(tmpdir(), 'not-the-pager')
-    const product = resolvePagerBinary({ env: { ...process.env, DSH_PAGER_BIN: override } })
-    expect(product).not.toBe(override)
     const forced = resolvePagerBinary({
       env: { ...process.env, DSH_PAGER_BIN: override, DSH_PAGER_DEV_MODE: '1' },
     })
     expect(forced).toBe(override)
+    let usedOverride = false
+    try {
+      usedOverride =
+        resolvePagerBinary({ env: { ...process.env, DSH_PAGER_BIN: override } }) === override
+    } catch {
+      usedOverride = false
+    }
+    expect(usedOverride).toBe(false)
+  })
+
+  it('rejects extra arguments on leaf commands', () => {
+    expect(extraArgsError('doctor', ['doctor', '--hello'])).toMatch(/extra arguments/)
+    expect(extraArgsError('update', ['update'])).toBeNull()
+    expect(extraArgsError('run', ['--hello'])).toBeNull()
+  })
+
+  it('honors DSH_PAGER_LIBC=musl through resolvePagerBinary env', () => {
+    if (process.platform !== 'linux') return
+    expect(() =>
+      resolvePagerBinary({ env: { ...process.env, DSH_PAGER_LIBC: 'musl' } }),
+    ).toThrow(/musl/)
+  })
+
+  it('doctor hard-fails when DSH_BIN_JS is missing', () => {
+    const lines = []
+    const orig = console.log
+    console.log = (msg) => {
+      lines.push(String(msg))
+    }
+    try {
+      const code = printDoctor('0.1.0', {
+        ...process.env,
+        DSH_BIN_JS: join(tmpdir(), 'missing-dsh.js'),
+        DSH_HOME: mkdtempSync(join(tmpdir(), 'dsh-home-')),
+      })
+      expect(code).toBe(1)
+      expect(lines.join('\n')).toMatch(/✗ dsh/)
+    } finally {
+      console.log = orig
+    }
   })
 
   it('injects node + bin.js + profile', () => {

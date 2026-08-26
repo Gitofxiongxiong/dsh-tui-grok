@@ -59,3 +59,60 @@ fn stderr_flood_is_drained_and_does_not_deadlock_hello() {
         tail.len()
     );
 }
+
+const RECONNECT_SCRIPT: &str = r#"
+import { existsSync, writeFileSync, writeSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+
+const marker = process.argv[2]
+if (!existsSync(marker)) {
+  writeSync(2, 'OLD_BACKEND_STDERR\n')
+  writeFileSync(marker, '1')
+  process.exit(1)
+}
+const rl = createInterface({ input: process.stdin })
+rl.on('line', (line) => {
+  if (line.includes('tui.hello')) {
+    process.stdout.write(
+      '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"clientId":"client-reconnect","generation":2,"resumeClass":"baseline-required","serverInfo":{"name":"deepseek-harness-tui","version":"test"}}}\n',
+    )
+  }
+})
+"#;
+
+#[test]
+fn reconnect_keeps_prior_stderr_tail() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let script = sandbox.root().join("reconnect.mjs");
+    let marker = sandbox.root().join("reconnect-marker");
+    fs::write(&script, RECONNECT_SCRIPT).expect("write reconnect backend");
+    let mut transport = RpcTransport::spawn(
+        "node",
+        &[
+            script.to_string_lossy().into_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+    )
+    .expect("spawn reconnect backend");
+    let first = transport.hello("/work".into());
+    assert!(first.is_err(), "first backend must exit before hello completes");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline
+        && !transport.backend_stderr_tail().contains("OLD_BACKEND_STDERR")
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        transport.backend_stderr_tail().contains("OLD_BACKEND_STDERR"),
+        "failed backend stderr should be captured, got {}",
+        transport.backend_stderr_tail()
+    );
+    transport.reconnect().expect("reconnect");
+    assert!(
+        transport.backend_stderr_tail().contains("OLD_BACKEND_STDERR"),
+        "reconnect must keep prior stderr tail, got {}",
+        transport.backend_stderr_tail()
+    );
+    let hello = transport.hello("/work".into()).expect("hello after reconnect");
+    assert_eq!(hello.client_id, "client-reconnect");
+}

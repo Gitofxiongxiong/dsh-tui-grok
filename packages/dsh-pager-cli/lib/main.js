@@ -1,4 +1,4 @@
-import { PACKAGE, PROFILE, BUNDLE, commandName, helpText, needBundle, printDoctor, productBackendArgs, readOwnVersion, repairProfile, resolveDshEntry, runDsh, spawnPager, ensureProfileBundle, userBackendKind } from './launcher.js'
+import { PACKAGE, PROFILE, BUNDLE, commandName, extraArgsError, helpText, needBundle, printDoctor, productBackendArgs, readOwnVersion, repairProfile, resolveDshEntry, runDsh, spawnPager, ensureProfileBundle, userBackendKind } from './launcher.js'
 import { enginesSatisfied, nativeSpec } from './platform.js'
 
 function refuseNested() {
@@ -23,6 +23,11 @@ function run() {
   const argv = process.argv.slice(2)
   const command = commandName(argv)
   const ownVersion = readOwnVersion()
+  const extra = extraArgsError(command, argv)
+  if (extra) {
+    console.error(`dsh-pager: ${extra}`)
+    process.exit(2)
+  }
 
   if (command === 'help') {
     process.stdout.write(helpText())
@@ -43,10 +48,11 @@ function run() {
     process.exit(result.status ?? 1)
   }
   if (command === 'update') {
-    if (needBundle(process.env, ownVersion)) {
+    try {
       ensureProfileBundle(ownVersion)
-    } else {
-      runDsh(['plugin', '--profile', PROFILE, 'add', `${BUNDLE}@${ownVersion}`])
+    } catch (error) {
+      console.error(`dsh-pager: ${error.message}`)
+      process.exit(1)
     }
     console.error(`[dsh-pager] runtime aligned to ${ownVersion}. To upgrade the CLI itself:\n  npm install -g ${PACKAGE}@${ownVersion}`)
     return

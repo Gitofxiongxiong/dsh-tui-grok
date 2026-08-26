@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { enginesSatisfied, nativeSpec } from './platform.js'
+import { detectLibc, enginesSatisfied, nativeSpec } from './platform.js'
 
 export const PACKAGE = '@dsh-pager-grok/cli'
 export const BUNDLE = '@dsh-pager-grok/runtime'
@@ -97,8 +97,19 @@ Default product backend (injected unless argv already has --backend or DSH_TUI_S
 `
 }
 
+export const LEAF_COMMANDS = new Set(['doctor', 'update', 'uninstall', 'repair'])
+
+export function extraArgsError(command, argv) {
+  if (!LEAF_COMMANDS.has(command)) return null
+  if (argv.length > 1) return `${command} does not accept extra arguments`
+  return null
+}
+
 export function resolveDshEntry(env = process.env) {
   if (env.DSH_BIN_JS) {
+    if (!existsSync(env.DSH_BIN_JS)) {
+      throw new Error(`DSH_BIN_JS does not exist: ${env.DSH_BIN_JS}`)
+    }
     return { node: process.execPath, binJs: env.DSH_BIN_JS, custom: true }
   }
   try {
@@ -116,7 +127,7 @@ export function resolvePagerBinary(opts = {}) {
   if (env.DSH_PAGER_BIN && env.DSH_PAGER_DEV_MODE === '1') {
     return env.DSH_PAGER_BIN
   }
-  const spec = nativeSpec()
+  const spec = nativeSpec(process.platform, process.arch, detectLibc(env))
   if (spec.error) {
     throw new Error(`dsh-pager: ${spec.error}`)
   }
@@ -207,7 +218,7 @@ export function printDoctor(ownVersion, env = process.env) {
     return ok
   }
   if (!mark(enginesSatisfied(), 'node', process.versions.node)) hardFail = true
-  const spec = nativeSpec()
+  const spec = nativeSpec(process.platform, process.arch, detectLibc(env))
   if (spec.error) {
     mark(false, 'platform', spec.error)
     hardFail = true
@@ -220,6 +231,13 @@ export function printDoctor(ownVersion, env = process.env) {
       hardFail = true
     }
   }
+  try {
+    const entry = resolveDshEntry(env)
+    mark(true, 'dsh', entry.custom ? 'DSH_BIN_JS' : '@deepseek-ai/dsh')
+  } catch (error) {
+    mark(false, 'dsh', error.message.split('\n')[0])
+    hardFail = true
+  }
   const stdinTty = Boolean(process.stdin.isTTY)
   const stdoutTty = Boolean(process.stdout.isTTY)
   mark(stdinTty && stdoutTty, 'tty', `stdin=${stdinTty ? 'tty' : 'not a tty'} stdout=${stdoutTty ? 'tty' : 'not a tty'}`)
@@ -229,12 +247,18 @@ export function printDoctor(ownVersion, env = process.env) {
   mark(bundled, 'launcher ↔ runtime', bundled ? ownVersion : 'missing or version mismatch')
   try {
     const dump = runDsh(['--profile', PROFILE, '--dump-config'], { env, stdio: 'pipe' })
-    const text = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
-    const hasServer = text.includes('@dsh-pager-grok/runtime/server')
-    const hasRecovery = text.includes('@dsh-pager-grok/runtime/recovery')
-    mark(dump.status === 0 && hasServer && hasRecovery, 'dump-config', dump.status === 0 ? 'runtime rows present' : 'failed')
+    if (dump.error) {
+      mark(false, 'dump-config', dump.error.message)
+      hardFail = true
+    } else {
+      const text = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
+      const hasServer = text.includes('@dsh-pager-grok/runtime/server')
+      const hasRecovery = text.includes('@dsh-pager-grok/runtime/recovery')
+      mark(dump.status === 0 && hasServer && hasRecovery, 'dump-config', dump.status === 0 ? 'runtime rows present' : 'failed')
+    }
   } catch (error) {
     mark(false, 'dump-config', error.message)
+    hardFail = true
   }
   console.log(lines.join('\n'))
   return hardFail ? 1 : 0

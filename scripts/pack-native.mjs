@@ -11,6 +11,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync 
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { copyPackageLicenses } from './copy-package-licenses.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const matrixPath = join(repoRoot, 'scripts/pager-platform-matrix.json')
@@ -44,9 +45,7 @@ function runNpm(args, options = {}) {
 }
 
 function copyLicenseFiles(packageDir) {
-  for (const name of ['LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE']) {
-    copyFileSync(join(repoRoot, name), join(packageDir, name))
-  }
+  copyPackageLicenses(packageDir, repoRoot)
 }
 
 function auditTarball(pkg, tarball) {

@@ -14,6 +14,7 @@
   "type": "module",
   "scripts": {
     "build": "node ../../scripts/assemble-runtime.mjs",
+    "prepack": "node ../../scripts/copy-package-licenses.mjs .",
     "test": "vitest run tests"
   },
   "devDependencies": {
@@ -39,7 +40,10 @@
   "files": [
     "lib/**/*.js",
     "lib/**/*.d.ts",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE"
   ],
   "dsh": {
     "bundle": {

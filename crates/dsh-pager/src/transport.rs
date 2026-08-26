@@ -52,6 +52,20 @@ impl StderrTail {
     fn to_string_lossy(&self) -> String {
         String::from_utf8_lossy(&self.bytes).into_owned()
     }
+
+    fn prepend(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let mut combined = Vec::with_capacity(chunk.len() + self.bytes.len());
+        combined.extend_from_slice(chunk);
+        combined.extend_from_slice(&self.bytes);
+        self.bytes = combined;
+        if self.bytes.len() > STDERR_TAIL_BYTES {
+            let excess = self.bytes.len() - STDERR_TAIL_BYTES;
+            self.bytes.drain(..excess);
+        }
+    }
 }
 
 fn lock_stderr_tail(tail: &Mutex<StderrTail>) -> std::sync::MutexGuard<'_, StderrTail> {
@@ -281,10 +295,18 @@ impl RpcTransport {
     /// `tui.hello`, observe `baseline-required`, attach, and reload history.
     pub fn reconnect(&mut self) -> PagerResult<()> {
         let client_id = self.client_id.clone();
+        let prior_failed = self.failed;
+        let prior_tail = self.backend_stderr_tail();
         let replacement = Self::spawn(&self.program, &self.program_args)?;
         self.reap_child();
         *self = replacement;
         self.client_id = client_id;
+        if !prior_tail.is_empty() {
+            lock_stderr_tail(&self.stderr_tail).prepend(prior_tail.as_bytes());
+        }
+        if prior_failed {
+            self.failed = true;
+        }
         Ok(())
     }
 
@@ -422,18 +444,18 @@ impl RpcTransport {
             }
             ReaderMessage::Frame(JsonRpcLine::Success(success)) => {
                 let id = response_id(&success.id)?;
-                let method = self.pending.remove(&id).ok_or_else(|| {
-                    PagerError::new(format!("response received for unknown request id {id}"))
-                })?;
+                let Some(method) = self.pending.remove(&id) else {
+                    return self.fail(format!("response received for unknown request id {id}"));
+                };
                 let _ = method;
                 self.completed.insert(id, Ok(success.result));
                 Ok(())
             }
             ReaderMessage::Frame(JsonRpcLine::Failure(failure)) => {
                 let id = response_id(&failure.id)?;
-                let method = self.pending.remove(&id).ok_or_else(|| {
-                    PagerError::new(format!("response received for unknown request id {id}"))
-                })?;
+                let Some(method) = self.pending.remove(&id) else {
+                    return self.fail(format!("response received for unknown request id {id}"));
+                };
                 self.completed.insert(
                     id,
                     Err(PagerError::new(format!(
@@ -443,9 +465,9 @@ impl RpcTransport {
                 );
                 Ok(())
             }
-            ReaderMessage::Frame(other) => Err(PagerError::new(format!(
-                "unexpected request frame from backend: {other:?}"
-            ))),
+            ReaderMessage::Frame(other) => {
+                self.fail(format!("unexpected request frame from backend: {other:?}"))
+            }
             ReaderMessage::Error(error) => self.fail(error),
             ReaderMessage::Closed => self.fail("backend closed stdout"),
         }

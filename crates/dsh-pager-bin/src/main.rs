@@ -290,7 +290,7 @@ fn parse_args_from(
             "--backend-arg" => {
                 program_args.push(required_value("--backend-arg", argv.next())?);
             }
-            other => return Err(format!("unknown argument: {other}").into()),
+            other => return Err(UsageError(format!("unknown argument: {other}")).into()),
         }
     }
 
@@ -321,7 +321,7 @@ fn dashboard_status_label(status: DashboardStatus) -> &'static str {
 }
 
 fn required_value(flag: &str, value: Option<String>) -> Result<String, Box<dyn Error>> {
-    value.ok_or_else(|| format!("{flag} needs a value").into())
+    value.ok_or_else(|| UsageError(format!("{flag} needs a value")).into())
 }
 
 fn eprint_help() {
@@ -625,5 +625,22 @@ mod tests {
         let (program, args) = resolve_backend(None, Vec::new(), None, true).expect("dev");
         assert_eq!(program, "dsh");
         assert_eq!(args, ["--profile", "dsh-pager-grok"]);
+    }
+
+    #[test]
+    fn parse_args_unknown_flag_is_usage_error() {
+        let error = parse_args_from(["--bogus".into()], None)
+            .err()
+            .expect("unknown");
+        assert!(error.is::<UsageError>(), "{error}");
+    }
+
+    #[test]
+    fn parse_args_backend_missing_value_is_usage_error() {
+        let error = parse_args_from(["--backend".into()], None)
+            .err()
+            .expect("missing");
+        assert!(error.is::<UsageError>(), "{error}");
+        assert!(error.to_string().contains("--backend"), "{error}");
     }
 }

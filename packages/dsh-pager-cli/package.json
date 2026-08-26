@@ -17,12 +17,16 @@
   },
   "files": [
     "bin",
-    "lib"
+    "lib",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
+    "prepack": "node ../../scripts/copy-package-licenses.mjs .",
     "test": "vitest run tests"
   },
   "devDependencies": {

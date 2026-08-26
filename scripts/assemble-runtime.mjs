@@ -17,6 +17,7 @@ import {
 } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { copyPackageLicenses } from './copy-package-licenses.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeRoot = join(repoRoot, 'packages/dsh-pager-runtime')
@@ -148,6 +149,7 @@ function main() {
       "name: '@dsh-pager-grok/runtime/server'",
     )
   writeFileSync(join(runtimeRoot, 'cordis.patch.yml'), runtimePatch)
+  copyPackageLicenses(runtimeRoot)
   console.log('assemble-runtime: wrote', outLib)
 }
 

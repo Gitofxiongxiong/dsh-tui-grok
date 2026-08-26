@@ -4,6 +4,12 @@
 /packages/native/*/LICENSE-MIT
 /packages/native/*/LICENSE-APACHE
 /packages/native/*/NOTICE
+/packages/dsh-pager-runtime/LICENSE-MIT
+/packages/dsh-pager-runtime/LICENSE-APACHE
+/packages/dsh-pager-runtime/NOTICE
+/packages/dsh-pager-cli/LICENSE-MIT
+/packages/dsh-pager-cli/LICENSE-APACHE
+/packages/dsh-pager-cli/NOTICE
 /*.tgz
 scripts/__pycache__/
 /packages/dsh-tui-*/lib/

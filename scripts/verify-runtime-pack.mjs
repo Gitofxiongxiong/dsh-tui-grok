@@ -53,6 +53,11 @@ if (!names.includes('package/lib/recovery/index.js')) {
 if (!names.includes('package/cordis.patch.yml')) {
   fail('missing cordis.patch.yml')
 }
+for (const name of ['LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE']) {
+  if (!names.includes(`package/${name}`)) {
+    fail(`missing ${name}`)
+  }
+}
 const packedJson = spawnSync('tar', ['-xOf', join(dir, tarball), 'package/package.json'], {
   encoding: 'utf8',
 })
