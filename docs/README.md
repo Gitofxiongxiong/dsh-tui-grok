@@ -10,6 +10,7 @@ grok build 的代码仓库在/home/leo/code/grok-build
 - [MIGRATION_PLAN.md](MIGRATION_PLAN.md)：从旧 pager 到 Grok UI 的垂直迁移顺序。
 - [SOURCE_POLICY.md](SOURCE_POLICY.md)：Grok 源码固定版本、保留范围和本地修改规则。
 - [TESTING.md](TESTING.md)：编译、单元、协议 smoke 与终端验证。
+- [PRODUCT_PLUGIN_LAUNCHER.md](PRODUCT_PLUGIN_LAUNCHER.md)：树外 `dsh-pager` 产品启动器方案；当前推荐私有精确版本 DSH/pnpm、单一 runtime Bundle 与 npm 平台原生包。
 
 阅读顺序建议：先读长期主计划的第 0、2、3、5、7、10、13 节，再按需要查阅
 架构、来源和测试细节。旧项目的分析材料只作为历史背景，不得覆盖本 successor
