@@ -1,0 +1,33 @@
+# Trusted Publishing target for npm OIDC.
+# Bind every @dsh-pager-grok/* package on npmjs.com to this filename.
+# Does not npm publish yet. Fill in native → runtime → CLI jobs after dogfood.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oidc-ready:
+    name: oidc-ready
+    runs-on: ubuntu-24.04
+    environment: npm-release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: confirm OIDC permission is present
+        run: |
+          echo "publish.yml is the Trusted Publisher workflow."
+          echo "Real npm publish (native then runtime then CLI) is not enabled yet."
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
