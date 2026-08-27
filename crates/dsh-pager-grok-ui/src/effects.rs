@@ -7,7 +7,8 @@ use dsh_pager::{
     RpcTransport, SessionState,
 };
 use dsh_pager_protocol::{
-    PromptMode, QueueAction, SessionModeId, SubagentAddress, TuiInteractionResponse,
+    AgentPresetListValue, PromptMode, QueueAction, SessionModeId, SubagentAddress,
+    TuiInteractionResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -66,6 +67,12 @@ pub enum UiIntent {
     },
     SetSessionMode {
         mode_id: Option<SessionModeId>,
+    },
+    ListAgentPresets {
+        revision: u64,
+    },
+    SelectAgentPreset {
+        agent_preset: String,
     },
 }
 
@@ -233,6 +240,14 @@ pub enum UiEffect {
         operation: OperationKey,
         mode_id: Option<SessionModeId>,
     },
+    ListAgentPresets {
+        operation: OperationKey,
+        revision: u64,
+    },
+    SelectAgentPreset {
+        operation: OperationKey,
+        agent_preset: String,
+    },
 }
 
 /// Boundary a non-DSH host (for example Codex CLI) can implement later.
@@ -368,6 +383,8 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::ReorderSession { .. } => "reorder-session",
         UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
         UiIntent::SetSessionMode { .. } => "set-session-mode",
+        UiIntent::ListAgentPresets { .. } => "list-agent-presets",
+        UiIntent::SelectAgentPreset { .. } => "select-agent-preset",
     };
     let dedupe_key = match &intent {
         UiIntent::CancelSession => action_name.to_string(),
@@ -413,6 +430,10 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
                 "{action_name}:{}",
                 mode_id.map(SessionModeId::as_str).unwrap_or("cycle")
             )
+        }
+        UiIntent::ListAgentPresets { revision } => format!("{action_name}:{revision}"),
+        UiIntent::SelectAgentPreset { agent_preset } => {
+            format!("{action_name}:{agent_preset}")
         }
     };
     // Interaction request ids are host-owned correlation ids. Preserve them
@@ -501,6 +522,14 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
             UiEffect::InterruptSubagent { operation, address }
         }
         UiIntent::SetSessionMode { mode_id } => UiEffect::SetSessionMode { operation, mode_id },
+        UiIntent::ListAgentPresets { revision } => UiEffect::ListAgentPresets {
+            operation,
+            revision,
+        },
+        UiIntent::SelectAgentPreset { agent_preset } => UiEffect::SelectAgentPreset {
+            operation,
+            agent_preset,
+        },
     }
 }
 
@@ -731,6 +760,32 @@ impl DshEffectSink<'_, '_> {
                 let result = dsh_pager::set_session_mode(self.transport, &session, mode_id);
                 (operation, result.map(|value| value.accepted))
             }
+            UiEffect::ListAgentPresets {
+                mut operation,
+                revision: _,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::list_agent_presets(self.transport);
+                (operation, result.map(|_| true))
+            }
+            UiEffect::SelectAgentPreset {
+                mut operation,
+                agent_preset,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::select_agent_preset(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    &agent_preset,
+                );
+                (operation, result.map(|_| true))
+            }
         };
         match result {
             Ok(true) => {
@@ -766,6 +821,8 @@ pub struct UiEffectCompletion {
     pub session_search: Option<dsh_pager_protocol::SessionSearchValue>,
     pub file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
+    pub agent_preset_list: Option<AgentPresetListValue>,
+    pub selected_agent_preset: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -858,7 +915,9 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
         | UiEffect::PreviewMedia { operation, .. }
         | UiEffect::ReorderSession { operation, .. }
         | UiEffect::InterruptSubagent { operation, .. }
-        | UiEffect::SetSessionMode { operation, .. } => operation,
+        | UiEffect::SetSessionMode { operation, .. }
+        | UiEffect::ListAgentPresets { operation, .. }
+        | UiEffect::SelectAgentPreset { operation, .. } => operation,
     }
 }
 
@@ -906,6 +965,12 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
             operation: target, ..
         }
         | UiEffect::SetSessionMode {
+            operation: target, ..
+        }
+        | UiEffect::ListAgentPresets {
+            operation: target, ..
+        }
+        | UiEffect::SelectAgentPreset {
             operation: target, ..
         } => *target = operation,
     }
@@ -1009,6 +1074,14 @@ fn encode_async_request(
             }
             Some(("tui.setSessionMode", params))
         }
+        UiEffect::ListAgentPresets { .. } => Some(("agentPreset.list", json!({}))),
+        UiEffect::SelectAgentPreset { agent_preset, .. } => Some((
+            "agentPreset.select",
+            json!({
+                "sessionId": operation.session_id,
+                "agentPreset": agent_preset,
+            }),
+        )),
         UiEffect::AttachSession { .. } => None,
     };
     Ok(request)
@@ -1020,6 +1093,8 @@ struct DecodedAsyncResult {
     session_search: Option<dsh_pager_protocol::SessionSearchValue>,
     file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
+    agent_preset_list: Option<AgentPresetListValue>,
+    selected_agent_preset: Option<String>,
 }
 
 fn decode_tui_result<T: serde::de::DeserializeOwned>(raw: Value) -> PagerResult<T> {
@@ -1040,6 +1115,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             session_search: None,
             file_references: None,
             attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
         });
     }
     if matches!(effect, UiEffect::SetSessionMode { .. }) {
@@ -1050,6 +1127,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             session_search: None,
             file_references: None,
             attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
         });
     }
     let value = unwrap_api_value(raw)?;
@@ -1061,6 +1140,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             session_search: None,
             file_references: None,
             attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
         });
     }
     if matches!(effect, UiEffect::SearchSessions { .. }) {
@@ -1071,6 +1152,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             session_search: Some(session_search),
             file_references: None,
             attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
         });
     }
     if matches!(effect, UiEffect::FileSearchQuery { .. }) {
@@ -1081,6 +1164,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             session_search: None,
             file_references: Some(file_references),
             attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
         });
     }
     if matches!(effect, UiEffect::PreviewMedia { .. }) {
@@ -1090,6 +1175,32 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             session_search: None,
             file_references: None,
             attachment_preview: Some(parse_attachment_preview(value)?),
+            agent_preset_list: None,
+            selected_agent_preset: None,
+        });
+    }
+    if matches!(effect, UiEffect::ListAgentPresets { .. }) {
+        let agent_preset_list = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            session_list: None,
+            session_search: None,
+            file_references: None,
+            attachment_preview: None,
+            agent_preset_list: Some(agent_preset_list),
+            selected_agent_preset: None,
+        });
+    }
+    if matches!(effect, UiEffect::SelectAgentPreset { .. }) {
+        let selected: dsh_pager_protocol::AgentPresetSelectValue = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            session_list: None,
+            session_search: None,
+            file_references: None,
+            attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: Some(selected.agent_preset),
         });
     }
     let accepted = value
@@ -1102,6 +1213,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         session_search: None,
         file_references: None,
         attachment_preview: None,
+        agent_preset_list: None,
+        selected_agent_preset: None,
     })
 }
 
@@ -1174,6 +1287,8 @@ fn build_completion(
                 session_search: decoded.session_search,
                 file_references: decoded.file_references,
                 attachment_preview: decoded.attachment_preview,
+                agent_preset_list: decoded.agent_preset_list,
+                selected_agent_preset: decoded.selected_agent_preset,
             }
         }
         Ok(decoded) => UiEffectCompletion {
@@ -1188,6 +1303,8 @@ fn build_completion(
             session_search: decoded.session_search,
             file_references: decoded.file_references,
             attachment_preview: decoded.attachment_preview,
+            agent_preset_list: decoded.agent_preset_list,
+            selected_agent_preset: decoded.selected_agent_preset,
         },
         Err(error) => UiEffectCompletion {
             effect,
@@ -1201,6 +1318,8 @@ fn build_completion(
             session_search: None,
             file_references: None,
             attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
         },
     }
 }
@@ -1342,6 +1461,62 @@ mod tests {
         assert_eq!(method, "tui.setSessionMode");
         assert_eq!(params["sessionId"], "s");
         assert_eq!(params["modeId"], "plan");
+    }
+
+    #[test]
+    fn agent_preset_effects_encode_list_and_select() {
+        let session = SessionState::new("s".into(), 3);
+        let list = compile_intent(
+            UiIntent::ListAgentPresets { revision: 4 },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::ListAgentPresets {
+            operation,
+            revision,
+        } = list
+        else {
+            panic!("expected list-agent-presets");
+        };
+        assert_eq!(operation.action, "list-agent-presets");
+        assert_eq!(revision, 4);
+        let (method, params) = encode_async_request(
+            &UiEffect::ListAgentPresets {
+                operation: operation.clone(),
+                revision: 4,
+            },
+            &operation,
+        )
+        .expect("encode")
+        .expect("supported");
+        assert_eq!(method, "agentPreset.list");
+        assert_eq!(params, json!({}));
+
+        let select = compile_intent(
+            UiIntent::SelectAgentPreset {
+                agent_preset: "code".into(),
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::SelectAgentPreset {
+            operation,
+            agent_preset,
+        } = select
+        else {
+            panic!("expected select-agent-preset");
+        };
+        assert_eq!(agent_preset, "code");
+        let (method, params) = encode_async_request(
+            &UiEffect::SelectAgentPreset {
+                operation: operation.clone(),
+                agent_preset: "code".into(),
+            },
+            &operation,
+        )
+        .expect("encode")
+        .expect("supported");
+        assert_eq!(method, "agentPreset.select");
+        assert_eq!(params["sessionId"], "s");
+        assert_eq!(params["agentPreset"], "code");
     }
 
     #[test]

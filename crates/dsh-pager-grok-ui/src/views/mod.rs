@@ -23,6 +23,7 @@ pub mod interaction;
 pub mod modal_window;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/permission_view.rs"]
 pub mod permission_view;
+pub mod preset_picker;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/progress_bar.rs"]
 pub mod progress_bar;
 pub mod prompt_contract;

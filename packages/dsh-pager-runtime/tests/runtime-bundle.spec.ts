@@ -32,7 +32,10 @@ describe('@dsh-pager-grok/runtime bundle', () => {
     )
     const rows = new Map<string, EntryOptions>()
     for (const row of applyEntryPatches(
-      [{ id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr' }],
+      [
+        { id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr' },
+        { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
+      ],
       loadPatch(),
       () => {},
     )) {
@@ -43,6 +46,9 @@ describe('@dsh-pager-grok/runtime bundle', () => {
       '@dsh-pager-grok/runtime/recovery',
     )
     expect(rows.get('tui-server')?.name).toBe('@dsh-pager-grok/runtime/server')
+    expect(rows.get('agent-presets')?.name).toBe('@deepseek-ai/dsh-agent-presets')
+    expect(rows.get('cordis-host-runner')?.name).toBe('@deepseek-ai/dsh-cordis-host-runner')
+    expect(rows.get('tool-bash')?.disabled).toBe(true)
     expect(rows.has('webserver')).toBe(false)
   })
 })

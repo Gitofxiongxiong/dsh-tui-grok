@@ -1,18 +1,19 @@
 use dsh_pager_protocol::{
-    AcceptedResult, ApiResult, FileReferencesListValue, PromptContentPart, PromptMode, QueueAction,
-    SessionCancelParams, SessionCreateValue, SessionForkParams, SessionForkResult,
-    SessionHistoryValue, SessionListValue, SessionModeId, SessionPromptParams, SessionPromptResult,
-    SessionRenameParams, SessionRenameResult, SessionSearchValue, SessionUpdateQueueParams,
-    SubagentAddress, SubagentHistoryValue, SubagentInterruptParams, SubagentInterruptResult,
-    SubagentListValue, SubagentMode, SubagentPromptParams, SubagentPromptResult, TuiAttachParams,
-    TuiAttachResult, TuiDetachParams, TuiHelloResult, TuiInteractionResponse, TuiRespondParams,
-    TuiRespondResult, TuiSetSessionModeParams, TuiSetSessionModeResult, TuiSubscribeParams,
-    TuiSubscribeResult, TuiSubscribeScope, WorkspaceArchiveSessionParams,
-    WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
+    AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult,
+    FileReferencesListValue, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
+    SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
+    SessionListValue, SessionModeId, SessionPromptParams, SessionPromptResult, SessionRenameParams,
+    SessionRenameResult, SessionSearchValue, SessionUpdateQueueParams, SubagentAddress,
+    SubagentHistoryValue, SubagentInterruptParams, SubagentInterruptResult, SubagentListValue,
+    SubagentMode, SubagentPromptParams, SubagentPromptResult, TuiAttachParams, TuiAttachResult,
+    TuiDetachParams, TuiHelloResult, TuiInteractionResponse, TuiRespondParams, TuiRespondResult,
+    TuiSetSessionModeParams, TuiSetSessionModeResult, TuiSubscribeParams, TuiSubscribeResult,
+    TuiSubscribeScope, WorkspaceArchiveSessionParams, WorkspaceArchiveSessionValue,
+    WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
     WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -769,7 +770,7 @@ fn choose_session(
 ) -> PagerResult<String> {
     match choice {
         SessionChoice::Id(session_id) => Ok(session_id),
-        SessionChoice::New => create_session(transport, cwd),
+        SessionChoice::New => create_session(transport, cwd, None),
         SessionChoice::Search(query) => {
             let result = search_sessions(transport, &query)?;
             result
@@ -795,15 +796,55 @@ fn choose_session(
                 });
             match recent {
                 Some(item) => Ok(item.session_id.clone()),
-                None => create_session(transport, cwd),
+                None => create_session(transport, cwd, None),
             }
         }
     }
 }
 
-fn create_session(transport: &mut RpcTransport, cwd: &str) -> PagerResult<String> {
-    let created: SessionCreateValue = api_call(transport, "session.create", json!({ "cwd": cwd }))?;
-    Ok(created.session_id)
+fn create_session(
+    transport: &mut RpcTransport,
+    cwd: &str,
+    agent_preset: Option<&str>,
+) -> PagerResult<String> {
+    Ok(create_blank_session(transport, cwd, agent_preset)?.session_id)
+}
+
+/// Create a blank session, optionally naming the agent preset it should run.
+pub fn create_blank_session(
+    transport: &mut RpcTransport,
+    cwd: &str,
+    agent_preset: Option<&str>,
+) -> PagerResult<SessionCreateValue> {
+    let mut params = json!({ "cwd": cwd });
+    if let Some(preset) = agent_preset
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        params["agentPreset"] = json!(preset);
+    }
+    api_call(transport, "session.create", params)
+}
+
+/// List the deployment's agent-preset roster.
+pub fn list_agent_presets(transport: &mut RpcTransport) -> PagerResult<AgentPresetListValue> {
+    api_call(transport, "agentPreset.list", json!({}))
+}
+
+/// Recompose a blank session onto another roster preset.
+pub fn select_agent_preset(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    agent_preset: &str,
+) -> PagerResult<AgentPresetSelectValue> {
+    api_call(
+        transport,
+        "agentPreset.select",
+        json!({
+            "sessionId": session_id,
+            "agentPreset": agent_preset,
+        }),
+    )
 }
 
 fn fetch_tail(transport: &mut RpcTransport, session_id: &str) -> PagerResult<SessionHistoryValue> {

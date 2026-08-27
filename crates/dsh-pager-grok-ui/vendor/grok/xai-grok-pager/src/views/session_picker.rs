@@ -30,6 +30,7 @@ pub struct SessionPickerEntry {
     pub updated_at_ms: u64,
     pub cwd: String,
     pub model_id: Option<String>,
+    pub agent_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +556,9 @@ impl ResumePickerState {
                     if let Some(model) = entry.model_id.as_deref() {
                         fields.push(("Model".to_string(), model.to_string()));
                     }
+                    if let Some(preset) = entry.agent_preset.as_deref() {
+                        fields.push(("Preset".to_string(), preset.to_string()));
+                    }
                     fields.push((
                         "Updated".to_string(),
                         format_time_ago_at(entry.updated_at_ms, now_ms)
@@ -617,6 +621,9 @@ impl ResumePickerState {
                     fields.push(("CWD".to_string(), entry.cwd.clone()));
                     if let Some(model) = entry.model_id.as_deref() {
                         fields.push(("Model".to_string(), model.to_string()));
+                    }
+                    if let Some(preset) = entry.agent_preset.as_deref() {
+                        fields.push(("Preset".to_string(), preset.to_string()));
                     }
                 }
                 fields.push(("Source".to_string(), "DSH".to_string()));
@@ -725,6 +732,7 @@ mod tests {
             updated_at_ms,
             cwd: cwd.to_string(),
             model_id: Some("deepseek-chat".to_string()),
+            agent_preset: None,
         }
     }
 

@@ -28,7 +28,6 @@
 
 use std::time::{Duration, Instant};
 
-use dsh_pager_protocol::SessionModeId;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -483,15 +482,15 @@ pub fn render_welcome(
     area: Rect,
     elapsed: Duration,
     model: &str,
-    mode: SessionModeId,
+    preset: &str,
     theme: &Theme,
 ) -> WelcomeLayout {
     buf.set_style(area, Style::default().bg(theme.bg_base));
     if area.width >= WIDE_MIN_WIDTH && area.height >= WIDE_MIN_HEIGHT {
-        render_wide(buf, area, opening_frame(elapsed), model, mode, theme);
+        render_wide(buf, area, opening_frame(elapsed), model, preset, theme);
         WelcomeLayout::Wide
     } else {
-        render_compact(buf, area, model, mode, theme);
+        render_compact(buf, area, model, preset, theme);
         WelcomeLayout::Compact
     }
 }
@@ -524,7 +523,7 @@ fn render_wide(
     area: Rect,
     frame_index: usize,
     model: &str,
-    mode: SessionModeId,
+    preset: &str,
     theme: &Theme,
 ) {
     let group_width = WIDE_MIN_WIDTH.min(area.width);
@@ -554,16 +553,19 @@ fn render_wide(
         Span::styled("model  ", label_style),
         Span::styled(model, value_style),
     ]);
-    let mode_line = Line::from(vec![
-        Span::styled("mode   ", label_style),
-        Span::styled(mode.as_str(), value_style),
+    let preset_line = Line::from(vec![
+        Span::styled("preset ", label_style),
+        Span::styled(preset, value_style),
     ]);
     buf.set_line(text_x, group_y.saturating_add(4), &model_line, text_width);
-    buf.set_line(text_x, group_y.saturating_add(5), &mode_line, text_width);
+    buf.set_line(text_x, group_y.saturating_add(5), &preset_line, text_width);
 
     let tip = Line::from(vec![
         Span::styled("Tip: ", label_style),
-        Span::styled("Shift+Tab changes mode", value_style),
+        Span::styled(
+            "/preset changes agent · Shift+Tab plan/sandbox",
+            value_style,
+        ),
     ]);
     buf.set_line(text_x, group_y.saturating_add(8), &tip, text_width);
 
@@ -575,7 +577,7 @@ fn render_wide(
     );
 }
 
-fn render_compact(buf: &mut Buffer, area: Rect, model: &str, mode: SessionModeId, theme: &Theme) {
+fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme: &Theme) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -594,7 +596,7 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, mode: SessionModeId
         render_centered(
             buf,
             Rect::new(area.x, y.saturating_add(1), area.width, 1),
-            &format!("{model} · {}", mode.as_str()),
+            &format!("{model} · {preset}"),
             Style::default().fg(theme.gray).bg(theme.bg_base),
         );
     }
@@ -602,7 +604,7 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, mode: SessionModeId
         render_centered(
             buf,
             Rect::new(area.x, y.saturating_add(2), area.width, 1),
-            "Shift+Tab changes mode",
+            "/preset changes agent",
             Style::default().fg(theme.gray_dim).bg(theme.bg_base),
         );
     }
@@ -753,7 +755,7 @@ mod tests {
                 wide_area,
                 Duration::ZERO,
                 "deepseek",
-                SessionModeId::Normal,
+                "标准模式",
                 theme,
             ),
             WelcomeLayout::Wide
@@ -766,7 +768,7 @@ mod tests {
                 compact_area,
                 Duration::ZERO,
                 "deepseek",
-                SessionModeId::Normal,
+                "标准模式",
                 theme,
             ),
             WelcomeLayout::Compact

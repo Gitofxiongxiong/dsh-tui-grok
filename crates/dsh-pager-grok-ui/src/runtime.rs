@@ -18,7 +18,8 @@ use crossterm::event::{
 use dsh_pager::dashboard::DashboardModel;
 use dsh_pager::{
     DshGeneration, DshInteraction, DshQueueItemId, DshRequestId, PagerError, PagerResult,
-    RpcTransport, SessionState, SessionUpdate, load_session_id, peek_session_tail, repair_tail,
+    RpcTransport, SessionState, SessionUpdate, create_blank_session, load_session_id,
+    peek_session_tail, repair_tail,
 };
 use dsh_pager_protocol::{PromptMode, QueueAction, SessionModeId, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
@@ -30,6 +31,7 @@ use ratatui::{
 };
 
 use crate::actions::{ActionId, ActionRegistry};
+use crate::agent_preset::current_agent_preset_label;
 use crate::app::{AppShell, HomeKeyState, KeyOwner, Overlay, ShellAction, ShellEvent};
 use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard;
@@ -82,6 +84,7 @@ use crate::views::{
         render_modal_window,
     },
     permission_view::{PermissionChoice, permission_view_height, render_permission_view},
+    preset_picker::{PresetPickerOutcome, PresetPickerState},
     prompt_contract::{
         PromptFlagContract, PromptGeometry, PromptInfoContract, PromptStyleContract,
     },
@@ -585,6 +588,13 @@ impl TranscriptViewportState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PickerKind {
+    #[default]
+    Resume,
+    AgentPreset,
+}
+
 #[derive(Debug, Default)]
 struct UiState {
     shell: AppShell,
@@ -595,6 +605,11 @@ struct UiState {
     scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
     scrollback_pane: DshScrollbackHost,
     resume_picker: ResumePickerState,
+    preset_picker: PresetPickerState,
+    picker_kind: PickerKind,
+    pending_agent_preset: Option<String>,
+    agent_preset_roster: Vec<dsh_pager_protocol::AgentPresetEntry>,
+    roster_requested: bool,
     modal: ModalWindowState,
     prompt: PromptEditor,
     prompt_renderer: GrokPromptRenderer,
@@ -777,6 +792,15 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &SessionState,
     ) -> PagerResult<()> {
+        if !self.roster_requested {
+            self.roster_requested = true;
+            let context = UiContext::from_session(session);
+            let _ = self.submit_effect(
+                transport,
+                UiIntent::ListAgentPresets { revision: 0 },
+                &context,
+            );
+        }
         let completions = {
             let (executor, ledger) = (&mut self.effect_executor, &mut self.effect_ledger);
             executor.poll(transport, ledger)?
@@ -806,6 +830,8 @@ impl UiState {
             UiEffect::InterruptSubagent { .. } => "Subagent interrupt",
             UiEffect::AttachSession { .. } => "Attach session",
             UiEffect::SetSessionMode { .. } => "Session mode",
+            UiEffect::ListAgentPresets { .. } => "Agent preset list",
+            UiEffect::SelectAgentPreset { .. } => "Agent preset",
         };
         if completion.receipt.operation.session_id.as_str() != session.session_id()
             || completion.receipt.operation.generation != DshGeneration::new(session.generation())
@@ -939,6 +965,45 @@ impl UiState {
                 self.pending_session_mode = None;
             }
         }
+        if let UiEffect::ListAgentPresets { revision, .. } = &completion.effect {
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                if let Some(list) = completion.agent_preset_list.clone() {
+                    self.agent_preset_roster = list.presets.clone();
+                    let _ = self.preset_picker.apply_entries(*revision, list.presets);
+                } else {
+                    let _ = self
+                        .preset_picker
+                        .fail_entries(*revision, "agentPreset.list returned no value");
+                }
+            } else {
+                let _ = self.preset_picker.fail_entries(
+                    *revision,
+                    completion
+                        .receipt
+                        .diagnostic
+                        .clone()
+                        .unwrap_or_else(|| "host rejected agentPreset.list".to_string()),
+                );
+            }
+            return;
+        }
+        if let UiEffect::SelectAgentPreset { agent_preset, .. } = &completion.effect {
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                let id = completion
+                    .selected_agent_preset
+                    .clone()
+                    .unwrap_or_else(|| agent_preset.clone());
+                self.pending_agent_preset = Some(id.clone());
+                let label = current_agent_preset_label(Some(&id), &self.agent_preset_roster);
+                self.status = Some(format!("Preset → {label}"));
+                self.preset_picker.close();
+                self.shell.close_overlay();
+            } else {
+                self.pending_agent_preset = None;
+                self.status = Some(receipt_status_message(&completion.receipt, subject));
+            }
+            return;
+        }
         if completion.receipt.status != UiEffectStatus::Accepted
             || matches!(
                 completion.effect,
@@ -1036,7 +1101,7 @@ impl UiState {
             .desired_height(prompt_geometry.textarea.width.max(1));
         let prompt_info = PromptInfoContract {
             model_name: snapshot.model.clone(),
-            flags: session_mode_flags(session_mode, theme),
+            flags: self.prompt_flags(&snapshot, session_mode, theme),
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
         };
@@ -1335,7 +1400,10 @@ impl UiState {
         self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
 
         if self.shell.overlay() == Overlay::Picker {
-            self.render_resume_picker(frame, area, compact);
+            match self.picker_kind {
+                PickerKind::Resume => self.render_resume_picker(frame, area, compact),
+                PickerKind::AgentPreset => self.render_preset_picker(frame, area, compact),
+            }
         } else if self.shell.overlay() == Overlay::Queue {
             self.render_queue(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::FileSearch {
@@ -1711,7 +1779,7 @@ impl UiState {
                 transcript_inner,
                 elapsed,
                 &snapshot.model,
-                snapshot.session_mode,
+                &self.agent_preset_label(snapshot),
                 theme,
             );
         }
@@ -1805,6 +1873,40 @@ impl UiState {
             self.frame as u64,
             now_epoch_ms(),
         );
+    }
+
+    fn render_preset_picker(&mut self, frame: &mut Frame<'_>, area: Rect, compact: bool) {
+        self.preset_picker.render(
+            frame.buffer_mut(),
+            area,
+            Theme::current(),
+            compact,
+            self.frame as u64,
+        );
+    }
+
+    fn agent_preset_label(&self, snapshot: &GrokHostSnapshot) -> String {
+        current_agent_preset_label(
+            self.pending_agent_preset
+                .as_deref()
+                .or(snapshot.agent_preset.as_deref()),
+            &self.agent_preset_roster,
+        )
+    }
+
+    fn prompt_flags(
+        &self,
+        snapshot: &GrokHostSnapshot,
+        session_mode: SessionModeId,
+        theme: &Theme,
+    ) -> Vec<PromptFlagContract> {
+        let mut flags = vec![PromptFlagContract {
+            text: self.agent_preset_label(snapshot),
+            color: None,
+            bold: true,
+        }];
+        flags.extend(session_mode_flags(session_mode, theme));
+        flags
     }
 
     fn render_queue(&mut self, frame: &mut Frame<'_>, area: Rect, snapshot: &GrokHostSnapshot) {
@@ -3122,7 +3224,7 @@ impl UiState {
     fn dispatch_local_slash_command(
         &mut self,
         transport: &mut RpcTransport,
-        session: &SessionState,
+        session: &mut SessionState,
     ) -> bool {
         match crate::slash::dispatch(self.prompt.text()) {
             crate::slash::DispatchResult::NotLocal => false,
@@ -3148,6 +3250,28 @@ impl UiState {
                 self.set_timestamps_enabled(enabled);
                 true
             }
+            crate::slash::DispatchResult::Action(crate::slash::Action::ShowPresetPicker) => {
+                self.open_preset_picker(transport, session);
+                self.prompt.reset();
+                self.suggestions.reset();
+                self.prompt_history_index = None;
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::PresetStatus) => {
+                self.show_preset_status(session, transport);
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::SelectPreset(id)) => {
+                self.select_agent_preset(transport, session, &id);
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::NewSession) => {
+                match self.start_new_session(transport, session) {
+                    Ok(()) => {}
+                    Err(error) => self.status = Some(format!("New session failed: {error}")),
+                }
+                true
+            }
         }
     }
 
@@ -3159,7 +3283,149 @@ impl UiState {
         self.status = Some(format!("Timestamps {}", if enabled { "on" } else { "off" }));
     }
 
+    fn open_preset_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        self.picker_kind = PickerKind::AgentPreset;
+        self.shell.open_picker();
+        let revision = self.preset_picker.open(
+            self.pending_agent_preset
+                .as_deref()
+                .or(snapshot.agent_preset.as_deref()),
+            !snapshot.session_blank,
+        );
+        if !self.agent_preset_roster.is_empty() {
+            let _ = self
+                .preset_picker
+                .apply_entries(revision, self.agent_preset_roster.clone());
+        }
+        let context = UiContext::from_session(session);
+        match self.submit_effect(transport, UiIntent::ListAgentPresets { revision }, &context) {
+            Ok(_) => self.status = None,
+            Err(error) => {
+                let message = format!("Agent preset list failed: {error}");
+                let _ = self.preset_picker.fail_entries(revision, message.clone());
+                self.status = Some(message);
+            }
+        }
+    }
+
+    fn show_preset_status(&mut self, session: &SessionState, transport: &RpcTransport) {
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        let label = self.agent_preset_label(&snapshot);
+        let lock = if snapshot.session_blank {
+            "blank, switchable"
+        } else {
+            "locked after first turn"
+        };
+        self.prompt.reset();
+        self.suggestions.reset();
+        self.prompt_history_index = None;
+        self.status = Some(format!("Preset: {label} ({lock})"));
+    }
+
+    fn select_agent_preset(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        agent_preset: &str,
+    ) {
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        self.prompt.reset();
+        self.suggestions.reset();
+        self.prompt_history_index = None;
+        if !snapshot.session_blank {
+            self.status = Some(
+                "Agent preset is locked after the first turn; /new starts a blank session".into(),
+            );
+            return;
+        }
+        self.pending_agent_preset = Some(agent_preset.to_string());
+        match self.submit_effect(
+            transport,
+            UiIntent::SelectAgentPreset {
+                agent_preset: agent_preset.to_string(),
+            },
+            &UiContext::from_session(session),
+        ) {
+            Ok(receipt)
+                if matches!(
+                    receipt.status,
+                    UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+                ) =>
+            {
+                let label =
+                    current_agent_preset_label(Some(agent_preset), &self.agent_preset_roster);
+                self.status = Some(format!("Preset → {label}"));
+            }
+            Ok(receipt) => {
+                self.pending_agent_preset = None;
+                self.status = Some(receipt_status_message(&receipt, "Agent preset"));
+            }
+            Err(error) => {
+                self.pending_agent_preset = None;
+                self.status = Some(format!("Agent preset failed: {error}"));
+            }
+        }
+    }
+
+    fn start_new_session(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        let cwd = transport
+            .control_plane()
+            .snapshot(session.session_id())
+            .and_then(|snapshot| snapshot.cwd.clone())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| ".".to_string());
+        let requested = std::env::var("DSH_PAGER_PRESET")
+            .ok()
+            .or_else(|| std::env::var("DSH_TUI_PRESET").ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let created = create_blank_session(transport, &cwd, requested.as_deref())?;
+        match load_session_id(transport, session.generation(), created.session_id.clone()) {
+            Ok(next) => {
+                *session = next;
+                self.reset_transcript_view();
+                self.pending_agent_preset = created.agent_preset.or(requested);
+                self.welcome_animation.observe_session(session.session_id());
+                self.prompt.reset();
+                self.suggestions.reset();
+                self.prompt_history_index = None;
+                self.preset_picker.close();
+                self.resume_picker.close();
+                self.shell.close_overlay();
+                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                    session,
+                    Some(transport.control_plane()),
+                );
+                self.status = Some(format!(
+                    "New session · {}",
+                    self.agent_preset_label(&snapshot)
+                ));
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn open_resume_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
+        self.picker_kind = PickerKind::Resume;
         let cwd = transport
             .control_plane()
             .snapshot(session.session_id())
@@ -4230,12 +4496,40 @@ impl UiState {
         Ok(())
     }
 
+    fn handle_preset_picker_event(
+        &mut self,
+        event: Event,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> bool {
+        match self.preset_picker.handle_event(event) {
+            PresetPickerOutcome::Closed => {
+                self.preset_picker.close();
+                self.shell.close_overlay();
+                self.status = Some("Preset picker closed".into());
+                false
+            }
+            PresetPickerOutcome::Selected(id) => {
+                self.select_agent_preset(transport, session, &id);
+                false
+            }
+            PresetPickerOutcome::Changed => {
+                self.status = None;
+                false
+            }
+            PresetPickerOutcome::Unchanged => false,
+        }
+    }
+
     fn handle_picker_event(
         &mut self,
         event: Event,
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> bool {
+        if self.picker_kind == PickerKind::AgentPreset {
+            return self.handle_preset_picker_event(event, transport, session);
+        }
         match self.resume_picker.handle_event(event) {
             ResumePickerOutcome::Closed => {
                 self.resume_picker.close();
@@ -4767,6 +5061,8 @@ mod tests {
                 session_search: None,
                 file_references: None,
                 attachment_preview: None,
+                agent_preset_list: None,
+                selected_agent_preset: None,
             },
             &session,
         );
@@ -4924,7 +5220,8 @@ mod tests {
         assert!(wide.contains("/work/project"));
         assert!(wide.contains("DeepSeek Harness"));
         assert!(wide.contains("Explore the uncharted!"));
-        assert!(wide.contains("Shift+Tab changes mode"));
+        assert!(wide.contains("/preset changes agent"));
+        assert!(wide.contains("preset"));
         assert!(!wide.contains("private-session-id"));
         assert!(!wide.contains("No transcript events yet"));
         assert!(wide_buffer.content.iter().any(|cell| {
@@ -4943,7 +5240,7 @@ mod tests {
             .expect("render compact welcome");
         let compact = buffer_text(compact_terminal.backend().buffer(), 40, 12);
         assert!(compact.contains("DeepSeek Harness"));
-        assert!(compact.contains("Shift+Tab changes mode"));
+        assert!(compact.contains("/preset changes agent"));
         assert!(!compact.contains("Explore the uncharted!"));
         assert!(!compact.contains("private-session-id"));
     }

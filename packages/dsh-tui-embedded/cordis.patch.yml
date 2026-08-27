@@ -1,7 +1,8 @@
 # The dsh-tui-embedded bundle patch: the Embedded native-TUI backend over
 # dsh-base. Stdout is reserved for TUI JSON-RPC frames. It mounts no HTTP
-# server, Web runtime, or browser plugin. Agent tools stay in the host plane
-# (the same process-wide composition the in-process TUI uses).
+# server, Web runtime, or browser plugin. Model-facing tools and prompt
+# sections come from a per-session agent preset; host-plane registries stay
+# in dsh-base.
 
 - id: system-prompt
   config:
@@ -16,8 +17,9 @@
 
 - id: tools
   config:
-    # Keep the same temporary process-wide Code Mode opt-in as the other
-    # surfaces. Unset keeps the schema default (native).
+    # TEMPORARY process-wide Code Mode opt-in. Unset keeps the schema default
+    # (native). Per-session Code Mode is the `code` agent preset; do not set
+    # this when sessions should choose a preset independently.
     mode: !!js process.env.DSH_TOOLS_MODE
 
 - insert:
@@ -72,3 +74,93 @@
 
     - id: tui-server
       name: '@dsh-pager-grok/tui-server'
+
+# ── the agent plane moves behind agent presets ─────────────────────────────
+#
+# Every row below composes what ONE agent contributes to the host registries.
+# Disabling rather than deleting is deliberate: the base is shared, and a row
+# absent from a surface overlay would silently reappear if composition order
+# changes. Host-plane services (sandbox, approval, persistence, llm, goals
+# service, subagent registry, token meter, shell-env) stay enabled.
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-jobs
+  disabled: true
+
+- id: tool-fs
+  disabled: true
+
+- id: tool-fs-search
+  disabled: true
+
+- id: tool-str-replace-editor
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- id: tool-goal
+  disabled: true
+
+- id: plan-mode
+  disabled: true
+
+- id: compaction-basic
+  disabled: true
+
+- id: command-compact
+  disabled: true
+
+- id: tool-result-pruner
+  disabled: true
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- id: workflow-worker-thread
+  disabled: true
+
+- id: tool-workflow
+  disabled: true
+
+- id: tool-ralph
+  disabled: true
+
+- id: agent-instructions
+  disabled: true
+
+- id: tool-todo
+  disabled: true
+
+- id: tool-web
+  disabled: true
+
+# The preset roster. `id` MUST stay `agent-presets` so CLI profile-boot can
+# inject the shipped `config/agent-presets/` system root. The writable user
+# root is `dsh-agent-presets`' own `includeUserRoot` default.
+- insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
+    # Host-plane runner the `cordis` preset's plugin-experimentation tools wait on.
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'

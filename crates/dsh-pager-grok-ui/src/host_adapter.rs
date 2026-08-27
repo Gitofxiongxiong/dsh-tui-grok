@@ -693,6 +693,10 @@ pub struct GrokHostSnapshot {
     pub turn_status: TurnStatusSnapshot,
     #[serde(default)]
     pub session_mode: SessionModeId,
+    #[serde(default)]
+    pub session_blank: bool,
+    #[serde(default)]
+    pub agent_preset: Option<String>,
     pub capabilities: CapabilityMatrix,
 }
 
@@ -741,6 +745,7 @@ pub fn resume_picker_entries(
                 .projection("model")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            agent_preset: None,
         });
     }
     entries
@@ -767,10 +772,8 @@ fn resume_picker_entry(
             .to_string(),
         updated_at_ms: finite_epoch_ms(summary.updated_at),
         cwd: summary.cwd.clone().unwrap_or_else(|| "unknown".to_string()),
-        model_id: summary
-            .agent_preset
-            .clone()
-            .or_else(|| projection(&["model", "modelId"]).map(str::to_string)),
+        model_id: projection(&["model", "modelId"]).map(str::to_string),
+        agent_preset: summary.agent_preset.clone(),
     }
 }
 
@@ -1001,6 +1004,13 @@ impl GrokHostSnapshot {
             context_usage,
             turn_status,
             session_mode: crate::session_mode::derive_session_mode(session),
+            session_blank: control_plane
+                .and_then(|store| store.snapshot(session.session_id()))
+                .and_then(|snapshot| snapshot.blank)
+                .unwrap_or(transcript_len == 0),
+            agent_preset: control_plane
+                .and_then(|store| store.snapshot(session.session_id()))
+                .and_then(|snapshot| snapshot.agent_preset.clone()),
             capabilities,
         }
     }
@@ -1077,6 +1087,8 @@ impl GrokHostSnapshot {
                 ..TurnStatusSnapshot::default()
             },
             session_mode: SessionModeId::Normal,
+            session_blank: false,
+            agent_preset: Some("standard".into()),
             capabilities: CapabilityMatrix::default(),
         }
     }
@@ -1725,6 +1737,8 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         context_usage: ContextUsageSnapshot::default(),
         turn_status: TurnStatusSnapshot::default(),
         session_mode: SessionModeId::Normal,
+        session_blank: false,
+        agent_preset: None,
         capabilities: CapabilityMatrix::default(),
     }
 }

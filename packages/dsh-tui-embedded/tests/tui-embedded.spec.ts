@@ -26,7 +26,13 @@ function loadPatch(root: string): PatchOptions[] {
 
 function composedRows(): Map<string, EntryOptions> {
   const patches = loadPatch(packageRoot)
-  const baseRows: EntryOptions[] = [{ id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr' }]
+  const baseRows: EntryOptions[] = [
+    { id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr' },
+    { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
+    { id: 'tool-str-replace-editor', name: '@deepseek-ai/dsh-tool-str-replace-editor' },
+    { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
+    { id: 'plan-mode', name: '@deepseek-ai/dsh-plan-mode' },
+  ]
   const rows = applyEntryPatches(baseRows, patches, () => {})
   const byId = new Map<string, EntryOptions>()
   for (const row of rows) {
@@ -64,9 +70,23 @@ describe('dsh-tui-embedded bundle', () => {
     expect(rows.get('session-list-projection-recovery')?.name)
       .toBe('@dsh-pager-grok/tui-session-projection-recovery')
     expect(rows.get('tui-server')?.name).toBe('@dsh-pager-grok/tui-server')
+    expect(rows.get('agent-presets')?.name).toBe('@deepseek-ai/dsh-agent-presets')
+    expect(rows.get('cordis-host-runner')?.name).toBe('@deepseek-ai/dsh-cordis-host-runner')
+    expect(rows.get('tool-bash')?.disabled).toBe(true)
+    expect(rows.get('tool-str-replace-editor')?.disabled).toBe(true)
+    expect(rows.get('compaction-basic')?.disabled).toBe(true)
+    expect(rows.get('plan-mode')?.disabled).toBe(true)
     expect(rows.has('webserver')).toBe(false)
     expect(rows.has('web-runtime')).toBe(false)
     expect(rows.has('headless-runner')).toBe(false)
     expect([...rows.keys()].some(id => id.startsWith('ui-'))).toBe(false)
+  })
+
+  it('declares the agent-preset roster packages the patch names', () => {
+    const manifest = JSON.parse(
+      readFileSync(resolve(packageRoot, 'package.json'), 'utf8'),
+    ) as { dependencies?: Record<string, string> }
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-agent-presets')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-cordis-host-runner')
   })
 })

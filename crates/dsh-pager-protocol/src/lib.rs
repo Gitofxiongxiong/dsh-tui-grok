@@ -522,6 +522,45 @@ pub struct SessionCreateValue {
     pub agent_preset: Option<String>,
 }
 
+/// Whether a roster preset ships with the deployment or was authored locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentPresetTrust {
+    System,
+    User,
+}
+
+/// One row returned by `agentPreset.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPresetEntry {
+    pub id: String,
+    pub trust: AgentPresetTrust,
+    pub is_default: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub broken: Option<String>,
+}
+
+/// Value returned by `agentPreset.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPresetListValue {
+    pub presets: Vec<AgentPresetEntry>,
+    pub authorable: bool,
+    pub has_document: bool,
+}
+
+/// Value returned by `agentPreset.select`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPresetSelectValue {
+    pub agent_preset: String,
+}
+
 /// Placement of one pending inbox item in the authoritative queue snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -819,6 +858,28 @@ mod tests {
             JsonRpcLine::Success(parsed) => assert_eq!(parsed.id, success.id),
             other => panic!("expected success, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_preset_list_round_trips_camel_case() {
+        let raw = serde_json::json!({
+            "presets": [{
+                "id": "standard",
+                "trust": "system",
+                "isDefault": true,
+                "name": "标准模式",
+                "description": "full coding agent"
+            }],
+            "authorable": true,
+            "hasDocument": false
+        });
+        let value: AgentPresetListValue = serde_json::from_value(raw).expect("list");
+        assert_eq!(value.presets[0].id, "standard");
+        assert_eq!(value.presets[0].trust, AgentPresetTrust::System);
+        assert!(value.presets[0].is_default);
+        assert_eq!(value.presets[0].name.as_deref(), Some("标准模式"));
+        assert!(value.authorable);
+        assert!(!value.has_document);
     }
 
     #[test]
