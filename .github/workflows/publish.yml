@@ -1,19 +1,19 @@
 # Trusted Publishing target for npm OIDC.
 # Bind every @dsh-pager-grok/* package on npmjs.com to this filename.
-# Does not npm publish yet. Fill in native → runtime → CLI jobs after dogfood.
 name: publish
 
 on:
   push:
     tags: ["v*"]
+    branches: [ci/trust-smoke]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  oidc-ready:
-    name: oidc-ready
+  trust-smoke:
+    name: trust-smoke
     runs-on: ubuntu-24.04
     environment: npm-release
     permissions:
@@ -25,9 +25,19 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - name: confirm OIDC permission is present
+      - name: enable pnpm
+        run: corepack enable && corepack prepare pnpm@11.20.0 --activate
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: build tui-protocol
+        run: pnpm --filter @dsh-pager-grok/tui-protocol run build
+      - name: publish prerelease via OIDC
+        working-directory: packages/dsh-tui-protocol
         run: |
-          echo "publish.yml is the Trusted Publisher workflow."
-          echo "Real npm publish (native then runtime then CLI) is not enabled yet."
+          set -euo pipefail
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
           test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          npm pkg delete private
+          npm version "0.1.1-trust.${GITHUB_RUN_ID}" --no-git-tag-version
+          npm publish --access public --tag trust-test
+          echo "published @dsh-pager-grok/tui-protocol@0.1.1-trust.${GITHUB_RUN_ID} tag=trust-test"
