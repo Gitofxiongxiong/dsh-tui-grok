@@ -9,8 +9,9 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gunzipSync } from 'node:zlib'
 import { copyPackageLicenses } from './copy-package-licenses.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -48,26 +49,103 @@ function copyLicenseFiles(packageDir) {
   copyPackageLicenses(packageDir, repoRoot)
 }
 
+function tarCString(bytes) {
+  const end = bytes.indexOf(0)
+  return bytes.subarray(0, end === -1 ? bytes.length : end).toString('utf8').replace(/\0+$/g, '')
+}
+
+function tarOctal(bytes) {
+  const text = tarCString(bytes).trim()
+  if (!text) return 0
+  const value = Number.parseInt(text, 8)
+  return Number.isFinite(value) ? value : 0
+}
+
+/**
+ * List gzip+ustar entries without PATH `tar`/`gzip`.
+ * Windows GHA `tar.exe` shells out to gzip and fails from Node spawnSync.
+ */
+export function listGzipTarEntries(tarball) {
+  let uncompressed
+  try {
+    uncompressed = gunzipSync(readFileSync(tarball))
+  } catch (error) {
+    fail(`cannot gunzip ${tarball}: ${error.message}`)
+  }
+  const entries = []
+  let offset = 0
+  while (offset + 512 <= uncompressed.length) {
+    const header = uncompressed.subarray(offset, offset + 512)
+    if (header.every((byte) => byte === 0)) {
+      break
+    }
+    const name = tarCString(header.subarray(0, 100))
+    const prefix = tarCString(header.subarray(345, 500))
+    const fullName = prefix ? `${prefix}/${name}` : name
+    const mode = tarOctal(header.subarray(100, 108))
+    const size = tarOctal(header.subarray(124, 136))
+    const typeflag = String.fromCharCode(header[156] || 0)
+    entries.push({ name: fullName.replace(/\\/g, '/'), mode, typeflag, size })
+    offset += 512 + Math.ceil(size / 512) * 512
+  }
+  return entries
+}
+
+function entryPath(entry) {
+  return entry.name.replace(/^package\//, '')
+}
+
 function auditTarball(pkg, tarball) {
-  const listing = run('tar', ['-tvf', tarball]).stdout
-  const lines = listing.split('\n').filter(Boolean)
+  const entries = listGzipTarEntries(tarball)
   for (const name of ['LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE']) {
-    const found = lines.some((line) => line.includes(`package/${name}`) || line.endsWith(name))
+    const found = entries.some((entry) => entryPath(entry) === name || entry.name.endsWith(`/${name}`))
     if (!found) {
       fail(`tarball is missing ${name}`)
     }
   }
+  const expectedBin = `bin/${pkg.bin}`
+  const bin = entries.find(
+    (entry) => entryPath(entry) === expectedBin || entry.name.endsWith(`/${pkg.bin}`),
+  )
+  if (!bin) {
+    fail(`tarball listing is missing ${expectedBin}`)
+  }
   if (pkg.os === 'win32') {
     return
   }
-  const binLine = lines.find((line) => line.includes(`bin/${pkg.bin}`))
-  if (!binLine) {
-    fail(`tarball listing is missing bin/${pkg.bin}`)
+  if ((bin.mode & 0o111) === 0) {
+    fail(`tarball ${expectedBin} is not executable: mode=${bin.mode.toString(8)}`)
   }
-  const mode = binLine.trim().split(/\s+/)[0]
-  if (!mode.includes('x')) {
-    fail(`tarball bin/${pkg.bin} is not executable: ${binLine}`)
+}
+
+function packInfo(parsed, pkg) {
+  if (Array.isArray(parsed)) {
+    return parsed[0]
   }
+  if (parsed && typeof parsed === 'object' && parsed.filename) {
+    return parsed
+  }
+  if (parsed && typeof parsed === 'object' && parsed[pkg.npm]) {
+    return parsed[pkg.npm]
+  }
+  const values = parsed && typeof parsed === 'object' ? Object.values(parsed) : []
+  if (values.length === 1 && values[0] && typeof values[0] === 'object') {
+    return values[0]
+  }
+  fail(`npm pack JSON missing ${pkg.npm} info:\n${JSON.stringify(parsed)}`)
+}
+
+function packedTarballPath(info, pkg) {
+  const fallback = `${pkg.npm.replace('@', '').replace('/', '-')}-${info.version}.tgz`
+  const filename = info.filename || fallback
+  if (isAbsolute(filename) && existsSync(filename)) {
+    return filename
+  }
+  const fromRoot = join(repoRoot, basename(filename))
+  if (existsSync(fromRoot)) {
+    return fromRoot
+  }
+  fail(`packed tarball not found at ${fromRoot} (filename=${filename})`)
 }
 
 function run(command, args, options = {}) {
@@ -207,16 +285,14 @@ function main() {
   const pack = runNpm(['pack', '--json', '--pack-destination', repoRoot], {
     cwd: packageDir,
   })
-  let info
+  let parsed
   try {
-    const parsed = JSON.parse(pack.stdout)
-    info = Array.isArray(parsed) ? parsed[0] : parsed
+    parsed = JSON.parse(pack.stdout)
   } catch {
     fail(`npm pack did not print JSON:\n${pack.stdout}`)
   }
-  const tarball = info.filename
-    ? join(repoRoot, info.filename)
-    : join(repoRoot, `${pkg.npm.replace('@', '').replace('/', '-')}-${info.version}.tgz`)
+  const info = packInfo(parsed, pkg)
+  const tarball = packedTarballPath(info, pkg)
 
   const names = (info.files || []).map((file) => (typeof file === 'string' ? file : file.path))
   const expectedBin = `bin/${pkg.bin}`
@@ -252,8 +328,12 @@ function main() {
   )
 }
 
-try {
-  main()
-} catch (error) {
-  fail(error?.stack || String(error))
+const invokedDirectly =
+  Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1])
+if (invokedDirectly) {
+  try {
+    main()
+  } catch (error) {
+    fail(error?.stack || String(error))
+  }
 }
