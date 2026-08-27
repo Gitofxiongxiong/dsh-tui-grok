@@ -31,12 +31,17 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: build tui-protocol
         run: pnpm --filter @dsh-pager-grok/tui-protocol run build
+      - name: install npm CLI for OIDC
+        run: |
+          npm install -g npm@11.15.0
+          npm -v
       - name: publish prerelease via OIDC
         working-directory: packages/dsh-tui-protocol
         run: |
           set -euo pipefail
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
           test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          npm -v
           npm pkg delete private
           npm version "0.1.1-trust.${GITHUB_RUN_ID}" --no-git-tag-version
           npm publish --access public --tag trust-test
