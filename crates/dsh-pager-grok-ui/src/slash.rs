@@ -4,10 +4,30 @@
 //! draft and decides whether a local command is consumed before a prompt
 //! effect is compiled.
 
+#[path = "../vendor/grok/xai-grok-pager/src/slash/commands/effort_levels.rs"]
+mod effort_levels;
+#[path = "../vendor/grok/xai-grok-pager/src/slash/commands/model.rs"]
+mod model;
 #[path = "../vendor/grok/xai-grok-pager/src/slash/commands/resume.rs"]
 mod resume;
 
+use crate::model_state::{ModelId, ModelState};
+pub use model::ModelCommand;
 use resume::ResumeCommand;
+
+/// A suggestion item for command argument completion.
+/// Copied from Grok `slash/command.rs`.
+#[derive(Debug, Clone)]
+pub struct ArgItem {
+    /// Display text shown in the dropdown.
+    pub display: String,
+    /// Text used for fuzzy matching.
+    pub match_text: String,
+    /// Text inserted into the prompt on acceptance.
+    pub insert_text: String,
+    /// Description shown alongside the item.
+    pub description: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -18,11 +38,18 @@ pub enum Action {
     SelectPreset(String),
     PresetStatus,
     NewSession,
+    ShowModelPicker,
+    SetDefaultModel(ModelId),
+    SwitchModel {
+        model_id: ModelId,
+        effort: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResult {
     Action(Action),
+    Error(String),
 }
 
 pub trait SlashCommand {
@@ -37,9 +64,11 @@ pub enum DispatchResult {
     NotLocal,
     Action(Action),
     InvalidUsage(&'static str),
+    Error(String),
 }
 
 const RESUME: ResumeCommand = ResumeCommand;
+const MODEL: ModelCommand = ModelCommand;
 const TIMESTAMPS_USAGE: &str = "/timestamps";
 const TIMESTAMPS_DESCRIPTION: &str = "Show or hide transcript timestamps";
 const TIMESTAMPS_USAGE_TEXT: &str = "/timestamps [on|off]";
@@ -49,8 +78,15 @@ const PRESET_USAGE_TEXT: &str = "/preset [status|<id>]";
 const NEW_USAGE: &str = "/new";
 const NEW_DESCRIPTION: &str = "Start a blank session and choose its agent preset";
 const NEW_USAGE_TEXT: &str = "/new";
+const MODEL_USAGE: &str = "/model";
+const MODEL_USAGE_TEXT: &str = "/model <name> [effort]";
+const MODEL_DESCRIPTION: &str = "Switch the active model";
 
 pub fn dispatch(input: &str) -> DispatchResult {
+    dispatch_with_models(input, &ModelState::default())
+}
+
+pub fn dispatch_with_models(input: &str, models: &ModelState) -> DispatchResult {
     let trimmed = input.trim();
     let Some(command) = trimmed.strip_prefix('/') else {
         return DispatchResult::NotLocal;
@@ -83,6 +119,13 @@ pub fn dispatch(input: &str) -> DispatchResult {
             }
             match RESUME.run(args) {
                 CommandResult::Action(action) => DispatchResult::Action(action),
+                CommandResult::Error(message) => DispatchResult::Error(message),
+            }
+        }
+        _ if name == MODEL.name() || MODEL.aliases().contains(&name) => {
+            match MODEL.run_with_models(models, args) {
+                CommandResult::Action(action) => DispatchResult::Action(action),
+                CommandResult::Error(message) => DispatchResult::Error(message),
             }
         }
         _ => DispatchResult::NotLocal,
@@ -103,7 +146,7 @@ pub fn merge_builtin_suggestions(items: &mut Vec<String>) {
     if !items.iter().any(|item| item == usage) {
         items.insert(0, usage.to_string());
     }
-    for extra in [PRESET_USAGE, NEW_USAGE, TIMESTAMPS_USAGE] {
+    for extra in [PRESET_USAGE, NEW_USAGE, MODEL_USAGE, TIMESTAMPS_USAGE] {
         if !items.iter().any(|item| item == extra) {
             items.push(extra.to_string());
         }
@@ -119,6 +162,8 @@ pub fn command_description(command: &str) -> Option<&'static str> {
         Some(PRESET_DESCRIPTION)
     } else if command == NEW_USAGE || command == NEW_USAGE_TEXT {
         Some(NEW_DESCRIPTION)
+    } else if command == MODEL_USAGE || command == MODEL_USAGE_TEXT || command == "/m" {
+        Some(MODEL_DESCRIPTION)
     } else {
         None
     }
@@ -138,8 +183,47 @@ mod tests {
             dispatch("/resume claude"),
             DispatchResult::InvalidUsage("/resume")
         );
-        assert_eq!(dispatch("/model"), DispatchResult::NotLocal);
+        assert_eq!(
+            dispatch("/model"),
+            DispatchResult::Error("Usage: /model <name> [effort]".into())
+        );
         assert_eq!(dispatch("explain /resume"), DispatchResult::NotLocal);
+    }
+
+    #[test]
+    fn model_resolves_catalog_name_and_effort() {
+        let mut models = ModelState::default();
+        models.available.push(crate::model_state::ModelInfo {
+            id: crate::model_state::ModelId::new("deepseek-official", "deepseek-chat"),
+            name: "DeepSeek Chat".into(),
+            description: None,
+            reasoning: None,
+            default_effort: None,
+        });
+        models.available.push(crate::model_state::ModelInfo {
+            id: crate::model_state::ModelId::new("deepseek-official", "deepseek-reasoner"),
+            name: "DeepSeek Reasoner".into(),
+            description: None,
+            reasoning: Some(vec![crate::model_state::ReasoningEffortOption {
+                id: "high".into(),
+                name: "high".into(),
+                description: None,
+            }]),
+            default_effort: Some("high".into()),
+        });
+        assert!(matches!(
+            dispatch_with_models("/model DeepSeek Chat", &models),
+            DispatchResult::Action(Action::SetDefaultModel(id)) if id.model == "deepseek-chat"
+        ));
+        assert!(matches!(
+            dispatch_with_models("/model DeepSeek Reasoner high", &models),
+            DispatchResult::Action(Action::SwitchModel { model_id, effort })
+                if model_id.model == "deepseek-reasoner" && effort.as_deref() == Some("high")
+        ));
+        assert!(matches!(
+            dispatch_with_models("/m DeepSeek Chat", &models),
+            DispatchResult::Action(Action::SetDefaultModel(_))
+        ));
     }
 
     #[test]
@@ -197,14 +281,28 @@ mod tests {
         merge_builtin_suggestions(&mut items);
         assert_eq!(
             items,
-            vec!["/help", "/resume", "/preset", "/new", "/timestamps"]
+            vec![
+                "/help",
+                "/resume",
+                "/preset",
+                "/new",
+                "/model",
+                "/timestamps"
+            ]
         );
 
         let mut missing = vec!["/help".to_string()];
         merge_builtin_suggestions(&mut missing);
         assert_eq!(
             missing,
-            vec!["/resume", "/help", "/preset", "/new", "/timestamps"]
+            vec![
+                "/resume",
+                "/help",
+                "/preset",
+                "/new",
+                "/model",
+                "/timestamps"
+            ]
         );
         assert_eq!(
             command_description("/resume"),

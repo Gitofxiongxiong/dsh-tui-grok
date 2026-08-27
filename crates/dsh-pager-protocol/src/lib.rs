@@ -561,6 +561,83 @@ pub struct AgentPresetSelectValue {
     pub agent_preset: String,
 }
 
+/// Complete provider/model selection returned by `session.models` / `session.selectModel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSelection {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+/// One adapter-owned reasoning effort in a catalog model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelReasoningEffort {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Exact-model reasoning metadata from `session.models`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelReasoning {
+    pub efforts: Vec<ModelReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+}
+
+/// One advisory model entry inside a provider group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogModel {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ModelReasoning>,
+}
+
+/// One successfully loaded provider group from `session.models`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderGroup {
+    pub id: String,
+    pub name: String,
+    pub models: Vec<ModelCatalogModel>,
+}
+
+/// One provider-local catalog failure from `session.models`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogFailure {
+    pub id: String,
+    pub name: String,
+    pub message: String,
+}
+
+/// Value returned by `session.models`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModelsValue {
+    pub current: ModelSelection,
+    pub routable: bool,
+    pub groups: Vec<ModelProviderGroup>,
+    #[serde(default)]
+    pub failures: Vec<ModelCatalogFailure>,
+}
+
+/// Value returned by `session.selectModel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSelectModelValue {
+    pub selected: ModelSelection,
+}
+
 /// Placement of one pending inbox item in the authoritative queue snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -880,6 +957,50 @@ mod tests {
         assert_eq!(value.presets[0].name.as_deref(), Some("标准模式"));
         assert!(value.authorable);
         assert!(!value.has_document);
+    }
+
+    #[test]
+    fn session_models_round_trips_camel_case() {
+        let raw = serde_json::json!({
+            "current": {
+                "provider": "deepseek-official",
+                "model": "deepseek-chat",
+                "reasoningEffort": "high"
+            },
+            "routable": true,
+            "groups": [{
+                "id": "deepseek-official",
+                "name": "DeepSeek",
+                "models": [{
+                    "id": "deepseek-chat",
+                    "name": "DeepSeek Chat",
+                    "description": "fast",
+                    "reasoning": {
+                        "efforts": [{"id": "high", "name": "High"}],
+                        "defaultEffort": "high"
+                    }
+                }]
+            }],
+            "failures": [{
+                "id": "other",
+                "name": "Other",
+                "message": "timed out"
+            }]
+        });
+        let value: SessionModelsValue = serde_json::from_value(raw).expect("models");
+        assert_eq!(value.current.provider, "deepseek-official");
+        assert_eq!(value.current.model, "deepseek-chat");
+        assert_eq!(value.current.reasoning_effort.as_deref(), Some("high"));
+        assert!(value.routable);
+        assert_eq!(value.groups[0].models[0].name, "DeepSeek Chat");
+        assert_eq!(
+            value.groups[0].models[0]
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.default_effort.as_deref()),
+            Some("high")
+        );
+        assert_eq!(value.failures[0].id, "other");
     }
 
     #[test]

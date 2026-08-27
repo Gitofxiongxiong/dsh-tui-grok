@@ -2,15 +2,15 @@ use dsh_pager_protocol::{
     AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult,
     FileReferencesListValue, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
     SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
-    SessionListValue, SessionModeId, SessionPromptParams, SessionPromptResult, SessionRenameParams,
-    SessionRenameResult, SessionSearchValue, SessionUpdateQueueParams, SubagentAddress,
-    SubagentHistoryValue, SubagentInterruptParams, SubagentInterruptResult, SubagentListValue,
-    SubagentMode, SubagentPromptParams, SubagentPromptResult, TuiAttachParams, TuiAttachResult,
-    TuiDetachParams, TuiHelloResult, TuiInteractionResponse, TuiRespondParams, TuiRespondResult,
-    TuiSetSessionModeParams, TuiSetSessionModeResult, TuiSubscribeParams, TuiSubscribeResult,
-    TuiSubscribeScope, WorkspaceArchiveSessionParams, WorkspaceArchiveSessionValue,
-    WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
-    WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
+    SessionListValue, SessionModeId, SessionModelsValue, SessionPromptParams, SessionPromptResult,
+    SessionRenameParams, SessionRenameResult, SessionSearchValue, SessionSelectModelValue,
+    SessionUpdateQueueParams, SubagentAddress, SubagentHistoryValue, SubagentInterruptParams,
+    SubagentInterruptResult, SubagentListValue, SubagentMode, SubagentPromptParams,
+    SubagentPromptResult, TuiAttachParams, TuiAttachResult, TuiDetachParams, TuiHelloResult,
+    TuiInteractionResponse, TuiRespondParams, TuiRespondResult, TuiSetSessionModeParams,
+    TuiSetSessionModeResult, TuiSubscribeParams, TuiSubscribeResult, TuiSubscribeScope,
+    WorkspaceArchiveSessionParams, WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams,
+    WorkspaceInsertSessionBeforeParams, WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -845,6 +845,40 @@ pub fn select_agent_preset(
             "agentPreset": agent_preset,
         }),
     )
+}
+
+/// Load the session-scoped model catalog and current selection.
+pub fn session_models(
+    transport: &mut RpcTransport,
+    session_id: &str,
+) -> PagerResult<SessionModelsValue> {
+    api_call(
+        transport,
+        "session.models",
+        json!({ "sessionId": session_id }),
+    )
+}
+
+/// Assign the model used at the next prompt-assembly boundary.
+pub fn select_session_model(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    provider: &str,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> PagerResult<SessionSelectModelValue> {
+    let mut params = json!({
+        "sessionId": session_id,
+        "provider": provider,
+        "model": model,
+    });
+    if let Some(effort) = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        params["reasoningEffort"] = json!(effort);
+    }
+    api_call(transport, "session.selectModel", params)
 }
 
 fn fetch_tail(transport: &mut RpcTransport, session_id: &str) -> PagerResult<SessionHistoryValue> {

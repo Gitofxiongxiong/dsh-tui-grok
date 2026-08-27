@@ -59,6 +59,7 @@ use crate::media::{
     MediaPreviewBuffer, MediaPreviewController, MediaPreviewDecision, render_image_preview_content,
 };
 use crate::modal_window_state::ModalWindowState;
+use crate::model_state::{ModelId, ModelState};
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
 use crate::scrollback_adapter::{host_pane::DshScrollbackHost, tick::animation_tick};
@@ -83,6 +84,7 @@ use crate::views::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
         render_modal_window,
     },
+    model_picker::{ModelPickerOutcome, ModelPickerState},
     permission_view::{PermissionChoice, permission_view_height, render_permission_view},
     preset_picker::{PresetPickerOutcome, PresetPickerState},
     prompt_contract::{
@@ -593,6 +595,7 @@ enum PickerKind {
     #[default]
     Resume,
     AgentPreset,
+    Model,
 }
 
 #[derive(Debug, Default)]
@@ -606,7 +609,11 @@ struct UiState {
     scrollback_pane: DshScrollbackHost,
     resume_picker: ResumePickerState,
     preset_picker: PresetPickerState,
+    model_picker: ModelPickerState,
     picker_kind: PickerKind,
+    models: ModelState,
+    models_for_session: Option<String>,
+    pending_model: Option<ModelId>,
     pending_agent_preset: Option<String>,
     agent_preset_roster: Vec<dsh_pager_protocol::AgentPresetEntry>,
     roster_requested: bool,
@@ -801,6 +808,9 @@ impl UiState {
                 &context,
             );
         }
+        if self.models_for_session.as_deref() != Some(session.session_id()) {
+            self.request_session_models(transport, session, 0);
+        }
         let completions = {
             let (executor, ledger) = (&mut self.effect_executor, &mut self.effect_ledger);
             executor.poll(transport, ledger)?
@@ -832,6 +842,8 @@ impl UiState {
             UiEffect::SetSessionMode { .. } => "Session mode",
             UiEffect::ListAgentPresets { .. } => "Agent preset list",
             UiEffect::SelectAgentPreset { .. } => "Agent preset",
+            UiEffect::ListSessionModels { .. } => "Model list",
+            UiEffect::SelectSessionModel { .. } => "Model",
         };
         if completion.receipt.operation.session_id.as_str() != session.session_id()
             || completion.receipt.operation.generation != DshGeneration::new(session.generation())
@@ -1004,6 +1016,70 @@ impl UiState {
             }
             return;
         }
+        if let UiEffect::ListSessionModels { revision, .. } = &completion.effect {
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                if let Some(value) = completion.session_models.clone() {
+                    self.models.apply_session_models(value);
+                    self.pending_model = None;
+                    let _ = self.model_picker.apply_catalog(*revision, &self.models);
+                } else {
+                    let _ = self
+                        .model_picker
+                        .fail_entries(*revision, "session.models returned no value");
+                }
+            } else {
+                let _ = self.model_picker.fail_entries(
+                    *revision,
+                    completion
+                        .receipt
+                        .diagnostic
+                        .clone()
+                        .unwrap_or_else(|| "host rejected session.models".to_string()),
+                );
+            }
+            return;
+        }
+        if let UiEffect::SelectSessionModel {
+            provider,
+            model,
+            reasoning_effort,
+            ..
+        } = &completion.effect
+        {
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                let selected = completion.selected_model.clone().unwrap_or(
+                    dsh_pager_protocol::ModelSelection {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        reasoning_effort: reasoning_effort.clone(),
+                    },
+                );
+                let id = ModelId::from(&selected);
+                self.models
+                    .set_current(id.clone(), selected.reasoning_effort.clone());
+                self.pending_model = Some(id);
+                let display_name = self.models.display_name_for(&ModelId::from(&selected));
+                let msg = if let Some(eff) = selected.reasoning_effort.as_deref() {
+                    format!("Switched to {display_name} ({eff} effort)")
+                } else {
+                    format!("Switched to {display_name}")
+                };
+                self.status = Some(msg);
+                self.model_picker.close();
+                if self.picker_kind == PickerKind::Model {
+                    self.shell.close_overlay();
+                }
+            } else {
+                self.pending_model = None;
+                let diagnostic = completion
+                    .receipt
+                    .diagnostic
+                    .clone()
+                    .unwrap_or_else(|| receipt_status_message(&completion.receipt, subject));
+                self.status = Some(format!("Couldn't switch model: {diagnostic}"));
+            }
+            return;
+        }
         if completion.receipt.status != UiEffectStatus::Accepted
             || matches!(
                 completion.effect,
@@ -1100,7 +1176,10 @@ impl UiState {
             .prompt
             .desired_height(prompt_geometry.textarea.width.max(1));
         let prompt_info = PromptInfoContract {
-            model_name: snapshot.model.clone(),
+            model_name: self
+                .models
+                .current_model_name()
+                .unwrap_or_else(|| snapshot.model.clone()),
             flags: self.prompt_flags(&snapshot, session_mode, theme),
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
@@ -1403,6 +1482,7 @@ impl UiState {
             match self.picker_kind {
                 PickerKind::Resume => self.render_resume_picker(frame, area, compact),
                 PickerKind::AgentPreset => self.render_preset_picker(frame, area, compact),
+                PickerKind::Model => self.render_model_picker(frame, area, compact),
             }
         } else if self.shell.overlay() == Overlay::Queue {
             self.render_queue(frame, area, &snapshot);
@@ -1883,6 +1963,11 @@ impl UiState {
             compact,
             self.frame as u64,
         );
+    }
+
+    fn render_model_picker(&mut self, frame: &mut Frame<'_>, area: Rect, compact: bool) {
+        self.model_picker
+            .render(frame.buffer_mut(), area, Theme::current(), compact);
     }
 
     fn agent_preset_label(&self, snapshot: &GrokHostSnapshot) -> String {
@@ -2477,6 +2562,10 @@ impl UiState {
             }
             ShellAction::CycleSessionMode => {
                 self.cycle_session_mode(transport, session)?;
+                Ok(false)
+            }
+            ShellAction::OpenModelPicker => {
+                self.open_model_picker(transport, session);
                 Ok(false)
             }
             ShellAction::ScrollUp(amount) => {
@@ -3226,10 +3315,14 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> bool {
-        match crate::slash::dispatch(self.prompt.text()) {
+        match crate::slash::dispatch_with_models(self.prompt.text(), &self.models) {
             crate::slash::DispatchResult::NotLocal => false,
             crate::slash::DispatchResult::InvalidUsage(usage) => {
                 self.status = Some(format!("Usage: {usage}"));
+                true
+            }
+            crate::slash::DispatchResult::Error(message) => {
+                self.status = Some(message);
                 true
             }
             crate::slash::DispatchResult::Action(crate::slash::Action::ShowSessionPicker) => {
@@ -3272,6 +3365,24 @@ impl UiState {
                 }
                 true
             }
+            crate::slash::DispatchResult::Action(crate::slash::Action::ShowModelPicker) => {
+                self.open_model_picker(transport, session);
+                self.prompt.reset();
+                self.suggestions.reset();
+                self.prompt_history_index = None;
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::SetDefaultModel(id)) => {
+                self.select_session_model(transport, session, id, None);
+                true
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::SwitchModel {
+                model_id,
+                effort,
+            }) => {
+                self.select_session_model(transport, session, model_id, effort);
+                true
+            }
         }
     }
 
@@ -3281,6 +3392,104 @@ impl UiState {
         self.suggestions.reset();
         self.prompt_history_index = None;
         self.status = Some(format!("Timestamps {}", if enabled { "on" } else { "off" }));
+    }
+
+    fn request_session_models(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        revision: u64,
+    ) {
+        self.models_for_session = Some(session.session_id().to_string());
+        let context = UiContext::from_session(session);
+        let _ = self.submit_effect(
+            transport,
+            UiIntent::ListSessionModels { revision },
+            &context,
+        );
+    }
+
+    fn open_model_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
+        self.picker_kind = PickerKind::Model;
+        self.shell.open_picker();
+        let revision = self.model_picker.open(&self.models);
+        self.request_session_models(transport, session, revision);
+        self.status = None;
+    }
+
+    fn apply_model_slash(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        command: &str,
+    ) {
+        match crate::slash::dispatch_with_models(command, &self.models) {
+            crate::slash::DispatchResult::Action(crate::slash::Action::SetDefaultModel(id)) => {
+                self.select_session_model(transport, session, id, None);
+            }
+            crate::slash::DispatchResult::Action(crate::slash::Action::SwitchModel {
+                model_id,
+                effort,
+            }) => {
+                self.select_session_model(transport, session, model_id, effort);
+            }
+            crate::slash::DispatchResult::Error(message) => {
+                self.status = Some(message);
+            }
+            crate::slash::DispatchResult::InvalidUsage(usage) => {
+                self.status = Some(format!("Usage: {usage}"));
+            }
+            _ => {
+                self.status = Some(format!("Unknown model: {command}"));
+            }
+        }
+    }
+
+    fn select_session_model(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        model_id: ModelId,
+        effort: Option<String>,
+    ) {
+        self.prompt.reset();
+        self.suggestions.reset();
+        self.prompt_history_index = None;
+        self.pending_model = Some(model_id.clone());
+        // Grok SetDefaultModel is optimistic; keep caption in sync while RPC is in flight.
+        if effort.is_none() {
+            self.models.set_current(model_id.clone(), None);
+        }
+        match self.submit_effect(
+            transport,
+            UiIntent::SelectSessionModel {
+                provider: model_id.provider.clone(),
+                model: model_id.model.clone(),
+                reasoning_effort: effort,
+            },
+            &UiContext::from_session(session),
+        ) {
+            Ok(receipt)
+                if matches!(
+                    receipt.status,
+                    UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+                ) =>
+            {
+                let display = self.models.display_name_for(&model_id);
+                self.status = Some(format!("Switching to {display}…"));
+            }
+            Ok(receipt) => {
+                self.pending_model = None;
+                self.status = Some(format!(
+                    "Couldn't switch model: {}",
+                    receipt_status_message(&receipt, "Model")
+                ));
+            }
+            Err(error) => {
+                self.pending_model = None;
+                self.status = Some(format!("Couldn't switch model: {error}"));
+            }
+        }
     }
 
     fn open_preset_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
@@ -3403,6 +3612,10 @@ impl UiState {
                 *session = next;
                 self.reset_transcript_view();
                 self.pending_agent_preset = created.agent_preset.or(requested);
+                self.models = ModelState::default();
+                self.models_for_session = None;
+                self.pending_model = None;
+                self.model_picker.close();
                 self.welcome_animation.observe_session(session.session_id());
                 self.prompt.reset();
                 self.suggestions.reset();
@@ -4521,6 +4734,33 @@ impl UiState {
         }
     }
 
+    fn handle_model_picker_event(
+        &mut self,
+        event: Event,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> bool {
+        match self.model_picker.handle_event(event, &self.models) {
+            ModelPickerOutcome::Closed => {
+                self.model_picker.close();
+                self.shell.close_overlay();
+                self.status = Some("Model picker closed".into());
+                false
+            }
+            ModelPickerOutcome::Submit(command) => {
+                self.model_picker.close();
+                self.shell.close_overlay();
+                self.apply_model_slash(transport, session, &command);
+                false
+            }
+            ModelPickerOutcome::Changed => {
+                self.status = None;
+                false
+            }
+            ModelPickerOutcome::Unchanged => false,
+        }
+    }
+
     fn handle_picker_event(
         &mut self,
         event: Event,
@@ -4529,6 +4769,9 @@ impl UiState {
     ) -> bool {
         if self.picker_kind == PickerKind::AgentPreset {
             return self.handle_preset_picker_event(event, transport, session);
+        }
+        if self.picker_kind == PickerKind::Model {
+            return self.handle_model_picker_event(event, transport, session);
         }
         match self.resume_picker.handle_event(event) {
             ResumePickerOutcome::Closed => {
@@ -5063,6 +5306,8 @@ mod tests {
                 attachment_preview: None,
                 agent_preset_list: None,
                 selected_agent_preset: None,
+                session_models: None,
+                selected_model: None,
             },
             &session,
         );

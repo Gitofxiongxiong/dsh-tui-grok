@@ -21,6 +21,7 @@ pub mod interaction;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]
 #[allow(dead_code)]
 pub mod modal_window;
+pub mod model_picker;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/permission_view.rs"]
 pub mod permission_view;
 pub mod preset_picker;

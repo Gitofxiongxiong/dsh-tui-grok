@@ -26,6 +26,7 @@ pub mod effects;
 pub mod geometry;
 pub mod host_adapter;
 pub mod media;
+pub mod model_state;
 pub mod parity;
 pub mod runtime;
 pub mod scheduler;

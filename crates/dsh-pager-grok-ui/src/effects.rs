@@ -7,8 +7,8 @@ use dsh_pager::{
     RpcTransport, SessionState,
 };
 use dsh_pager_protocol::{
-    AgentPresetListValue, PromptMode, QueueAction, SessionModeId, SubagentAddress,
-    TuiInteractionResponse,
+    AgentPresetListValue, ModelSelection, PromptMode, QueueAction, SessionModeId,
+    SessionModelsValue, SubagentAddress, TuiInteractionResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -73,6 +73,14 @@ pub enum UiIntent {
     },
     SelectAgentPreset {
         agent_preset: String,
+    },
+    ListSessionModels {
+        revision: u64,
+    },
+    SelectSessionModel {
+        provider: String,
+        model: String,
+        reasoning_effort: Option<String>,
     },
 }
 
@@ -248,6 +256,16 @@ pub enum UiEffect {
         operation: OperationKey,
         agent_preset: String,
     },
+    ListSessionModels {
+        operation: OperationKey,
+        revision: u64,
+    },
+    SelectSessionModel {
+        operation: OperationKey,
+        provider: String,
+        model: String,
+        reasoning_effort: Option<String>,
+    },
 }
 
 /// Boundary a non-DSH host (for example Codex CLI) can implement later.
@@ -385,6 +403,8 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::SetSessionMode { .. } => "set-session-mode",
         UiIntent::ListAgentPresets { .. } => "list-agent-presets",
         UiIntent::SelectAgentPreset { .. } => "select-agent-preset",
+        UiIntent::ListSessionModels { .. } => "list-session-models",
+        UiIntent::SelectSessionModel { .. } => "select-session-model",
     };
     let dedupe_key = match &intent {
         UiIntent::CancelSession => action_name.to_string(),
@@ -435,6 +455,15 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::SelectAgentPreset { agent_preset } => {
             format!("{action_name}:{agent_preset}")
         }
+        UiIntent::ListSessionModels { revision } => format!("{action_name}:{revision}"),
+        UiIntent::SelectSessionModel {
+            provider,
+            model,
+            reasoning_effort,
+        } => format!(
+            "{action_name}:{provider}:{model}:{}",
+            reasoning_effort.as_deref().unwrap_or("-")
+        ),
     };
     // Interaction request ids are host-owned correlation ids. Preserve them
     // even when a caller did not pre-seed an operation context; generation is
@@ -529,6 +558,20 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::SelectAgentPreset { agent_preset } => UiEffect::SelectAgentPreset {
             operation,
             agent_preset,
+        },
+        UiIntent::ListSessionModels { revision } => UiEffect::ListSessionModels {
+            operation,
+            revision,
+        },
+        UiIntent::SelectSessionModel {
+            provider,
+            model,
+            reasoning_effort,
+        } => UiEffect::SelectSessionModel {
+            operation,
+            provider,
+            model,
+            reasoning_effort,
         },
     }
 }
@@ -786,6 +829,37 @@ impl DshEffectSink<'_, '_> {
                 );
                 (operation, result.map(|_| true))
             }
+            UiEffect::ListSessionModels {
+                mut operation,
+                revision: _,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result =
+                    dsh_pager::session_models(self.transport, operation.session_id.as_str());
+                (operation, result.map(|_| true))
+            }
+            UiEffect::SelectSessionModel {
+                mut operation,
+                provider,
+                model,
+                reasoning_effort,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::select_session_model(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    &provider,
+                    &model,
+                    reasoning_effort.as_deref(),
+                );
+                (operation, result.map(|_| true))
+            }
         };
         match result {
             Ok(true) => {
@@ -823,6 +897,8 @@ pub struct UiEffectCompletion {
     pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
     pub agent_preset_list: Option<AgentPresetListValue>,
     pub selected_agent_preset: Option<String>,
+    pub session_models: Option<SessionModelsValue>,
+    pub selected_model: Option<ModelSelection>,
 }
 
 #[derive(Debug, Clone)]
@@ -917,7 +993,9 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
         | UiEffect::InterruptSubagent { operation, .. }
         | UiEffect::SetSessionMode { operation, .. }
         | UiEffect::ListAgentPresets { operation, .. }
-        | UiEffect::SelectAgentPreset { operation, .. } => operation,
+        | UiEffect::SelectAgentPreset { operation, .. }
+        | UiEffect::ListSessionModels { operation, .. }
+        | UiEffect::SelectSessionModel { operation, .. } => operation,
     }
 }
 
@@ -971,6 +1049,12 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
             operation: target, ..
         }
         | UiEffect::SelectAgentPreset {
+            operation: target, ..
+        }
+        | UiEffect::ListSessionModels {
+            operation: target, ..
+        }
+        | UiEffect::SelectSessionModel {
             operation: target, ..
         } => *target = operation,
     }
@@ -1082,11 +1166,36 @@ fn encode_async_request(
                 "agentPreset": agent_preset,
             }),
         )),
+        UiEffect::ListSessionModels { .. } => Some((
+            "session.models",
+            json!({ "sessionId": operation.session_id }),
+        )),
+        UiEffect::SelectSessionModel {
+            provider,
+            model,
+            reasoning_effort,
+            ..
+        } => {
+            let mut params = json!({
+                "sessionId": operation.session_id,
+                "provider": provider,
+                "model": model,
+            });
+            if let Some(effort) = reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                params["reasoningEffort"] = json!(effort);
+            }
+            Some(("session.selectModel", params))
+        }
         UiEffect::AttachSession { .. } => None,
     };
     Ok(request)
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
 struct DecodedAsyncResult {
     accepted: bool,
     session_list: Option<dsh_pager_protocol::SessionListValue>,
@@ -1095,6 +1204,8 @@ struct DecodedAsyncResult {
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
     agent_preset_list: Option<AgentPresetListValue>,
     selected_agent_preset: Option<String>,
+    session_models: Option<SessionModelsValue>,
+    selected_model: Option<ModelSelection>,
 }
 
 fn decode_tui_result<T: serde::de::DeserializeOwned>(raw: Value) -> PagerResult<T> {
@@ -1117,6 +1228,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     if matches!(effect, UiEffect::SetSessionMode { .. }) {
@@ -1129,6 +1242,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     let value = unwrap_api_value(raw)?;
@@ -1142,6 +1257,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     if matches!(effect, UiEffect::SearchSessions { .. }) {
@@ -1154,6 +1271,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     if matches!(effect, UiEffect::FileSearchQuery { .. }) {
@@ -1166,6 +1285,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     if matches!(effect, UiEffect::PreviewMedia { .. }) {
@@ -1177,6 +1298,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: Some(parse_attachment_preview(value)?),
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     if matches!(effect, UiEffect::ListAgentPresets { .. }) {
@@ -1189,6 +1312,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: Some(agent_preset_list),
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         });
     }
     if matches!(effect, UiEffect::SelectAgentPreset { .. }) {
@@ -1201,6 +1326,36 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: Some(selected.agent_preset),
+            session_models: None,
+            selected_model: None,
+        });
+    }
+    if matches!(effect, UiEffect::ListSessionModels { .. }) {
+        let session_models = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            session_list: None,
+            session_search: None,
+            file_references: None,
+            attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
+            session_models: Some(session_models),
+            selected_model: None,
+        });
+    }
+    if matches!(effect, UiEffect::SelectSessionModel { .. }) {
+        let selected: dsh_pager_protocol::SessionSelectModelValue = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            session_list: None,
+            session_search: None,
+            file_references: None,
+            attachment_preview: None,
+            agent_preset_list: None,
+            selected_agent_preset: None,
+            session_models: None,
+            selected_model: Some(selected.selected),
         });
     }
     let accepted = value
@@ -1215,6 +1370,8 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         attachment_preview: None,
         agent_preset_list: None,
         selected_agent_preset: None,
+        session_models: None,
+        selected_model: None,
     })
 }
 
@@ -1289,6 +1446,8 @@ fn build_completion(
                 attachment_preview: decoded.attachment_preview,
                 agent_preset_list: decoded.agent_preset_list,
                 selected_agent_preset: decoded.selected_agent_preset,
+                session_models: decoded.session_models,
+                selected_model: decoded.selected_model,
             }
         }
         Ok(decoded) => UiEffectCompletion {
@@ -1305,6 +1464,8 @@ fn build_completion(
             attachment_preview: decoded.attachment_preview,
             agent_preset_list: decoded.agent_preset_list,
             selected_agent_preset: decoded.selected_agent_preset,
+            session_models: decoded.session_models,
+            selected_model: decoded.selected_model,
         },
         Err(error) => UiEffectCompletion {
             effect,
@@ -1320,6 +1481,8 @@ fn build_completion(
             attachment_preview: None,
             agent_preset_list: None,
             selected_agent_preset: None,
+            session_models: None,
+            selected_model: None,
         },
     }
 }
@@ -1517,6 +1680,72 @@ mod tests {
         assert_eq!(method, "agentPreset.select");
         assert_eq!(params["sessionId"], "s");
         assert_eq!(params["agentPreset"], "code");
+    }
+
+    #[test]
+    fn session_model_effects_encode_list_and_select() {
+        let session = SessionState::new("s".into(), 3);
+        let list = compile_intent(
+            UiIntent::ListSessionModels { revision: 2 },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::ListSessionModels {
+            operation,
+            revision,
+        } = list
+        else {
+            panic!("expected list-session-models");
+        };
+        assert_eq!(operation.action, "list-session-models");
+        assert_eq!(revision, 2);
+        let (method, params) = encode_async_request(
+            &UiEffect::ListSessionModels {
+                operation: operation.clone(),
+                revision: 2,
+            },
+            &operation,
+        )
+        .expect("encode")
+        .expect("supported");
+        assert_eq!(method, "session.models");
+        assert_eq!(params["sessionId"], "s");
+
+        let select = compile_intent(
+            UiIntent::SelectSessionModel {
+                provider: "deepseek-official".into(),
+                model: "deepseek-chat".into(),
+                reasoning_effort: Some("high".into()),
+            },
+            &UiContext::from_session(&session),
+        );
+        let UiEffect::SelectSessionModel {
+            operation,
+            provider,
+            model,
+            reasoning_effort,
+        } = select
+        else {
+            panic!("expected select-session-model");
+        };
+        assert_eq!(provider, "deepseek-official");
+        assert_eq!(model, "deepseek-chat");
+        assert_eq!(reasoning_effort.as_deref(), Some("high"));
+        let (method, params) = encode_async_request(
+            &UiEffect::SelectSessionModel {
+                operation: operation.clone(),
+                provider: "deepseek-official".into(),
+                model: "deepseek-chat".into(),
+                reasoning_effort: Some("high".into()),
+            },
+            &operation,
+        )
+        .expect("encode")
+        .expect("supported");
+        assert_eq!(method, "session.selectModel");
+        assert_eq!(params["sessionId"], "s");
+        assert_eq!(params["provider"], "deepseek-official");
+        assert_eq!(params["model"], "deepseek-chat");
+        assert_eq!(params["reasoningEffort"], "high");
     }
 
     #[test]

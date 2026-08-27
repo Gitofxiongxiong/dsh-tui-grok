@@ -139,6 +139,7 @@ pub enum ShellAction {
     OpenImagePreview,
     OpenAgentTasks,
     OpenDashboard,
+    OpenModelPicker,
     PromptKey(KeyEvent),
     PickerKey(KeyEvent),
     PickerMouse(MouseEvent),
@@ -538,6 +539,15 @@ impl AppShell {
             self.owner = KeyOwner::Prompt;
             return ShellAction::PromptKey(key);
         }
+        // Grok: Ctrl+M on AgentScreen opens the model picker; prompt-focused
+        // Ctrl+M toggles multiline. Empty prompt is the agent-screen analog.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('m') {
+            if prompt_empty {
+                return ShellAction::OpenModelPicker;
+            }
+            self.owner = KeyOwner::Prompt;
+            return ShellAction::PromptKey(key);
+        }
         if prompt_empty {
             match key.code {
                 KeyCode::Char('q') => {
@@ -785,6 +795,20 @@ mod tests {
             shell.dispatch(ShellEvent::Key(ctrl_p), true),
             ShellAction::PromptKey(_)
         ));
+    }
+
+    #[test]
+    fn empty_prompt_ctrl_m_opens_model_picker() {
+        let mut shell = AppShell::default();
+        let ctrl_m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_m), true),
+            ShellAction::OpenModelPicker
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(ctrl_m), false),
+            ShellAction::PromptKey(ctrl_m)
+        );
     }
 
     #[test]

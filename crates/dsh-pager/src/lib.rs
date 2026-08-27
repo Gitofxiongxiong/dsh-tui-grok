@@ -35,16 +35,15 @@ pub use loader::{
     list_workspaces, load_session, load_session_id, peek_session_tail, peek_subagent_history,
     prompt_subagent, reconnect_session, rename_session, rename_session_id, reorder_session,
     reorder_workspace, repair_tail, respond, search_sessions, select_agent_preset,
-    set_session_mode, submit_prompt, submit_prompt_for_session, subscribe_control_plane,
-    update_queue,
+    select_session_model, session_models, set_session_mode, submit_prompt,
+    submit_prompt_for_session, subscribe_control_plane, update_queue,
 };
 pub use presentation::{
-    event_time_epoch_ms, DshEditDetail, DshInteraction, DshPresentationAdapter,
-    DshPresentationModel, DshQueueContent, DshQueueItem, DshReadLine, DshRenderBlock,
-    DshRenderContent, DshRenderEntry, DshRenderEntryId, DshRenderFinish, DshRenderKind,
-    DshRenderRole, DshRenderUpdate, DshRenderVisibility, DshSearchFile, DshSearchMatch,
-    DshToolCallView, DshToolDiff, DshToolKind, DshToolLocation, DshToolResult, DshToolResultView,
-    DshWebSource,
+    DshEditDetail, DshInteraction, DshPresentationAdapter, DshPresentationModel, DshQueueContent,
+    DshQueueItem, DshReadLine, DshRenderBlock, DshRenderContent, DshRenderEntry, DshRenderEntryId,
+    DshRenderFinish, DshRenderKind, DshRenderRole, DshRenderUpdate, DshRenderVisibility,
+    DshSearchFile, DshSearchMatch, DshToolCallView, DshToolDiff, DshToolKind, DshToolLocation,
+    DshToolResult, DshToolResultView, DshWebSource, event_time_epoch_ms,
 };
 pub use scrollback::{
     DshRenderEntryRef, EntryId, EntryLayout, PaintWindow, ScrollAnchor, ScrollbackLayout,
@@ -54,4 +53,4 @@ pub use session::{
     ConnectionPhase, Diagnostic, DiagnosticLevel, InteractionKind, OperationToken,
     PendingInteraction, SessionState, SessionUpdate,
 };
-pub use transport::{validate_backend_program, RpcTransport};
+pub use transport::{RpcTransport, validate_backend_program};
