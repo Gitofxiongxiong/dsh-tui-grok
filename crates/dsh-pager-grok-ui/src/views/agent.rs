@@ -11,11 +11,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Padding, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::AppShell;
 use crate::appearance::{LayoutConfig, ScrollbarConfig};
+use crate::render::SafeBuf;
 use crate::render::scrollbar::render_scrollbar_styled;
 use crate::theme::Theme;
 use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
@@ -102,6 +103,139 @@ fn blend_color(base: Color, foreground: Color, opacity: f32) -> Option<Color> {
         channel(base_g, fg_g),
         channel(base_b, fg_b),
     ))
+}
+
+/// Render Grok's dropdown chrome anchored to the prompt and return the item
+/// rows. Shared by the copied slash dropdown and future completion dropdowns.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_dropdown_chrome(
+    buf: &mut Buffer,
+    item_count: usize,
+    item_rows: u16,
+    inline_prompt_area: Option<Rect>,
+    layout_prompt: Rect,
+    area: Rect,
+    layout_cfg: &LayoutConfig,
+    compact: bool,
+    below: bool,
+    theme: &Theme,
+) -> Option<DropdownChrome> {
+    let mut panel_height = item_rows + 2;
+    let (top_border_y, bottom_border_y) = if below {
+        let anchor = inline_prompt_area.unwrap_or(layout_prompt);
+        let top = anchor.y + anchor.height;
+        (top, top + panel_height - 1)
+    } else {
+        let bottom = if let Some(inline) = inline_prompt_area {
+            inline.y.saturating_sub(1)
+        } else {
+            layout_prompt.y.saturating_sub(1)
+        };
+        let available = bottom.saturating_sub(area.y).saturating_add(1);
+        panel_height = panel_height.min(available);
+        if panel_height < 3 {
+            return None;
+        }
+        (bottom.saturating_sub(panel_height - 1), bottom)
+    };
+    let embedded = crate::views::modal_window::embedded();
+    let (hpad_left, hpad_right) = if embedded {
+        (0, 0)
+    } else {
+        (
+            layout_cfg.eff_hpad_left(compact),
+            layout_cfg.eff_hpad_right(compact),
+        )
+    };
+    let panel_x = area.x + hpad_left;
+    let panel_width = area.width.saturating_sub(hpad_left + hpad_right);
+    if top_border_y >= bottom_border_y || panel_width <= 4 {
+        return None;
+    }
+    if below && bottom_border_y > area.y + area.height.saturating_sub(1) {
+        return None;
+    }
+    let panel_area = Rect {
+        x: panel_x,
+        y: top_border_y,
+        width: panel_width,
+        height: panel_height,
+    };
+    if panel_area.bottom() > buf.area.bottom()
+        || panel_area.right() > buf.area.right()
+        || panel_area.y < buf.area.y
+    {
+        return None;
+    }
+    ratatui::widgets::Clear.render(panel_area, buf);
+    if embedded {
+        let reset = Color::Reset;
+        let divider_style = Style::default().fg(theme.gray_dim).bg(reset);
+        let divider = Line::styled("─".repeat(panel_width as usize), divider_style);
+        buf.set_line_safe(panel_x, top_border_y, &divider, panel_width);
+        let footer = "↑/↓ navigate · enter confirm · esc cancel";
+        let footer_line = Line::styled(
+            footer.to_string(),
+            Style::default().fg(theme.gray_dim).bg(reset),
+        );
+        buf.set_line_safe(
+            panel_x + 1,
+            bottom_border_y,
+            &footer_line,
+            panel_width.saturating_sub(1),
+        );
+    } else {
+        buf.set_style(
+            panel_area,
+            Style::default().fg(theme.text_primary).bg(theme.bg_light),
+        );
+        let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+        let border_line = Line::styled("─".repeat(panel_width as usize), border_style);
+        buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
+        buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);
+        let hint = format!("{item_count}");
+        let hint_width = hint.len() as u16;
+        if hint_width + 2 <= panel_width {
+            let hint_x = panel_x + panel_width - hint_width - 1;
+            let hint_line = Line::styled(hint, Style::default().fg(theme.gray).bg(theme.bg_base));
+            buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_width);
+        }
+    }
+    let content_inset = dropdown_content_inset(layout_cfg, compact);
+    let items_x = layout_prompt.x + content_inset;
+    let items_width = layout_prompt.width.saturating_sub(content_inset);
+    Some(DropdownChrome {
+        items: Rect {
+            x: items_x,
+            y: top_border_y + 1,
+            height: panel_height - 2,
+            width: items_width,
+        },
+        panel: panel_area,
+    })
+}
+
+fn dropdown_content_inset(layout_cfg: &LayoutConfig, compact: bool) -> u16 {
+    if crate::views::modal_window::embedded() {
+        0
+    } else {
+        1 + layout_cfg.eff_hpad_left(compact)
+    }
+}
+
+pub(crate) fn dropdown_items_width(
+    layout_prompt: Rect,
+    layout_cfg: &LayoutConfig,
+    compact: bool,
+) -> u16 {
+    layout_prompt
+        .width
+        .saturating_sub(dropdown_content_inset(layout_cfg, compact))
+}
+
+pub(crate) struct DropdownChrome {
+    pub(crate) items: Rect,
+    pub(crate) panel: Rect,
 }
 
 pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {

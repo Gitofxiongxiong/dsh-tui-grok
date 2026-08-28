@@ -46,8 +46,8 @@ use crate::geometry::{
 };
 use crate::host_adapter::{
     AgentSnapshot, ChildTranscriptView, FeatureStatus, FileSearchRow, FileSearchSnapshot,
-    GrokHostSnapshot, MediaSnapshot, SuggestionSnapshot, child_scrollback_from_history,
-    media_snapshot_from_scrollback, resume_picker_entries, resume_picker_search_hits,
+    GrokHostSnapshot, MediaSnapshot, child_scrollback_from_history, media_snapshot_from_scrollback,
+    resume_picker_entries, resume_picker_search_hits,
 };
 use crate::input::{
     PromptEditor,
@@ -64,11 +64,12 @@ use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
 use crate::scrollback_adapter::{host_pane::DshScrollbackHost, tick::animation_tick};
 use crate::selection::SelectionModel;
+use crate::slash::SlashController;
 use crate::theme::Theme;
 use crate::views::{
     agent::{
-        AgentView, AgentViewLayout, AgentViewLayoutParams, ScrollInfo, effective_compact,
-        render_scrollbar,
+        AgentView, AgentViewLayout, AgentViewLayoutParams, ScrollInfo, dropdown_items_width,
+        effective_compact, render_dropdown_chrome, render_scrollbar,
     },
     agent_hints::{self, ActivePane, build_hints, prompt_focus_hint},
     agent_panes::{
@@ -98,8 +99,8 @@ use crate::views::{
     },
     session_picker::{ResumePickerOutcome, ResumePickerState},
     shortcuts_bar::{HintItem, ShortcutsBar},
+    slash_dropdown::{desired_item_rows, render_dropdown},
     status_bar::StatusBar,
-    suggestion_controller::{SuggestionController, SuggestionOutcome},
     timeline::{RailViewport, compute_rail, render_rail},
     turn_status::{MouseButtons as TurnStatusMouseButtons, TurnStatusArgs, render_turn_status},
     welcome::{WelcomeAnimation, format_cwd, render_welcome},
@@ -638,7 +639,7 @@ struct UiState {
     last_permission_click: Option<(Instant, usize)>,
     file_search_editor: PromptEditor,
     file_search: FileSearchController,
-    suggestions: SuggestionController,
+    slash: SlashController,
     image_selected: usize,
     media_preview: Option<MediaPreviewBuffer>,
     media_preview_controller: MediaPreviewController,
@@ -962,7 +963,7 @@ impl UiState {
             let text = text.clone();
             self.record_prompt_history(&text);
             self.prompt.reset();
-            self.suggestions.reset();
+            self.slash.reset();
             self.status = Some(prompt_admission_message(&completion.receipt.status));
         }
         if let UiEffect::SetSessionMode { mode_id, .. } = &completion.effect {
@@ -1150,12 +1151,20 @@ impl UiState {
             )
         });
         let blocking_card = permission.is_some() || question.is_some();
-        let suggestion_rows = if blocking_card {
-            0
+        let host_suggestions: &[String] = if snapshot.capabilities.prompt_suggestions
+            && snapshot.suggestions.status == FeatureStatus::Available
+            && snapshot.suggestions.active
+        {
+            &snapshot.suggestions.items
         } else {
-            self.suggestion_items(&snapshot)
-                .map_or(0, |items| items.len().clamp(1, 3) as u16)
+            &[]
         };
+        self.slash.refresh(
+            self.prompt.text(),
+            self.prompt.cursor(),
+            &self.models,
+            host_suggestions,
+        );
         let prompt_style = PromptStyleContract {
             focused,
             compact,
@@ -1229,7 +1238,9 @@ impl UiState {
             queue_height,
             btw_height: 0,
             turn_status_height: u16::from(snapshot.turn_status.visible || watcher_visible),
-            banner_height: suggestion_rows,
+            // Grok paints slash completion as an overlay above the prompt;
+            // it never reserves a separate banner row in the layout.
+            banner_height: 0,
             cta_height: 0,
             follow_ups_height: 0,
             prompt_gap: u16::from(!compact && !short && prompt_height > 0),
@@ -1323,10 +1334,33 @@ impl UiState {
                 theme,
             );
             if let Some((x, y)) = prompt_result.cursor_pos {
+                let slash = self.slash.snapshot();
+                if slash.args_query_is_empty
+                    && let Some(placeholder) = slash.args_placeholder.as_deref()
+                {
+                    let available = prompt_result.textarea_area.right().saturating_sub(x) as usize;
+                    if available > 0 {
+                        frame.buffer_mut().set_string(
+                            x,
+                            y,
+                            truncate_str(placeholder, available),
+                            Style::default().fg(theme.gray).bg(theme.bg_base),
+                        );
+                    }
+                }
                 frame.set_cursor_position((x, y));
             }
         }
-        self.render_suggestions(frame, agent_layout.banner, &snapshot);
+        if !blocking_card {
+            self.render_slash_dropdown(
+                frame,
+                area,
+                agent_layout.prompt,
+                &layout_cfg,
+                compact,
+                theme,
+            );
+        }
         let (prompt_target, prompt_label) = if permission.is_some() {
             (HitTarget::Overlay("permission".into()), "permission")
         } else if question.is_some() {
@@ -2063,7 +2097,7 @@ impl UiState {
         let prompt = agent_hints::PromptWidget::from_composer(
             self.prompt.text(),
             self.prompt.cursor(),
-            self.suggestion_items(snapshot).is_some(),
+            self.slash.is_open(),
         );
         debug_assert_eq!(
             prompt.can_send(),
@@ -2303,69 +2337,46 @@ impl UiState {
         }
     }
 
-    fn render_suggestions(
+    fn render_slash_dropdown(
         &mut self,
         frame: &mut Frame<'_>,
+        area: Rect,
         prompt_area: Rect,
-        snapshot: &GrokHostSnapshot,
+        layout_cfg: &LayoutConfig,
+        compact: bool,
+        theme: &Theme,
     ) {
-        let Some(items) = self.suggestion_items(snapshot) else {
-            return;
-        };
-        let height = prompt_area.height.min(items.len().min(3) as u16);
-        if height == 0 {
+        let snapshot = self.slash.snapshot();
+        if !snapshot.open {
             return;
         }
-        let buf = frame.buffer_mut();
-        for (index, item) in items.iter().take(height as usize).enumerate() {
-            let selected = index
-                == self
-                    .suggestions
-                    .selected()
-                    .min(items.len().saturating_sub(1));
-            let marker = if selected { "▸" } else { " " };
-            let line = format!("{marker} {item}");
-            let style = if selected {
-                Style::default()
-                    .fg(Theme::current().text_primary)
-                    .bg(Theme::current().bg_visual)
-            } else {
-                Style::default()
-                    .fg(Theme::current().gray)
-                    .bg(Theme::current().bg_base)
+        let items_width = dropdown_items_width(prompt_area, layout_cfg, compact);
+        let item_rows = desired_item_rows(&snapshot.matches, items_width);
+        let panel = {
+            let Some(chrome) = render_dropdown_chrome(
+                frame.buffer_mut(),
+                snapshot.matches.len(),
+                item_rows,
+                None,
+                prompt_area,
+                area,
+                layout_cfg,
+                compact,
+                false,
+                theme,
+            ) else {
+                return;
             };
-            buf.set_string(
-                prompt_area.x,
-                prompt_area.y + index as u16,
-                truncate_str(&line, prompt_area.width as usize),
-                style,
-            );
-        }
-    }
-
-    fn suggestion_items(&self, snapshot: &GrokHostSnapshot) -> Option<Vec<String>> {
-        let merged = Self::merged_suggestion_snapshot(snapshot);
-        self.suggestions
-            .visible_items(&merged, self.prompt.text())
-            .map(|items| items.into_iter().map(str::to_string).collect())
-    }
-
-    fn merged_suggestion_snapshot(snapshot: &GrokHostSnapshot) -> SuggestionSnapshot {
-        let mut merged = SuggestionSnapshot {
-            status: FeatureStatus::Available,
-            active: true,
-            selected: None,
-            items: if snapshot.capabilities.prompt_suggestions
-                && snapshot.suggestions.status == FeatureStatus::Available
-                && snapshot.suggestions.active
-            {
-                snapshot.suggestions.items.clone()
-            } else {
-                Vec::new()
-            },
+            let _ = render_dropdown(frame.buffer_mut(), chrome.items, &snapshot, None, theme);
+            chrome.panel
         };
-        crate::slash::merge_builtin_suggestions(&mut merged.items);
-        merged
+        self.hit_map.insert(crate::geometry::HitRegion {
+            target: HitTarget::Overlay("slash-dropdown".into()),
+            rect: panel,
+            label: "slash commands".into(),
+            link: None,
+            priority: 25,
+        });
     }
 
     fn dispatch_event(
@@ -2428,6 +2439,22 @@ impl UiState {
                     self.pending_copy = Some(text);
                 }
                 self.status = None;
+                return Ok(false);
+            }
+        }
+        // Grok gives an open slash dropdown priority over the application
+        // action registry. In particular, Enter must accept `/model ` before
+        // the generic prompt path can submit it, and Esc dismisses the menu
+        // before the homepage policy can clear the draft.
+        if self.shell.overlay() == Overlay::None
+            && let ShellEvent::Key(key) = &event
+        {
+            let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+                session,
+                Some(transport.control_plane()),
+            );
+            self.refresh_slash(&snapshot);
+            if self.handle_slash_key(*key, &snapshot, transport, session)? {
                 return Ok(false);
             }
         }
@@ -2546,17 +2573,8 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::ClearPrompt => {
-                let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-                    session,
-                    Some(transport.control_plane()),
-                );
-                if self.suggestion_items(&snapshot).is_some() {
-                    self.suggestions.dismiss();
-                    self.status = None;
-                    return Ok(false);
-                }
                 self.prompt.reset();
-                self.suggestions.reset();
+                self.slash.reset();
                 self.status = Some("Draft cleared".into());
                 Ok(false)
             }
@@ -2599,7 +2617,6 @@ impl UiState {
                     }
                     LineEditOutcome::TextChanged => {
                         self.prompt_history_index = None;
-                        self.suggestions.text_changed();
                         self.status = None;
                     }
                 }
@@ -2622,7 +2639,6 @@ impl UiState {
                 if !text.is_empty() {
                     let _ = self.prompt.insert_paste(&text);
                     self.prompt_history_index = None;
-                    self.suggestions.text_changed();
                     self.status = None;
                 }
                 Ok(false)
@@ -3328,7 +3344,7 @@ impl UiState {
             crate::slash::DispatchResult::Action(crate::slash::Action::ShowSessionPicker) => {
                 self.open_resume_picker(transport, session);
                 self.prompt.reset();
-                self.suggestions.reset();
+                self.slash.reset();
                 self.prompt_history_index = None;
                 true
             }
@@ -3346,7 +3362,7 @@ impl UiState {
             crate::slash::DispatchResult::Action(crate::slash::Action::ShowPresetPicker) => {
                 self.open_preset_picker(transport, session);
                 self.prompt.reset();
-                self.suggestions.reset();
+                self.slash.reset();
                 self.prompt_history_index = None;
                 true
             }
@@ -3368,7 +3384,7 @@ impl UiState {
             crate::slash::DispatchResult::Action(crate::slash::Action::ShowModelPicker) => {
                 self.open_model_picker(transport, session);
                 self.prompt.reset();
-                self.suggestions.reset();
+                self.slash.reset();
                 self.prompt_history_index = None;
                 true
             }
@@ -3389,7 +3405,7 @@ impl UiState {
     fn set_timestamps_enabled(&mut self, enabled: bool) {
         self.timestamps_enabled = Some(enabled);
         self.prompt.reset();
-        self.suggestions.reset();
+        self.slash.reset();
         self.prompt_history_index = None;
         self.status = Some(format!("Timestamps {}", if enabled { "on" } else { "off" }));
     }
@@ -3453,7 +3469,7 @@ impl UiState {
         effort: Option<String>,
     ) {
         self.prompt.reset();
-        self.suggestions.reset();
+        self.slash.reset();
         self.prompt_history_index = None;
         self.pending_model = Some(model_id.clone());
         // Grok SetDefaultModel is optimistic; keep caption in sync while RPC is in flight.
@@ -3533,7 +3549,7 @@ impl UiState {
             "locked after first turn"
         };
         self.prompt.reset();
-        self.suggestions.reset();
+        self.slash.reset();
         self.prompt_history_index = None;
         self.status = Some(format!("Preset: {label} ({lock})"));
     }
@@ -3549,7 +3565,7 @@ impl UiState {
             Some(transport.control_plane()),
         );
         self.prompt.reset();
-        self.suggestions.reset();
+        self.slash.reset();
         self.prompt_history_index = None;
         if !snapshot.session_blank {
             self.status = Some(
@@ -3618,7 +3634,7 @@ impl UiState {
                 self.model_picker.close();
                 self.welcome_animation.observe_session(session.session_id());
                 self.prompt.reset();
-                self.suggestions.reset();
+                self.slash.reset();
                 self.prompt_history_index = None;
                 self.preset_picker.close();
                 self.resume_picker.close();
@@ -3696,11 +3712,108 @@ impl UiState {
         if prompt_receipt_admitted(&receipt.status) {
             self.record_prompt_history(&text);
             self.prompt.reset();
+            self.slash.reset();
             self.status = Some(prompt_admission_message(&receipt.status));
         } else {
             self.status = Some(receipt_status_message(&receipt, "Prompt"));
         }
         Ok(())
+    }
+
+    fn refresh_slash(&mut self, snapshot: &GrokHostSnapshot) {
+        let host_items: &[String] = if snapshot.capabilities.prompt_suggestions
+            && snapshot.suggestions.status == FeatureStatus::Available
+            && snapshot.suggestions.active
+        {
+            &snapshot.suggestions.items
+        } else {
+            &[]
+        };
+        self.slash.refresh(
+            self.prompt.text(),
+            self.prompt.cursor(),
+            &self.models,
+            host_items,
+        );
+    }
+
+    /// Grok `AgentView::handle_prompt_key` slash-first input tranche.
+    fn handle_slash_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        snapshot: &GrokHostSnapshot,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<bool> {
+        if !self.slash.is_open() {
+            return Ok(false);
+        }
+        match key.code {
+            KeyCode::PageUp => {
+                self.slash
+                    .scroll_selection(-(crate::slash::MAX_VISIBLE_SUGGESTIONS as isize));
+                return Ok(true);
+            }
+            KeyCode::PageDown => {
+                self.slash
+                    .scroll_selection(crate::slash::MAX_VISIBLE_SUGGESTIONS as isize);
+                return Ok(true);
+            }
+            KeyCode::Up => {
+                self.slash.move_selection(-1);
+                return Ok(true);
+            }
+            KeyCode::Down => {
+                self.slash.move_selection(1);
+                return Ok(true);
+            }
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                self.slash.move_selection(-1);
+                return Ok(true);
+            }
+            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                self.slash.move_selection(1);
+                return Ok(true);
+            }
+            KeyCode::Esc => {
+                self.slash.dismiss(self.prompt.text());
+                self.status = None;
+                return Ok(true);
+            }
+            KeyCode::Tab => {
+                if let Some(accepted) = self.slash.accepted_text(self.prompt.text()) {
+                    let _ = self.prompt.replace_text(&accepted);
+                    self.refresh_slash(snapshot);
+                    self.status = None;
+                }
+                return Ok(true);
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                if self.slash.typed_complete_selected(self.prompt.text()) {
+                    self.slash.close();
+                    if !self.dispatch_local_slash_command(transport, session) {
+                        self.submit_prompt(transport, session)?;
+                    }
+                    return Ok(true);
+                }
+                let chains = self.slash.selected_chains();
+                if let Some(accepted) = self.slash.accepted_text(self.prompt.text()) {
+                    let _ = self.prompt.replace_text(&accepted);
+                    self.refresh_slash(snapshot);
+                    self.status = None;
+                    if chains {
+                        return Ok(true);
+                    }
+                    self.slash.close();
+                    if !self.dispatch_local_slash_command(transport, session) {
+                        self.submit_prompt(transport, session)?;
+                    }
+                }
+                return Ok(true);
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn handle_prompt_command(
@@ -3709,26 +3822,6 @@ impl UiState {
         snapshot: &GrokHostSnapshot,
     ) -> bool {
         use crossterm::event::KeyModifiers;
-        let merged = Self::merged_suggestion_snapshot(snapshot);
-        match self
-            .suggestions
-            .handle_key(key.code, &merged, self.prompt.text())
-        {
-            SuggestionOutcome::Accepted => {
-                let accepted = self
-                    .suggestions
-                    .accepted_item(&merged, self.prompt.text())
-                    .map(str::to_string);
-                if let Some(accepted) = accepted {
-                    let _ = self.prompt.replace_text(&accepted);
-                    self.suggestions.dismiss();
-                    self.status = None;
-                }
-                return true;
-            }
-            SuggestionOutcome::Handled | SuggestionOutcome::Dismissed => return true,
-            SuggestionOutcome::Unhandled => {}
-        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
             self.status = if snapshot.capabilities.external_editor {
                 Some("External editor capability negotiated; terminal handoff is pending".into())
@@ -3778,7 +3871,7 @@ impl UiState {
             (Some(_), 1) => {
                 self.prompt_history_index = None;
                 self.prompt.reset();
-                self.suggestions.reset();
+                self.slash.reset();
                 return true;
             }
             (None, 1) => return true,
@@ -3786,7 +3879,6 @@ impl UiState {
         };
         self.prompt_history_index = Some(next);
         let _ = self.prompt.replace_text(&history[next]);
-        self.suggestions.text_changed();
         self.status = None;
         true
     }
@@ -5986,7 +6078,7 @@ mod tests {
     }
 
     #[test]
-    fn suggestion_controller_filters_selects_and_accepts_authoritative_items() {
+    fn slash_controller_fuzzy_ranks_host_items_and_keeps_dsh_builtins() {
         let mut ui = UiState::default();
         let mut snapshot = GrokHostSnapshot::demo();
         snapshot.capabilities = CapabilityMatrix {
@@ -6000,26 +6092,31 @@ mod tests {
             items: vec!["/help".into(), "/history".into(), "/model".into()],
         };
         let _ = ui.prompt.replace_text("/h");
+        ui.refresh_slash(&snapshot);
         assert_eq!(
-            ui.suggestion_items(&snapshot),
-            Some(vec!["/help".to_string(), "/history".to_string()])
+            ui.slash
+                .snapshot()
+                .matches
+                .iter()
+                .map(|row| row.display.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/help", "/history"]
         );
-        let down =
-            crossterm::event::KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE);
-        assert!(ui.handle_prompt_command(&down, &snapshot));
-        let tab =
-            crossterm::event::KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
-        assert!(ui.handle_prompt_command(&tab, &snapshot));
-        assert_eq!(ui.prompt.text(), "/history");
-        ui.suggestions.text_changed();
+        ui.slash.move_selection(1);
+        assert_eq!(ui.slash.accepted_text("/h").as_deref(), Some("/history"));
+
         let mut unsupported = snapshot.clone();
         unsupported.capabilities.prompt_suggestions = false;
-        assert!(ui.suggestion_items(&unsupported).is_none());
         let _ = ui.prompt.replace_text("/r");
-        ui.suggestions.text_changed();
+        ui.refresh_slash(&unsupported);
         assert_eq!(
-            ui.suggestion_items(&unsupported),
-            Some(vec!["/resume".to_string()])
+            ui.slash
+                .snapshot()
+                .matches
+                .iter()
+                .map(|row| row.display.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/resume", "/preset"]
         );
     }
 

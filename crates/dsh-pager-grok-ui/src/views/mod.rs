@@ -40,9 +40,10 @@ pub mod shortcuts_bar;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/picker.rs"]
 #[allow(dead_code)]
 pub mod picker;
+#[path = "../../vendor/grok/xai-grok-pager/src/views/slash_dropdown.rs"]
+pub mod slash_dropdown;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/status_bar.rs"]
 pub mod status_bar;
-pub mod suggestion_controller;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/timeline.rs"]
 pub mod timeline;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/turn_status.rs"]

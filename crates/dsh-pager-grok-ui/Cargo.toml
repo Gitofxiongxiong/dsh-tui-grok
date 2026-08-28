@@ -17,6 +17,7 @@ dsh-pager-protocol = { path = "../dsh-pager-protocol" }
 dsh-pager-render = { path = "../dsh-pager-render" }
 dsh-grok-inline = { path = "../dsh-grok-inline" }
 ratatui = { workspace = true }
+nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "5b74652" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
