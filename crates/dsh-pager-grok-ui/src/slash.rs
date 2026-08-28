@@ -19,6 +19,7 @@ use matcher::FuzzyMatcher;
 use resume::ResumeCommand;
 
 use crate::model_state::{ModelId, ModelState};
+use dsh_pager_protocol::CommandDescriptor;
 pub use model::ModelCommand;
 
 /// Maximum number of visible rows in the dropdown (scroll beyond this).
@@ -234,6 +235,8 @@ pub struct SlashController {
     matcher: FuzzyMatcher,
     snapshot: SlashSnapshot,
     dismissed_text: Option<String>,
+    host_commands: Vec<CommandDescriptor>,
+    permission_presets: Vec<String>,
 }
 
 impl SlashController {
@@ -253,8 +256,11 @@ impl SlashController {
         text: &str,
         cursor: usize,
         models: &ModelState,
-        host_items: &[String],
+        host_commands: &[CommandDescriptor],
+        permission_presets: &[String],
     ) {
+        self.host_commands = host_commands.to_vec();
+        self.permission_presets = permission_presets.to_vec();
         if self.dismissed_text.as_deref() == Some(text) {
             self.snapshot.open = false;
             return;
@@ -288,7 +294,7 @@ impl SlashController {
         };
 
         if input.cursor_in_command {
-            let matches = self.command_suggestions(&input.query, host_items);
+            let matches = self.command_suggestions(&input.query);
             snapshot.selected = carry_selection(&previous, &matches, true, &input);
             snapshot.open = !matches.is_empty();
             snapshot.matches = matches;
@@ -299,12 +305,18 @@ impl SlashController {
             snapshot.matches = matches;
         }
 
-        if let Some(invocation) = parse_invocation(text)
-            && let Some(spec) = command_spec(invocation.token)
-        {
-            snapshot.command_recognized = true;
-            if args_text_empty {
-                snapshot.args_placeholder = spec.placeholder.map(str::to_string);
+        if let Some(invocation) = parse_invocation(text) {
+            if let Some(spec) = command_spec(invocation.token) {
+                snapshot.command_recognized = true;
+                if args_text_empty {
+                    snapshot.args_placeholder = spec.placeholder.map(str::to_string);
+                }
+            } else if let Some(command) = self.host_command(invocation.token) {
+                snapshot.command_recognized = true;
+                if args_text_empty {
+                    snapshot.args_placeholder =
+                        command.input.as_ref().map(|input| input.hint.clone());
+                }
             }
         }
         self.snapshot = snapshot;
@@ -387,21 +399,29 @@ impl SlashController {
         let Some(invocation) = parse_invocation(text) else {
             return false;
         };
-        let Some(spec) = command_spec(invocation.token) else {
+        let canonical = if let Some(spec) = command_spec(invocation.token) {
+            if spec.takes_args && spec.args_required && invocation.args.trim().is_empty() {
+                return false;
+            }
+            spec.name
+        } else if let Some(command) = self.host_command(invocation.token) {
+            command.name.as_str()
+        } else {
             return false;
         };
-        if spec.takes_args && spec.args_required && invocation.args.trim().is_empty() {
-            return false;
-        }
         match self.snapshot.selection() {
             None => true,
-            Some(row) => {
-                command_spec(row.command_name()).is_some_and(|selected| selected.name == spec.name)
-            }
+            Some(row) => command_spec(row.command_name())
+                .map(|selected| selected.name)
+                .or_else(|| {
+                    self.host_command(row.command_name())
+                        .map(|command| command.name.as_str())
+                })
+                .is_some_and(|selected| selected == canonical),
         }
     }
 
-    fn command_suggestions(&mut self, query: &str, host_items: &[String]) -> Vec<SuggestionRow> {
+    fn command_suggestions(&mut self, query: &str) -> Vec<SuggestionRow> {
         let mut candidates = COMMANDS
             .iter()
             .map(|spec| SuggestionRow {
@@ -417,22 +437,19 @@ impl SlashController {
                 provenance: None,
             })
             .collect::<Vec<_>>();
-        for item in host_items {
-            let display = item.split_whitespace().next().unwrap_or(item).trim();
-            if !display.starts_with('/')
-                || display.len() <= 1
-                || candidates.iter().any(|row| row.display == display)
-            {
+        for command in &self.host_commands {
+            let name = command.name.trim();
+            let display = format!("/{name}");
+            if !valid_command_name(name) || candidates.iter().any(|row| row.display == display) {
                 continue;
             }
-            let takes_args = !item[display.len()..].trim().is_empty();
             candidates.push(SuggestionRow {
-                display: display.to_string(),
-                description: command_description(display).unwrap_or("").to_string(),
-                insert_text: if takes_args {
+                display: display.clone(),
+                description: command.description.clone(),
+                insert_text: if command.input.is_some() {
                     format!("{display} ")
                 } else {
-                    display.to_string()
+                    display
                 },
                 indices: Vec::new(),
                 tag: None,
@@ -492,6 +509,19 @@ impl SlashController {
                     description: "Hide transcript timestamps".into(),
                 },
             ]),
+            _ if invocation.token == "permission" && self.host_command("permission").is_some() => {
+                Some(
+                    self.permission_presets
+                        .iter()
+                        .map(|preset| ArgItem {
+                            display: preset.clone(),
+                            match_text: preset.clone(),
+                            insert_text: preset.clone(),
+                            description: "DSH permission preset".into(),
+                        })
+                        .collect(),
+                )
+            }
             _ => None,
         }
         .unwrap_or_default();
@@ -526,6 +556,19 @@ impl SlashController {
             })
             .unwrap_or_default()
     }
+
+    fn host_command(&self, name: &str) -> Option<&CommandDescriptor> {
+        self.host_commands
+            .iter()
+            .find(|command| command.name == name && command_spec(name).is_none())
+    }
+}
+
+fn valid_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
 }
 
 struct SlashInput {
@@ -763,7 +806,7 @@ mod tests {
     #[test]
     fn bare_slash_uses_grok_rows_and_descriptions() {
         let mut controller = SlashController::default();
-        controller.refresh("/", 1, &models(), &[]);
+        controller.refresh("/", 1, &models(), &[], &[]);
         let snapshot = controller.snapshot();
         assert!(snapshot.open);
         assert_eq!(snapshot.matches.len(), 5);
@@ -776,19 +819,19 @@ mod tests {
     fn model_accept_chains_into_real_catalog_then_effort() {
         let models = models();
         let mut controller = SlashController::default();
-        controller.refresh("/mod", 4, &models, &[]);
+        controller.refresh("/mod", 4, &models, &[], &[]);
         assert_eq!(controller.snapshot().selection().unwrap().display, "/model");
         let command = controller.accepted_text("/mod").unwrap();
         assert_eq!(command, "/model ");
 
-        controller.refresh(&command, command.len(), &models, &[]);
+        controller.refresh(&command, command.len(), &models, &[], &[]);
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.matches.len(), 2);
         assert_eq!(snapshot.matches[0].display, "DeepSeek-V4-Flash");
         let model = controller.accepted_text(&command).unwrap();
         assert_eq!(model, "/model DeepSeek-V4-Flash ");
 
-        controller.refresh(&model, model.len(), &models, &[]);
+        controller.refresh(&model, model.len(), &models, &[], &[]);
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.matches.len(), 1);
         assert_eq!(snapshot.matches[0].display, "high");
@@ -801,9 +844,97 @@ mod tests {
     #[test]
     fn exact_required_model_command_does_not_submit_empty_args() {
         let mut controller = SlashController::default();
-        controller.refresh("/model", 6, &models(), &[]);
+        controller.refresh("/model", 6, &models(), &[], &[]);
         assert!(!controller.typed_complete_selected("/model"));
         assert!(controller.selected_chains());
+    }
+
+    fn official_commands() -> Vec<CommandDescriptor> {
+        vec![
+            CommandDescriptor {
+                name: "permission".into(),
+                description: "Set the permission preset".into(),
+                input: Some(dsh_pager_protocol::CommandInputDescriptor {
+                    hint: "<preset>".into(),
+                    images: None,
+                }),
+            },
+            CommandDescriptor {
+                name: "plan".into(),
+                description: "Enter or leave plan mode".into(),
+                input: Some(dsh_pager_protocol::CommandInputDescriptor {
+                    hint: "[off|message]".into(),
+                    images: Some(true),
+                }),
+            },
+            CommandDescriptor {
+                name: "model".into(),
+                description: "Host collision must not replace local model".into(),
+                input: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn official_catalog_merges_with_local_commands_and_keeps_metadata() {
+        let mut controller = SlashController::default();
+        controller.refresh("/p", 2, &models(), &official_commands(), &[]);
+        let snapshot = controller.snapshot();
+        assert!(snapshot.matches.iter().any(|row| {
+            row.display == "/permission" && row.description == "Set the permission preset"
+        }));
+        assert!(snapshot.matches.iter().any(|row| {
+            row.display == "/plan" && row.description == "Enter or leave plan mode"
+        }));
+
+        controller.refresh("/", 1, &models(), &official_commands(), &[]);
+        let snapshot = controller.snapshot();
+        assert_eq!(
+            snapshot
+                .matches
+                .iter()
+                .filter(|row| row.display == "/model")
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .matches
+                .iter()
+                .find(|row| row.display == "/model")
+                .unwrap()
+                .description,
+            MODEL_DESCRIPTION
+        );
+    }
+
+    #[test]
+    fn official_command_is_executable_and_uses_its_input_hint() {
+        let mut controller = SlashController::default();
+        controller.refresh("/plan", 5, &models(), &official_commands(), &[]);
+        assert!(controller.typed_complete_selected("/plan"));
+
+        controller.refresh("/plan ", 6, &models(), &official_commands(), &[]);
+        let snapshot = controller.snapshot();
+        assert!(snapshot.command_recognized);
+        assert_eq!(snapshot.args_placeholder.as_deref(), Some("[off|message]"));
+    }
+
+    #[test]
+    fn permission_arguments_come_from_authoritative_projection() {
+        let mut controller = SlashController::default();
+        let presets = vec!["workspace-write".into(), "danger-full-access".into()];
+        controller.refresh(
+            "/permission ",
+            12,
+            &models(),
+            &official_commands(),
+            &presets,
+        );
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.matches.len(), 2);
+        assert_eq!(snapshot.matches[0].display, "workspace-write");
+        assert_eq!(snapshot.matches[1].display, "danger-full-access");
     }
 
     #[test]

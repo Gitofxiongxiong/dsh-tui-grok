@@ -21,7 +21,7 @@ use dsh_pager::{
     RpcTransport, SessionState, SessionUpdate, create_blank_session, load_session_id,
     peek_session_tail, repair_tail,
 };
-use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
+use dsh_pager_protocol::{CommandDescriptor, PromptMode, QueueAction, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
@@ -622,6 +622,9 @@ struct UiState {
     models: ModelState,
     models_for_session: Option<String>,
     pending_model: Option<ModelId>,
+    command_catalog: Vec<CommandDescriptor>,
+    commands_for_session: Option<String>,
+    command_catalog_revision: u64,
     pending_agent_preset: Option<String>,
     agent_preset_roster: Vec<dsh_pager_protocol::AgentPresetEntry>,
     roster_requested: bool,
@@ -819,6 +822,9 @@ impl UiState {
         if self.models_for_session.as_deref() != Some(session.session_id()) {
             self.request_session_models(transport, session, 0);
         }
+        if self.commands_for_session.as_deref() != Some(session.session_id()) {
+            self.request_commands(transport, session);
+        }
         let completions = {
             let (executor, ledger) = (&mut self.effect_executor, &mut self.effect_ledger);
             executor.poll(transport, ledger)?
@@ -848,6 +854,7 @@ impl UiState {
             UiEffect::InterruptSubagent { .. } => "Subagent interrupt",
             UiEffect::AttachSession { .. } => "Attach session",
             UiEffect::SetPermissionPreset { .. } => "Permission preset",
+            UiEffect::ListCommands { .. } => "Command list",
             UiEffect::ListAgentPresets { .. } => "Agent preset list",
             UiEffect::SelectAgentPreset { .. } => "Agent preset",
             UiEffect::ListSessionModels { .. } => "Model list",
@@ -965,13 +972,20 @@ impl UiState {
         }
         if let UiEffect::SubmitPrompt { text, .. } = &completion.effect
             && completion.receipt.status == UiEffectStatus::Accepted
-            && self.prompt.text() == text
         {
-            let text = text.clone();
-            self.record_prompt_history(&text);
-            self.prompt.reset();
-            self.slash.reset();
-            self.status = Some(prompt_admission_message(&completion.receipt.status));
+            let prompt_unchanged = self.prompt.text() == text;
+            if prompt_unchanged {
+                let text = text.clone();
+                self.record_prompt_history(&text);
+                self.prompt.reset();
+                self.slash.reset();
+            }
+            if prompt_unchanged || completion.command_result_text.is_some() {
+                self.status = completion
+                    .command_result_text
+                    .clone()
+                    .or_else(|| Some(prompt_admission_message(&completion.receipt.status)));
+            }
         }
         if let UiEffect::SetPermissionPreset { preset, .. } = &completion.effect {
             let matches_pending = self.pending_permission.as_ref().is_some_and(|pending| {
@@ -1012,6 +1026,24 @@ impl UiState {
             }
             return;
         }
+        if let UiEffect::ListCommands { revision, .. } = &completion.effect {
+            if *revision != self.command_catalog_revision {
+                self.status = Some(format!(
+                    "Ignored stale Command list completion for revision {revision}"
+                ));
+                return;
+            }
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                if let Some(commands) = completion.commands.clone() {
+                    self.command_catalog = commands;
+                } else {
+                    self.status = Some("Command list returned no value".into());
+                }
+            } else {
+                self.status = Some(receipt_status_message(&completion.receipt, subject));
+            }
+            return;
+        }
         if let UiEffect::SelectAgentPreset { agent_preset, .. } = &completion.effect {
             if completion.receipt.status == UiEffectStatus::Accepted {
                 let id = completion
@@ -1019,6 +1051,9 @@ impl UiState {
                     .clone()
                     .unwrap_or_else(|| agent_preset.clone());
                 self.pending_agent_preset = Some(id.clone());
+                self.command_catalog.clear();
+                self.commands_for_session = None;
+                self.command_catalog_revision = self.command_catalog_revision.saturating_add(1);
                 let label = current_agent_preset_label(Some(&id), &self.agent_preset_roster);
                 self.status = Some(format!("Preset → {label}"));
                 self.preset_picker.close();
@@ -1161,19 +1196,12 @@ impl UiState {
             )
         });
         let blocking_card = permission.is_some() || question.is_some();
-        let host_suggestions: &[String] = if snapshot.capabilities.prompt_suggestions
-            && snapshot.suggestions.status == FeatureStatus::Available
-            && snapshot.suggestions.active
-        {
-            &snapshot.suggestions.items
-        } else {
-            &[]
-        };
         self.slash.refresh(
             self.prompt.text(),
             self.prompt.cursor(),
             &self.models,
-            host_suggestions,
+            &self.command_catalog,
+            &snapshot.controls.permission.options,
         );
         let prompt_style = PromptStyleContract {
             focused,
@@ -1361,16 +1389,6 @@ impl UiState {
                 frame.set_cursor_position((x, y));
             }
         }
-        if !blocking_card {
-            self.render_slash_dropdown(
-                frame,
-                area,
-                agent_layout.prompt,
-                &layout_cfg,
-                compact,
-                theme,
-            );
-        }
         let (prompt_target, prompt_label) = if permission.is_some() {
             (HitTarget::Overlay("permission".into()), "permission")
         } else if question.is_some() {
@@ -1521,6 +1539,19 @@ impl UiState {
         }
 
         self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
+        // Grok's slash dropdown is a top-level prompt overlay. Paint it after
+        // inline queue/task panes so those ordinary layout rows cannot cover
+        // command names or descriptions.
+        if !blocking_card {
+            self.render_slash_dropdown(
+                frame,
+                area,
+                agent_layout.prompt,
+                &layout_cfg,
+                compact,
+                theme,
+            );
+        }
 
         if self.shell.overlay() == Overlay::Picker {
             match self.picker_kind {
@@ -3459,6 +3490,20 @@ impl UiState {
         );
     }
 
+    fn request_commands(&mut self, transport: &mut RpcTransport, session: &SessionState) {
+        self.command_catalog.clear();
+        self.commands_for_session = Some(session.session_id().to_string());
+        self.command_catalog_revision = self.command_catalog_revision.saturating_add(1);
+        let revision = self.command_catalog_revision;
+        if let Err(error) = self.submit_effect(
+            transport,
+            UiIntent::ListCommands { revision },
+            &UiContext::from_session(session),
+        ) {
+            self.status = Some(format!("Command list failed: {error}"));
+        }
+    }
+
     fn open_model_picker(&mut self, transport: &mut RpcTransport, session: &SessionState) {
         self.picker_kind = PickerKind::Model;
         self.shell.open_picker();
@@ -3665,6 +3710,9 @@ impl UiState {
                 self.models = ModelState::default();
                 self.models_for_session = None;
                 self.pending_model = None;
+                self.command_catalog.clear();
+                self.commands_for_session = None;
+                self.command_catalog_revision = self.command_catalog_revision.saturating_add(1);
                 self.model_picker.close();
                 self.welcome_animation.observe_session(session.session_id());
                 self.prompt.reset();
@@ -3755,19 +3803,12 @@ impl UiState {
     }
 
     fn refresh_slash(&mut self, snapshot: &GrokHostSnapshot) {
-        let host_items: &[String] = if snapshot.capabilities.prompt_suggestions
-            && snapshot.suggestions.status == FeatureStatus::Available
-            && snapshot.suggestions.active
-        {
-            &snapshot.suggestions.items
-        } else {
-            &[]
-        };
         self.slash.refresh(
             self.prompt.text(),
             self.prompt.cursor(),
             &self.models,
-            host_items,
+            &self.command_catalog,
+            &snapshot.controls.permission.options,
         );
     }
 
@@ -4178,6 +4219,9 @@ impl UiState {
             Ok(next) => {
                 *session = next;
                 self.reset_transcript_view();
+                self.command_catalog.clear();
+                self.commands_for_session = None;
+                self.command_catalog_revision = self.command_catalog_revision.saturating_add(1);
                 self.dashboard_peek = None;
                 self.dashboard_query_active = false;
                 self.dashboard_revision = None;
@@ -4945,6 +4989,10 @@ impl UiState {
                     Ok(next) => {
                         *session = next;
                         self.reset_transcript_view();
+                        self.command_catalog.clear();
+                        self.commands_for_session = None;
+                        self.command_catalog_revision =
+                            self.command_catalog_revision.saturating_add(1);
                         self.resume_picker.close();
                         self.shell.close_overlay();
                         self.status = Some("Session attached".into());
@@ -5221,8 +5269,7 @@ mod tests {
     use crate::effects::UiEffectStatus;
     use crate::geometry::{GeometryLine, HitMap, HitRegion, HitTarget};
     use crate::host_adapter::{
-        AgentSnapshot, CapabilityMatrix, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot,
-        MediaSnapshot, SuggestionSnapshot,
+        AgentSnapshot, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot, MediaSnapshot,
     };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
@@ -5241,7 +5288,7 @@ mod tests {
     };
     use dsh_pager::{ControlPlaneStore, DshRenderEntryId, SessionState, scrollback::Scrollback};
     use dsh_pager_protocol::{
-        HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
+        CommandDescriptor, HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
     };
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
     use serde_json::json;
@@ -5459,6 +5506,8 @@ mod tests {
                 session_search: None,
                 file_references: None,
                 attachment_preview: None,
+                commands: None,
+                command_result_text: None,
                 agent_preset_list: None,
                 selected_agent_preset: None,
                 session_models: None,
@@ -6077,6 +6126,66 @@ mod tests {
     }
 
     #[test]
+    fn slash_dropdown_paints_above_inline_queue_rows() {
+        let mut session = SessionState::new("slash-over-queue".into(), 1);
+        session
+            .accept_notification(JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "events.mux".into(),
+                params: Some(json!({
+                    "type": "session/queue",
+                    "sessionId": "slash-over-queue",
+                    "items": [
+                        {
+                            "id": "queued-1",
+                            "placement": "queued",
+                            "message": {
+                                "role": "user",
+                                "content": [{"type": "text", "text": "queued one"}],
+                                "source": {"kind": "user"}
+                            }
+                        },
+                        {
+                            "id": "queued-2",
+                            "placement": "steering",
+                            "message": {
+                                "role": "user",
+                                "content": [{"type": "text", "text": "queued two"}],
+                                "source": {"kind": "user"}
+                            }
+                        }
+                    ]
+                })),
+            })
+            .expect("queue notification");
+        let control_plane = ControlPlaneStore::default();
+        let mut ui = UiState {
+            command_catalog: vec![
+                CommandDescriptor {
+                    name: "permission".into(),
+                    description: "Switch the permission preset".into(),
+                    input: None,
+                },
+                CommandDescriptor {
+                    name: "plan".into(),
+                    description: "Enter or leave plan mode".into(),
+                    input: None,
+                },
+            ],
+            ..UiState::default()
+        };
+        let _ = ui.prompt.replace_text("/p");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("slash terminal");
+        terminal
+            .draw(|frame| ui.render(frame, &mut session, &control_plane))
+            .expect("render slash over queue");
+        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        assert!(screen.contains("/permission"), "{screen}");
+        assert!(screen.contains("/plan"), "{screen}");
+        assert!(screen.contains("Enter or leave plan mode"), "{screen}");
+    }
+
+    #[test]
     fn prompt_draft_is_only_cleared_after_admission() {
         assert!(prompt_receipt_admitted(&UiEffectStatus::Accepted));
         assert!(prompt_receipt_admitted(&UiEffectStatus::Queued));
@@ -6141,19 +6250,26 @@ mod tests {
     }
 
     #[test]
-    fn slash_controller_fuzzy_ranks_host_items_and_keeps_dsh_builtins() {
+    fn slash_controller_fuzzy_ranks_official_commands_and_keeps_local_builtins() {
         let mut ui = UiState::default();
-        let mut snapshot = GrokHostSnapshot::demo();
-        snapshot.capabilities = CapabilityMatrix {
-            prompt_suggestions: true,
-            ..CapabilityMatrix::default()
-        };
-        snapshot.suggestions = SuggestionSnapshot {
-            status: FeatureStatus::Available,
-            active: true,
-            selected: None,
-            items: vec!["/help".into(), "/history".into(), "/model".into()],
-        };
+        let snapshot = GrokHostSnapshot::demo();
+        ui.command_catalog = vec![
+            CommandDescriptor {
+                name: "help".into(),
+                description: "Show DSH help".into(),
+                input: None,
+            },
+            CommandDescriptor {
+                name: "history".into(),
+                description: "Show DSH history".into(),
+                input: None,
+            },
+            CommandDescriptor {
+                name: "model".into(),
+                description: "Official collision".into(),
+                input: None,
+            },
+        ];
         let _ = ui.prompt.replace_text("/h");
         ui.refresh_slash(&snapshot);
         assert_eq!(
@@ -6168,10 +6284,9 @@ mod tests {
         ui.slash.move_selection(1);
         assert_eq!(ui.slash.accepted_text("/h").as_deref(), Some("/history"));
 
-        let mut unsupported = snapshot.clone();
-        unsupported.capabilities.prompt_suggestions = false;
+        ui.command_catalog.clear();
         let _ = ui.prompt.replace_text("/r");
-        ui.refresh_slash(&unsupported);
+        ui.refresh_slash(&snapshot);
         assert_eq!(
             ui.slash
                 .snapshot()

@@ -200,6 +200,23 @@ pub struct SessionPromptResult {
     pub command: Option<Value>,
 }
 
+/// Optional free-form input metadata from DSH's official command registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandInputDescriptor {
+    pub hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<bool>,
+}
+
+/// One handler-free row returned by DSH `CommandRuntime.list(agent)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandDescriptor {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<CommandInputDescriptor>,
+}
+
 /// Answer sent to a pending approval or question interaction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -895,6 +912,19 @@ mod tests {
         assert_eq!(value.presets[0].name.as_deref(), Some("标准模式"));
         assert!(value.authorable);
         assert!(!value.has_document);
+    }
+
+    #[test]
+    fn command_descriptor_preserves_official_input_metadata() {
+        let raw = serde_json::json!({
+            "name": "plan",
+            "description": "Enter or leave plan mode",
+            "input": { "hint": "[off|message]", "images": true }
+        });
+        let descriptor: CommandDescriptor = serde_json::from_value(raw.clone()).expect("command");
+        assert_eq!(descriptor.name, "plan");
+        assert_eq!(descriptor.input.as_ref().unwrap().hint, "[off|message]");
+        assert_eq!(serde_json::to_value(descriptor).unwrap(), raw);
     }
 
     #[test]

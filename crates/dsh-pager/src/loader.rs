@@ -1,5 +1,5 @@
 use dsh_pager_protocol::{
-    AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult,
+    AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult, CommandDescriptor,
     FileReferencesListValue, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
     SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
     SessionListValue, SessionModelsValue, SessionPromptParams, SessionPromptResult,
@@ -13,7 +13,7 @@ use dsh_pager_protocol::{
     WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -813,6 +813,14 @@ pub fn create_blank_session(
 /// List the deployment's agent-preset roster.
 pub fn list_agent_presets(transport: &mut RpcTransport) -> PagerResult<AgentPresetListValue> {
     api_call(transport, "agentPreset.list", json!({}))
+}
+
+/// Read the effective official DSH slash-command directory for one session agent.
+pub fn list_commands(
+    transport: &mut RpcTransport,
+    session_id: &str,
+) -> PagerResult<Vec<CommandDescriptor>> {
+    api_call(transport, "commands/list", json!({ "agentId": session_id }))
 }
 
 /// Recompose a blank session onto another roster preset.

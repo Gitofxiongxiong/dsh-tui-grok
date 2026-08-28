@@ -126,6 +126,36 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
+  it('forwards the official per-agent command directory without inventing a TUI roster', async () => {
+    const agent = {} as Agent
+    const gateway = new TuiGateway(fakeApi(), new Notifications(), {
+      resolveAgent: async id => id === sessionId
+        ? { agent }
+        : { error: { code: 'session-not-found', message: 'missing' } },
+      commands: {
+        list: received => {
+          expect(received).toBe(agent)
+          return [
+            { name: 'permission', description: 'Switch permissions', input: { hint: '<preset>' } },
+            { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', images: true } },
+          ]
+        },
+      },
+    })
+    await hello(gateway)
+    await expect(gateway.handleRequest('commands/list', { agentId: sessionId }, 'commands'))
+      .resolves.toEqual({
+        ok: true,
+        value: [
+          { name: 'permission', description: 'Switch permissions', input: { hint: '<preset>' } },
+          { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', images: true } },
+        ],
+      })
+    await expect(gateway.handleRequest('commands/list', {}, 'commands-invalid'))
+      .resolves.toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    gateway.dispose()
+  })
+
   it('rejects a mismatched protocol version', async () => {
     const gateway = new TuiGateway(fakeApi(), new Notifications())
     await expect(gateway.handleRequest('tui.hello', {
@@ -560,9 +590,18 @@ describe('plugin apply', () => {
         Object.assign(this, fakeApi())
       }
     }
+    class FakeCommands extends Service {
+      constructor() {
+        super(ctx, 'commands')
+      }
+      list(): readonly [] {
+        return []
+      }
+    }
     await ctx.plugin(FakeAgents)
     await ctx.plugin(FakeSessions)
     await ctx.plugin(FakeProxy)
+    await ctx.plugin(FakeCommands)
     await ctx.plugin(TuiServer, { input: inbound, output: outbound })
     inbound.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tui.hello', params: {
       protocolVersion: 1, clientType: 'test',

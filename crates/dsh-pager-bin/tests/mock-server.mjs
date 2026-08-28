@@ -506,8 +506,39 @@ rl.on('line', (line) => {
     success(message.id, { sessionId: 'session-forked' })
     return
   }
+  if (message?.method === 'commands/list') {
+    success(message.id, [
+      { name: 'compact', description: 'Compact older conversation history' },
+      {
+        name: 'goal',
+        description: 'set or view the goal for a long-running task',
+        input: { hint: '[<objective>|clear|edit <objective>|pause|resume]', images: true },
+      },
+      {
+        name: 'permission',
+        description: 'Switch the permission preset (sandbox mode + approval policy)',
+        input: { hint: '<preset>' },
+      },
+      {
+        name: 'plan',
+        description: 'Enter or leave plan mode',
+        input: { hint: '[off|message]', images: true },
+      },
+    ])
+    return
+  }
   if (message?.method === 'session.prompt') {
     const promptText = message.params?.content?.[0]?.text ?? ''
+    if (promptText === '/permission') {
+      success(message.id, {
+        accepted: true,
+        command: {
+          kind: 'success',
+          text: `current preset ${currentPermission} (available: ${PERMISSION_PRESETS.join(', ')})`,
+        },
+      })
+      return
+    }
     if (promptText.startsWith('/permission ')) {
       const preset = promptText.slice('/permission '.length).trim()
       if (!PERMISSION_PRESETS.includes(preset)) {
@@ -516,13 +547,22 @@ rl.on('line', (line) => {
       }
       currentPermission = preset
       emitControlProjections()
-      success(message.id, { accepted: true })
+      success(message.id, {
+        accepted: true,
+        command: { kind: 'success', text: `preset ${currentPermission}` },
+      })
       return
     }
-    if (promptText === '/plan' || promptText === '/plan on' || promptText === '/plan off') {
-      planActive = promptText === '/plan off' ? false : promptText === '/plan on' ? true : !planActive
+    if (promptText === '/plan' || promptText.startsWith('/plan ')) {
+      planActive = promptText === '/plan off' ? false : true
       emitControlProjections()
-      success(message.id, { accepted: true })
+      success(message.id, {
+        accepted: true,
+        command: {
+          kind: 'success',
+          text: planActive ? 'Plan mode on. Use /plan off to leave.' : 'Plan mode off.',
+        },
+      })
       return
     }
     if (promptText === 'stream scroll smoke') {

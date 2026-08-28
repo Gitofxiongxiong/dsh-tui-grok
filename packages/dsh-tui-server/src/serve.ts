@@ -10,12 +10,15 @@ import type { FileReferenceService } from '@deepseek-ai/dsh-file-reference'
 import { TuiGateway } from './gateway.js'
 import { TuiLineTransport, type TuiLineTransportOptions } from './transport.js'
 import type { TuiDispatchExtensions } from './dispatch.js'
+import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 
 export interface TuiServeOptions extends TuiLineTransportOptions {
   /** Optional public Harness file-reference provider mounted by the profile. */
   fileReferences?: FileReferenceService
   /** Public Harness session-to-agent resolver used by file-reference lookup. */
   resolveAgent?: TuiDispatchExtensions['resolveAgent']
+  /** Official DSH per-agent command directory. */
+  commands?: Pick<CommandRuntime, 'list'>
 }
 
 /**
@@ -32,9 +35,9 @@ export function serve(
   output: Writable,
   options: TuiServeOptions = {},
 ): () => void {
-  const { fileReferences, resolveAgent, ...transportOptions } = options
+  const { fileReferences, resolveAgent, commands, ...transportOptions } = options
   const transport = new TuiLineTransport(input, output, transportOptions)
-  const gateway = new TuiGateway(api, transport, { fileReferences, resolveAgent })
+  const gateway = new TuiGateway(api, transport, { fileReferences, resolveAgent, commands })
   transport.onRequest(async (method, params, id) =>
     gateway.handleRequest(method, params, String(id)))
   transport.start()

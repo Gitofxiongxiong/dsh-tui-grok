@@ -11,6 +11,7 @@ import type { ServerResponse } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { FileReferenceCandidate, FileReferenceService } from '@deepseek-ai/dsh-file-reference'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { SessionId as brandSessionId } from '@deepseek-ai/dsh-session/types'
 import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
@@ -18,6 +19,8 @@ import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
 export interface TuiDispatchExtensions {
   fileReferences?: FileReferenceService
   resolveAgent?: (sessionId: SessionId) => Promise<{ agent: Agent } | { error: { code: string; message: string; details?: unknown } }>
+  /** Official DSH per-agent command directory; the TUI never owns command semantics. */
+  commands?: Pick<CommandRuntime, 'list'>
 }
 
 /**
@@ -38,6 +41,9 @@ export async function dispatchUnary(
   if (method === 'fileReferences.list') {
     return await dispatchFileReferences(params, rpcId, extensions)
   }
+  if (method === 'commands/list') {
+    return await dispatchCommandsList(params, extensions)
+  }
   const handler = toFetchHandler(api)
   const response = await handler.fetch(new Request(`https://tui.local/api/${method}`, {
     method: 'POST',
@@ -55,6 +61,43 @@ export async function dispatchUnary(
   }
   const json = await response.json() as ServerResponse
   return json.result
+}
+
+async function dispatchCommandsList(
+  params: unknown,
+  extensions: TuiDispatchExtensions,
+): Promise<unknown> {
+  if (extensions.commands === undefined || extensions.resolveAgent === undefined) {
+    return {
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'command discovery is unsupported by this external TUI composition',
+        details: {},
+      },
+    }
+  }
+  if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+    return { ok: false, error: { code: 'invalid-request', message: 'invalid command list params', details: {} } }
+  }
+  const value = params as { agentId?: unknown }
+  if (typeof value.agentId !== 'string' || value.agentId.length === 0) {
+    return { ok: false, error: { code: 'invalid-request', message: 'agentId is required', details: {} } }
+  }
+  const resolved = await extensions.resolveAgent(brandSessionId(value.agentId))
+  if ('error' in resolved) return { ok: false, error: resolved.error }
+  try {
+    return { ok: true, value: extensions.commands.list(resolved.agent) }
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      error: {
+        code: 'internal',
+        message: `command discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+        details: {},
+      },
+    }
+  }
 }
 
 async function dispatchFileReferences(

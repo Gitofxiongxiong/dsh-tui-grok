@@ -11,6 +11,8 @@ import type { TuiNotificationMethod, TuiRequestMethod } from './types.js'
 /** External TUI-only seam added without changing Harness' ApiProxy contract. */
 type TuiRpcMethodMap = RpcMethodMap & {
   'fileReferences.list': unknown
+  /** DSH CommandRuntime Remote endpoint, adapted onto the native stdio carrier. */
+  'commands/list': unknown
 }
 
 /**
@@ -40,6 +42,7 @@ export const API_PROXY_METHOD_SET = {
   'host.createDirectory': true,
   'host.openPath': true,
   'fileReferences.list': true,
+  'commands/list': true,
   'workspace.list': true,
   'workspace.create': true,
   'workspace.rename': true,
