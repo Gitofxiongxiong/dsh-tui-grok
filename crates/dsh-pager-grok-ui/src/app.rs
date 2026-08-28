@@ -132,7 +132,7 @@ pub enum ShellAction {
     ScrollDown(u16),
     SubmitPrompt,
     PromptNewline,
-    CycleSessionMode,
+    ToggleYolo,
     OpenQueue,
     OpenInteraction,
     OpenFileSearch,
@@ -524,11 +524,11 @@ impl AppShell {
         {
             return ShellAction::PromptNewline;
         }
-        if key.code == KeyCode::BackTab
-            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
-        {
+        // Grok `ActionId::ToggleYolo`: Ctrl+O is available from the normal
+        // agent surface. Plan remains an independent slash command.
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.owner = KeyOwner::Prompt;
-            return ShellAction::CycleSessionMode;
+            return ShellAction::ToggleYolo;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
@@ -827,16 +827,17 @@ mod tests {
     }
 
     #[test]
-    fn grok_mode_and_newline_chords_reach_the_same_actions() {
+    fn grok_yolo_and_newline_chords_reach_the_same_actions() {
         let mut shell = AppShell::default();
+        let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
         assert_eq!(
-            shell.dispatch(ShellEvent::Key(key(KeyCode::BackTab)), true),
-            ShellAction::CycleSessionMode
+            shell.dispatch(ShellEvent::Key(ctrl_o), true),
+            ShellAction::ToggleYolo
         );
         let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
         assert_eq!(
             shell.dispatch(ShellEvent::Key(shift_tab), true),
-            ShellAction::CycleSessionMode
+            ShellAction::PromptKey(shift_tab)
         );
         let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
         assert_eq!(

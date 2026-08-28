@@ -14,12 +14,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { SessionId as brandSessionId } from '@deepseek-ai/dsh-session/types'
 import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
-import type { SessionModeServices } from './session-mode.js'
 
 export interface TuiDispatchExtensions {
   fileReferences?: FileReferenceService
   resolveAgent?: (sessionId: SessionId) => Promise<{ agent: Agent } | { error: { code: string; message: string; details?: unknown } }>
-  sessionMode?: SessionModeServices
 }
 
 /**

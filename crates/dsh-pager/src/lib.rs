@@ -35,8 +35,8 @@ pub use loader::{
     list_workspaces, load_session, load_session_id, peek_session_tail, peek_subagent_history,
     prompt_subagent, reconnect_session, rename_session, rename_session_id, reorder_session,
     reorder_workspace, repair_tail, respond, search_sessions, select_agent_preset,
-    select_session_model, session_models, set_session_mode, submit_prompt,
-    submit_prompt_for_session, subscribe_control_plane, update_queue,
+    select_session_model, session_models, submit_prompt, submit_prompt_for_session,
+    subscribe_control_plane, update_queue,
 };
 pub use presentation::{
     DshEditDetail, DshInteraction, DshPresentationAdapter, DshPresentationModel, DshQueueContent,

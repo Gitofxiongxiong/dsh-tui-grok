@@ -7,8 +7,8 @@ use dsh_pager::{
     RpcTransport, SessionState,
 };
 use dsh_pager_protocol::{
-    AgentPresetListValue, ModelSelection, PromptMode, QueueAction, SessionModeId,
-    SessionModelsValue, SubagentAddress, TuiInteractionResponse,
+    AgentPresetListValue, ModelSelection, PromptMode, QueueAction, SessionModelsValue,
+    SubagentAddress, TuiInteractionResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -65,8 +65,8 @@ pub enum UiIntent {
     InterruptSubagent {
         address: SubagentAddress,
     },
-    SetSessionMode {
-        mode_id: Option<SessionModeId>,
+    SetPermissionPreset {
+        preset: String,
     },
     ListAgentPresets {
         revision: u64,
@@ -244,9 +244,9 @@ pub enum UiEffect {
         operation: OperationKey,
         address: SubagentAddress,
     },
-    SetSessionMode {
+    SetPermissionPreset {
         operation: OperationKey,
-        mode_id: Option<SessionModeId>,
+        preset: String,
     },
     ListAgentPresets {
         operation: OperationKey,
@@ -400,7 +400,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::PreviewMedia { .. } => "media-preview",
         UiIntent::ReorderSession { .. } => "reorder-session",
         UiIntent::InterruptSubagent { .. } => "subagent-interrupt",
-        UiIntent::SetSessionMode { .. } => "set-session-mode",
+        UiIntent::SetPermissionPreset { .. } => "set-permission-preset",
         UiIntent::ListAgentPresets { .. } => "list-agent-presets",
         UiIntent::SelectAgentPreset { .. } => "select-agent-preset",
         UiIntent::ListSessionModels { .. } => "list-session-models",
@@ -445,12 +445,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
                 address.child_session_id, address.mode as u8
             )
         }
-        UiIntent::SetSessionMode { mode_id } => {
-            format!(
-                "{action_name}:{}",
-                mode_id.map(SessionModeId::as_str).unwrap_or("cycle")
-            )
-        }
+        UiIntent::SetPermissionPreset { preset } => format!("{action_name}:{preset}"),
         UiIntent::ListAgentPresets { revision } => format!("{action_name}:{revision}"),
         UiIntent::SelectAgentPreset { agent_preset } => {
             format!("{action_name}:{agent_preset}")
@@ -550,7 +545,9 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::InterruptSubagent { address } => {
             UiEffect::InterruptSubagent { operation, address }
         }
-        UiIntent::SetSessionMode { mode_id } => UiEffect::SetSessionMode { operation, mode_id },
+        UiIntent::SetPermissionPreset { preset } => {
+            UiEffect::SetPermissionPreset { operation, preset }
+        }
         UiIntent::ListAgentPresets { revision } => UiEffect::ListAgentPresets {
             operation,
             revision,
@@ -790,17 +787,20 @@ impl DshEffectSink<'_, '_> {
                 let result = dsh_pager::interrupt_subagent(self.transport, &address);
                 (operation, result.map(|value| value.accepted))
             }
-            UiEffect::SetSessionMode {
+            UiEffect::SetPermissionPreset {
                 mut operation,
-                mode_id,
+                preset,
             } => {
                 self.ledger.prepare_operation(&mut operation);
                 if self.ledger.contains(&operation) {
                     return Ok(self.ledger.duplicate_receipt(operation));
                 }
-                let session =
-                    SessionState::new(operation.session_id.to_string(), operation.generation.get());
-                let result = dsh_pager::set_session_mode(self.transport, &session, mode_id);
+                let result = dsh_pager::submit_prompt_for_session(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    format!("/permission {preset}"),
+                    PromptMode::Steer,
+                );
                 (operation, result.map(|value| value.accepted))
             }
             UiEffect::ListAgentPresets {
@@ -991,7 +991,7 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
         | UiEffect::PreviewMedia { operation, .. }
         | UiEffect::ReorderSession { operation, .. }
         | UiEffect::InterruptSubagent { operation, .. }
-        | UiEffect::SetSessionMode { operation, .. }
+        | UiEffect::SetPermissionPreset { operation, .. }
         | UiEffect::ListAgentPresets { operation, .. }
         | UiEffect::SelectAgentPreset { operation, .. }
         | UiEffect::ListSessionModels { operation, .. }
@@ -1042,7 +1042,7 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
         | UiEffect::InterruptSubagent {
             operation: target, ..
         }
-        | UiEffect::SetSessionMode {
+        | UiEffect::SetPermissionPreset {
             operation: target, ..
         }
         | UiEffect::ListAgentPresets {
@@ -1148,16 +1148,14 @@ fn encode_async_request(
                 "mode": address.mode,
             }),
         )),
-        UiEffect::SetSessionMode { mode_id, .. } => {
-            let mut params = json!({
+        UiEffect::SetPermissionPreset { preset, .. } => Some((
+            "session.prompt",
+            json!({
                 "sessionId": operation.session_id,
-                "generation": operation.generation,
-            });
-            if let Some(mode_id) = mode_id {
-                params["modeId"] = json!(mode_id);
-            }
-            Some(("tui.setSessionMode", params))
-        }
+                "mode": PromptMode::Steer,
+                "content": [{"type": "text", "text": format!("/permission {preset}")}],
+            }),
+        )),
         UiEffect::ListAgentPresets { .. } => Some(("agentPreset.list", json!({}))),
         UiEffect::SelectAgentPreset { agent_preset, .. } => Some((
             "agentPreset.select",
@@ -1220,20 +1218,6 @@ fn decode_tui_result<T: serde::de::DeserializeOwned>(raw: Value) -> PagerResult<
 fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyncResult> {
     if matches!(effect, UiEffect::RespondInteraction { .. }) {
         let value: dsh_pager_protocol::TuiRespondResult = decode_tui_result(raw)?;
-        return Ok(DecodedAsyncResult {
-            accepted: value.accepted,
-            session_list: None,
-            session_search: None,
-            file_references: None,
-            attachment_preview: None,
-            agent_preset_list: None,
-            selected_agent_preset: None,
-            session_models: None,
-            selected_model: None,
-        });
-    }
-    if matches!(effect, UiEffect::SetSessionMode { .. }) {
-        let value: dsh_pager_protocol::TuiSetSessionModeResult = decode_tui_result(raw)?;
         return Ok(DecodedAsyncResult {
             accepted: value.accepted,
             session_list: None,
@@ -1526,7 +1510,7 @@ fn prompt_digest(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsh_pager_protocol::{PromptMode, SessionModeId};
+    use dsh_pager_protocol::PromptMode;
     use serde_json::json;
 
     #[test]
@@ -1599,31 +1583,35 @@ mod tests {
     }
 
     #[test]
-    fn set_session_mode_effect_cycles_or_sets_explicit_id() {
+    fn permission_preset_effect_uses_official_slash_command_path() {
         let session = SessionState::new("s".into(), 3);
         let effect = compile_intent(
-            UiIntent::SetSessionMode {
-                mode_id: Some(SessionModeId::Plan),
+            UiIntent::SetPermissionPreset {
+                preset: "danger-full-access".into(),
             },
             &UiContext::from_session(&session),
         );
-        let UiEffect::SetSessionMode { operation, mode_id } = effect else {
-            panic!("expected set-session-mode effect");
+        let UiEffect::SetPermissionPreset { operation, preset } = effect else {
+            panic!("expected set-permission-preset effect");
         };
-        assert_eq!(operation.action, "set-session-mode");
-        assert_eq!(mode_id, Some(SessionModeId::Plan));
+        assert_eq!(operation.action, "set-permission-preset");
+        assert_eq!(preset, "danger-full-access");
         let (method, params) = encode_async_request(
-            &UiEffect::SetSessionMode {
+            &UiEffect::SetPermissionPreset {
                 operation: operation.clone(),
-                mode_id: Some(SessionModeId::Plan),
+                preset: preset.clone(),
             },
             &operation,
         )
         .expect("encode")
         .expect("supported");
-        assert_eq!(method, "tui.setSessionMode");
+        assert_eq!(method, "session.prompt");
         assert_eq!(params["sessionId"], "s");
-        assert_eq!(params["modeId"], "plan");
+        assert_eq!(params["mode"], "steer");
+        assert_eq!(
+            params["content"][0]["text"],
+            "/permission danger-full-access"
+        );
     }
 
     #[test]

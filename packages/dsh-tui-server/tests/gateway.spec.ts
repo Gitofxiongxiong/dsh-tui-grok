@@ -262,51 +262,6 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
-  it('cycles tui.setSessionMode through the in-process session log', async () => {
-    const events: { type: string; data?: unknown }[] = []
-    const agent = {
-      session: {
-        events,
-        append(type: string, data: Record<string, unknown>) {
-          events.push({ type, data })
-        },
-      },
-    } as unknown as Agent
-    const gateway = new TuiGateway(fakeApi(), new Notifications(), {
-      sessionMode: {
-        resolveAgent: async () => ({ agent }),
-      },
-    })
-    const { generation } = await hello(gateway)
-    const first = await gateway.handleRequest('tui.setSessionMode', {
-      sessionId,
-      generation,
-    }, '2') as { accepted: boolean; mode: { id: string } }
-    expect(first).toMatchObject({ accepted: true, mode: { id: 'plan' } })
-    expect(events).toEqual([
-      { type: 'plan/mode', data: { active: true } },
-      { type: 'sandbox/mode', data: { mode: 'read-only' } },
-      { type: 'approval/policy', data: { policy: 'ask' } },
-    ])
-    const second = await gateway.handleRequest('tui.setSessionMode', {
-      sessionId,
-      generation,
-      modeId: 'danger-full-access',
-    }, '3') as { mode: { id: string } }
-    expect(second.mode.id).toBe('danger-full-access')
-    gateway.dispose()
-  })
-
-  it('rejects tui.setSessionMode when the host cannot switch modes', async () => {
-    const gateway = new TuiGateway(fakeApi(), new Notifications())
-    const { generation } = await hello(gateway)
-    await expect(gateway.handleRequest('tui.setSessionMode', {
-      sessionId,
-      generation,
-    }, '2')).rejects.toMatchObject({ kind: 'capability-denied' })
-    gateway.dispose()
-  })
-
   it('rejects reusing an interaction request id with a different answer', async () => {
     const gateway = new TuiGateway(fakeApi(), new Notifications())
     const { generation } = await hello(gateway)
@@ -571,21 +526,13 @@ describe('dispatchUnary', () => {
 })
 
 describe('plugin apply', () => {
-  it('serves session-mode requests through its declared Agent dependencies', async () => {
+  it('starts the TUI gateway through its declared Agent dependencies', async () => {
     const inbound = new PassThrough()
     const outbound = new PassThrough()
     const ctx = new Context()
-    const events: { type: string; data?: unknown }[] = [
-      { type: 'plan/mode', data: { active: false } },
-      { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
-      { type: 'approval/policy', data: { policy: 'never' } },
-    ]
     const session = {
       header: { id: sessionId },
-      events,
-      append(type: string, data: Record<string, unknown>) {
-        events.push({ type, data })
-      },
+      events: [],
     }
     const agent = { id: sessionId, session } as unknown as Agent
     class FakeAgents extends Service {
@@ -623,24 +570,10 @@ describe('plugin apply', () => {
     const helloResult = await readResult(outbound)
     expect(helloResult.ok).toBe(true)
     if (!helloResult.ok || !('result' in helloResult.message)) throw new Error('tui.hello failed')
-    const generation = (helloResult.message.result as { generation: number }).generation
-    inbound.write(`${JSON.stringify({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tui.setSessionMode',
-      params: { sessionId, generation },
-    })}\n`)
-    const modeResult = await readResult(outbound)
-    expect(modeResult.ok).toBe(true)
-    if (!modeResult.ok || !('result' in modeResult.message)) throw new Error('tui.setSessionMode failed')
-    expect(modeResult.message.result).toMatchObject({
-      accepted: true,
-      mode: { id: 'normal' },
+    expect(helloResult.message.result).toMatchObject({
+      protocolVersion: TUI_PROTOCOL_VERSION,
+      serverInfo: { name: TUI_SERVER_INFO_NAME },
     })
-    expect(events.slice(-2)).toEqual([
-      { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
-      { type: 'approval/policy', data: { policy: 'ask' } },
-    ])
     await ctx.fiber.dispose()
   })
 })

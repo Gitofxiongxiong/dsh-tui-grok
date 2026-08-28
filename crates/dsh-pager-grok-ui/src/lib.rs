@@ -33,7 +33,7 @@ pub mod scheduler;
 pub mod scrollback;
 pub mod scrollback_adapter;
 pub mod selection;
-pub mod session_mode;
+pub mod session_controls;
 
 pub use app::{
     AppShell, HomeKeyState, KeyOwner, Overlay, REPLACEMENT_MAP, ReplacementEntry, ShellAction,

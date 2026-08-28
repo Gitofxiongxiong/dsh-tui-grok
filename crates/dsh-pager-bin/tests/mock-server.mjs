@@ -6,43 +6,32 @@ import { createInterface } from 'node:readline'
 
 const sessionId = 'session-mock'
 let sessionTitle = 'Mock session'
-const SESSION_MODES = [
-  { id: 'normal', label: 'normal', plan: false, sandbox: 'workspace-write', approval: 'ask' },
-  { id: 'plan', label: 'plan', plan: true, sandbox: 'read-only', approval: 'ask' },
-  { id: 'danger-full-access', label: 'danger-full-access', plan: false, sandbox: 'danger-full-access', approval: 'never' },
-]
-let currentMode = SESSION_MODES[0]
-let modeSeq = 20
+const PERMISSION_PRESETS = ['workspace-write', 'danger-full-access']
+let planActive = false
+let currentPermission = 'workspace-write'
+let controlsSeq = 20
 let scrollStreamTimer = null
 let scrollStreamSeq = 3
 
-function modeProjections() {
-  const currentValue = currentMode.id === 'danger-full-access'
-    ? 'danger-full-access'
-    : currentMode.id === 'plan'
-      ? 'custom'
-      : 'workspace-write'
+function controlProjections() {
   return {
-    plan: { active: currentMode.plan, pending: false },
+    plan: { active: planActive, pending: false },
     permissions: {
-      currentValue,
-      options: [
-        { value: 'workspace-write', name: 'workspace-write' },
-        { value: 'danger-full-access', name: 'danger-full-access' },
-      ],
+      currentValue: currentPermission,
+      options: PERMISSION_PRESETS.map((value) => ({ value, name: value })),
     },
   }
 }
 
-function emitModeProjections() {
-  const values = modeProjections()
-  modeSeq += 1
+function emitControlProjections() {
+  const values = controlProjections()
+  controlsSeq += 1
   write({
     jsonrpc: '2.0',
     method: 'events.mux',
-    params: { type: 'session/projection', sessionId, key: 'plan', seq: modeSeq, value: values.plan },
+    params: { type: 'session/projection', sessionId, key: 'plan', seq: controlsSeq, value: values.plan },
   })
-  modeSeq += 1
+  controlsSeq += 1
   write({
     jsonrpc: '2.0',
     method: 'events.mux',
@@ -50,7 +39,7 @@ function emitModeProjections() {
       type: 'session/projection',
       sessionId,
       key: 'permissions',
-      seq: modeSeq,
+      seq: controlsSeq,
       value: values.permissions,
     },
   })
@@ -459,7 +448,7 @@ rl.on('line', (line) => {
     success(message.id, {
       events: events.slice(0, 3).map(entry),
       hasMore: false,
-      projections: { asOfSeq: 2, values: modeProjections() },
+      projections: { asOfSeq: 2, values: controlProjections() },
     })
     return
   }
@@ -519,6 +508,23 @@ rl.on('line', (line) => {
   }
   if (message?.method === 'session.prompt') {
     const promptText = message.params?.content?.[0]?.text ?? ''
+    if (promptText.startsWith('/permission ')) {
+      const preset = promptText.slice('/permission '.length).trim()
+      if (!PERMISSION_PRESETS.includes(preset)) {
+        failure(message.id, -32602, `unknown permission preset: ${preset}`)
+        return
+      }
+      currentPermission = preset
+      emitControlProjections()
+      success(message.id, { accepted: true })
+      return
+    }
+    if (promptText === '/plan' || promptText === '/plan on' || promptText === '/plan off') {
+      planActive = promptText === '/plan off' ? false : promptText === '/plan on' ? true : !planActive
+      emitControlProjections()
+      success(message.id, { accepted: true })
+      return
+    }
     if (promptText === 'stream scroll smoke') {
       startScrollStream()
       success(message.id, { accepted: true })
@@ -572,18 +578,6 @@ rl.on('line', (line) => {
       },
     })
     success(message.id, { accepted: true })
-    return
-  }
-  if (message?.method === 'tui.setSessionMode') {
-    const modeId = message.params?.modeId
-    if (typeof modeId === 'string') {
-      currentMode = SESSION_MODES.find((mode) => mode.id === modeId) ?? currentMode
-    } else {
-      const index = SESSION_MODES.findIndex((mode) => mode.id === currentMode.id)
-      currentMode = SESSION_MODES[(index + 1) % SESSION_MODES.length]
-    }
-    emitModeProjections()
-    success(message.id, { accepted: true, mode: currentMode })
     return
   }
   if (message?.method === 'tui.respond') {

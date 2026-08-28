@@ -12,8 +12,8 @@ use dsh_pager::{
     scrollback::Scrollback,
 };
 use dsh_pager_protocol::{
-    HistoryEntry, PromptMode, SessionEvent, SessionListValue, SessionModeId, SessionSearchValue,
-    SessionSummary, SubagentAddress, SubagentMode,
+    HistoryEntry, PromptMode, SessionEvent, SessionListValue, SessionSearchValue, SessionSummary,
+    SubagentAddress, SubagentMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -692,7 +692,7 @@ pub struct GrokHostSnapshot {
     #[serde(default)]
     pub turn_status: TurnStatusSnapshot,
     #[serde(default)]
-    pub session_mode: SessionModeId,
+    pub controls: crate::session_controls::SessionControlsSnapshot,
     #[serde(default)]
     pub session_blank: bool,
     #[serde(default)]
@@ -1003,7 +1003,7 @@ impl GrokHostSnapshot {
             agent,
             context_usage,
             turn_status,
-            session_mode: crate::session_mode::derive_session_mode(session),
+            controls: crate::session_controls::derive_session_controls(session),
             session_blank: control_plane
                 .and_then(|store| store.snapshot(session.session_id()))
                 .and_then(|snapshot| snapshot.blank)
@@ -1086,7 +1086,7 @@ impl GrokHostSnapshot {
                 total_tokens: Some(12_000),
                 ..TurnStatusSnapshot::default()
             },
-            session_mode: SessionModeId::Normal,
+            controls: crate::session_controls::SessionControlsSnapshot::default(),
             session_blank: false,
             agent_preset: Some("standard".into()),
             capabilities: CapabilityMatrix::default(),
@@ -1736,7 +1736,7 @@ pub fn snapshot_from_model(model: DshPresentationModel) -> GrokHostSnapshot {
         agent: AgentSnapshot::default(),
         context_usage: ContextUsageSnapshot::default(),
         turn_status: TurnStatusSnapshot::default(),
-        session_mode: SessionModeId::Normal,
+        controls: crate::session_controls::SessionControlsSnapshot::default(),
         session_blank: false,
         agent_preset: None,
         capabilities: CapabilityMatrix::default(),

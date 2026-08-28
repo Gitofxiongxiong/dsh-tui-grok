@@ -4,7 +4,6 @@
 //! runtime/effect boundary so a late response cannot answer a new card.
 
 use dsh_pager::{DshInteraction, DshRenderBlock};
-use dsh_pager_protocol::SessionModeId;
 use serde_json::{Value, json};
 
 use crate::{
@@ -92,7 +91,6 @@ pub fn permission_state(
     transcript: &[TranscriptRow],
     selected: usize,
     pending: bool,
-    session_mode: SessionModeId,
 ) -> Option<PermissionViewState> {
     let DshInteraction::Approval {
         call_id,
@@ -141,23 +139,16 @@ pub fn permission_state(
         title,
         command,
         description,
-        options: {
-            let mut options = vec![PermissionOption {
+        options: vec![
+            PermissionOption {
                 choice: PermissionChoice::AllowOnce,
                 label: "Yes, proceed".into(),
-            }];
-            if session_mode == SessionModeId::Normal {
-                options.push(PermissionOption {
-                    choice: PermissionChoice::DontAskAgain,
-                    label: "Yes, don't ask again this conversation".into(),
-                });
-            }
-            options.push(PermissionOption {
+            },
+            PermissionOption {
                 choice: PermissionChoice::Reject,
                 label: "No, reject".into(),
-            });
-            options
-        },
+            },
+        ],
         active_idx: selected,
         args_expanded: false,
         pending,
@@ -402,20 +393,12 @@ mod tests {
             tool_name: Some("bash".into()),
             reason: Some("sandbox escalation".into()),
         };
-        let state =
-            permission_state(&interaction, &transcript, 9, false, SessionModeId::Normal).unwrap();
+        let state = permission_state(&interaction, &transcript, 9, false).unwrap();
         assert_eq!(state.title, "List project files");
         assert_eq!(state.command.as_deref(), Some("find /work -maxdepth 3"));
-        assert_eq!(state.active_idx, 2);
-        assert_eq!(state.options.len(), 3);
-        assert_eq!(state.options[1].choice, PermissionChoice::DontAskAgain);
-        let plan =
-            permission_state(&interaction, &transcript, 0, false, SessionModeId::Plan).unwrap();
-        assert_eq!(plan.options.len(), 2);
-        assert!(
-            plan.options
-                .iter()
-                .all(|option| option.choice != PermissionChoice::DontAskAgain)
-        );
+        assert_eq!(state.active_idx, 1);
+        assert_eq!(state.options.len(), 2);
+        assert_eq!(state.options[0].choice, PermissionChoice::AllowOnce);
+        assert_eq!(state.options[1].choice, PermissionChoice::Reject);
     }
 }

@@ -12,8 +12,6 @@ import type { Readable, Writable } from 'node:stream'
 import Schema from '@deepseek-ai/schemastery'
 import { serve } from './serve.js'
 import { createApiRemoteAgentResolver } from '@deepseek-ai/dsh-api-remotes'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionModeServices } from './session-mode.js'
 
 export { TuiGateway, TUI_SERVER_VERSION } from './gateway.js'
 export {
@@ -55,42 +53,6 @@ export interface TuiServerConfig {
 
 export const Config: Schema<TuiServerConfig> = Schema.object({})
 
-function createSessionModeServices(
-  ctx: Context,
-  resolveAgent: SessionModeServices['resolveAgent'],
-): SessionModeServices {
-  return {
-    resolveAgent,
-    setApprovalPolicy: (agent, policy) => {
-      const approval = ctx.get('approval') as
-        | { setPolicy(agent: Agent, policy: 'ask' | 'never'): void }
-        | undefined
-      if (approval !== undefined) {
-        approval.setPolicy(agent, policy)
-        return
-      }
-      ;(agent.session as unknown as { append(type: string, data: Record<string, unknown>): unknown })
-        .append('approval/policy', { policy })
-    },
-    executePlan: async (agent, on, signal) => {
-      const commands = ctx.get('commands') as
-        | {
-          execute(
-            agent: Agent,
-            line: string,
-            images: readonly unknown[],
-            signal: AbortSignal,
-          ): Promise<{ result: { kind: string } } | undefined>
-        }
-        | undefined
-      if (commands === undefined) return 'unavailable'
-      const execution = await commands.execute(agent, on ? '/plan' : '/plan off', [], signal)
-      if (execution === undefined) return 'unavailable'
-      return execution.result.kind === 'error' ? 'failed' : 'ok'
-    },
-  }
-}
-
 /**
  * Serve TUI requests over the configured streams.
  * @param ctx - Cordis context providing `apiProxy`.
@@ -104,12 +66,10 @@ export function apply(ctx: Context, config: TuiServerConfig): void {
     const output = config.output ?? process.stdout
     const fileReferences = ctx.get('fileReferences')
     const resolveAgent = createApiRemoteAgentResolver(ctx, {})
-    const sessionMode = createSessionModeServices(ctx, resolveAgent)
     return serve(ctx.apiProxy, input, output, {
       ...config.maxQueuedFrames === undefined ? {} : { maxQueuedFrames: config.maxQueuedFrames },
       ...fileReferences === undefined ? {} : { fileReferences },
       resolveAgent,
-      sessionMode,
     })
   }, 'tui.serve')
 }

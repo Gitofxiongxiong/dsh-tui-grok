@@ -2,15 +2,15 @@ use dsh_pager_protocol::{
     AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult,
     FileReferencesListValue, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
     SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
-    SessionListValue, SessionModeId, SessionModelsValue, SessionPromptParams, SessionPromptResult,
+    SessionListValue, SessionModelsValue, SessionPromptParams, SessionPromptResult,
     SessionRenameParams, SessionRenameResult, SessionSearchValue, SessionSelectModelValue,
     SessionUpdateQueueParams, SubagentAddress, SubagentHistoryValue, SubagentInterruptParams,
     SubagentInterruptResult, SubagentListValue, SubagentMode, SubagentPromptParams,
     SubagentPromptResult, TuiAttachParams, TuiAttachResult, TuiDetachParams, TuiHelloResult,
-    TuiInteractionResponse, TuiRespondParams, TuiRespondResult, TuiSetSessionModeParams,
-    TuiSetSessionModeResult, TuiSubscribeParams, TuiSubscribeResult, TuiSubscribeScope,
-    WorkspaceArchiveSessionParams, WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams,
-    WorkspaceInsertSessionBeforeParams, WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
+    TuiInteractionResponse, TuiRespondParams, TuiRespondResult, TuiSubscribeParams,
+    TuiSubscribeResult, TuiSubscribeScope, WorkspaceArchiveSessionParams,
+    WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
+    WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -601,22 +601,6 @@ pub fn respond(
             generation: state.generation(),
             request_id,
             interaction,
-        },
-    )
-}
-
-/// Cycle or set the DSH session mode (plan + sandbox + approval).
-pub fn set_session_mode(
-    transport: &mut RpcTransport,
-    state: &SessionState,
-    mode_id: Option<SessionModeId>,
-) -> PagerResult<TuiSetSessionModeResult> {
-    transport.call(
-        "tui.setSessionMode",
-        &TuiSetSessionModeParams {
-            session_id: state.session_id().to_string(),
-            generation: state.generation(),
-            mode_id,
         },
     )
 }

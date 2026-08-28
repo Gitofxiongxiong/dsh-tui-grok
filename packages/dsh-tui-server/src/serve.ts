@@ -10,15 +10,12 @@ import type { FileReferenceService } from '@deepseek-ai/dsh-file-reference'
 import { TuiGateway } from './gateway.js'
 import { TuiLineTransport, type TuiLineTransportOptions } from './transport.js'
 import type { TuiDispatchExtensions } from './dispatch.js'
-import type { SessionModeServices } from './session-mode.js'
 
 export interface TuiServeOptions extends TuiLineTransportOptions {
   /** Optional public Harness file-reference provider mounted by the profile. */
   fileReferences?: FileReferenceService
   /** Public Harness session-to-agent resolver used by file-reference lookup. */
   resolveAgent?: TuiDispatchExtensions['resolveAgent']
-  /** In-process session-mode writers used by `tui.setSessionMode`. */
-  sessionMode?: SessionModeServices
 }
 
 /**
@@ -35,9 +32,9 @@ export function serve(
   output: Writable,
   options: TuiServeOptions = {},
 ): () => void {
-  const { fileReferences, resolveAgent, sessionMode, ...transportOptions } = options
+  const { fileReferences, resolveAgent, ...transportOptions } = options
   const transport = new TuiLineTransport(input, output, transportOptions)
-  const gateway = new TuiGateway(api, transport, { fileReferences, resolveAgent, sessionMode })
+  const gateway = new TuiGateway(api, transport, { fileReferences, resolveAgent })
   transport.onRequest(async (method, params, id) =>
     gateway.handleRequest(method, params, String(id)))
   transport.start()

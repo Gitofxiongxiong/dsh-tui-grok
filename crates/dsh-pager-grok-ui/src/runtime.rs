@@ -21,7 +21,7 @@ use dsh_pager::{
     RpcTransport, SessionState, SessionUpdate, create_blank_session, load_session_id,
     peek_session_tail, repair_tail,
 };
-use dsh_pager_protocol::{PromptMode, QueueAction, SessionModeId, TuiInteractionResponse};
+use dsh_pager_protocol::{PromptMode, QueueAction, TuiInteractionResponse};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
@@ -64,6 +64,7 @@ use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
 use crate::scrollback_adapter::{host_pane::DshScrollbackHost, tick::animation_tick};
 use crate::selection::SelectionModel;
+use crate::session_controls::{DEFAULT_PERMISSION_PRESET, YOLO_PRESET};
 use crate::slash::SlashController;
 use crate::theme::Theme;
 use crate::views::{
@@ -265,6 +266,12 @@ struct PendingQueueMutation {
     operation: OperationKey,
     item_id: DshQueueItemId,
     base_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPermissionSwitch {
+    operation: OperationKey,
+    target: String,
 }
 
 /// Run the default Grok-derived UI until the user closes it.
@@ -621,7 +628,7 @@ struct UiState {
     modal: ModalWindowState,
     prompt: PromptEditor,
     prompt_renderer: GrokPromptRenderer,
-    pending_session_mode: Option<SessionModeId>,
+    pending_permission: Option<PendingPermissionSwitch>,
     queue_selected_id: Option<String>,
     queue_editing: bool,
     queue_editor: PromptEditor,
@@ -840,7 +847,7 @@ impl UiState {
             UiEffect::ReorderSession { .. } => "Reorder session",
             UiEffect::InterruptSubagent { .. } => "Subagent interrupt",
             UiEffect::AttachSession { .. } => "Attach session",
-            UiEffect::SetSessionMode { .. } => "Session mode",
+            UiEffect::SetPermissionPreset { .. } => "Permission preset",
             UiEffect::ListAgentPresets { .. } => "Agent preset list",
             UiEffect::SelectAgentPreset { .. } => "Agent preset",
             UiEffect::ListSessionModels { .. } => "Model list",
@@ -966,16 +973,21 @@ impl UiState {
             self.slash.reset();
             self.status = Some(prompt_admission_message(&completion.receipt.status));
         }
-        if let UiEffect::SetSessionMode { mode_id, .. } = &completion.effect {
-            if matches!(
-                completion.receipt.status,
-                UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
-            ) {
-                let mode = mode_id.unwrap_or(SessionModeId::Normal);
-                self.pending_session_mode = Some(mode);
-                self.status = Some(format!("Mode → {mode}"));
-            } else {
-                self.pending_session_mode = None;
+        if let UiEffect::SetPermissionPreset { preset, .. } = &completion.effect {
+            let matches_pending = self.pending_permission.as_ref().is_some_and(|pending| {
+                pending.operation.request_id == completion.receipt.operation.request_id
+            });
+            if matches_pending {
+                if matches!(
+                    completion.receipt.status,
+                    UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+                ) {
+                    self.status = Some(format!(
+                        "Permission → {preset}; waiting for host projection"
+                    ));
+                } else {
+                    self.pending_permission = None;
+                }
             }
         }
         if let UiEffect::ListAgentPresets { revision, .. } = &completion.effect {
@@ -1120,9 +1132,8 @@ impl UiState {
         self.sync_dashboard(control_plane);
         self.agent_pane.sync(&snapshot.agent);
         self.reconcile_snapshot(&snapshot);
-        self.reconcile_session_mode(&snapshot);
+        self.reconcile_permission(&snapshot);
         self.welcome_animation.observe_session(&snapshot.session_id);
-        let session_mode = self.effective_session_mode(&snapshot);
         let focused = self.shell.owner() == KeyOwner::Prompt;
         let compact = effective_compact(false, area.height);
         let appearance = GrokAppearanceSnapshot::for_area(area, compact);
@@ -1136,7 +1147,6 @@ impl UiState {
                 &snapshot.transcript,
                 self.interaction_selected,
                 self.interaction_pending.is_some(),
-                session_mode,
             )
         });
         if let Some(permission) = permission.as_mut() {
@@ -1189,7 +1199,7 @@ impl UiState {
                 .models
                 .current_model_name()
                 .unwrap_or_else(|| snapshot.model.clone()),
-            flags: self.prompt_flags(&snapshot, session_mode, theme),
+            flags: self.prompt_flags(&snapshot, theme),
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
         };
@@ -1584,8 +1594,16 @@ impl UiState {
             .or(snapshot.status.as_deref())
             .or(capability_notice)
             .unwrap_or("");
-        let mode = self.effective_session_mode(snapshot);
-        let mut details = format!("mode {mode} · queue r{}", snapshot.queue_revision);
+        let plan = if snapshot.controls.plan.target_active() {
+            "on"
+        } else {
+            "off"
+        };
+        let mut details = format!(
+            "plan {plan} · permission {} · queue r{}",
+            self.effective_permission_preset(snapshot),
+            snapshot.queue_revision
+        );
         if let Some(pending) = &self.queue_pending {
             details.push_str(&format!(
                 " · pending {} ({})",
@@ -2013,18 +2031,26 @@ impl UiState {
         )
     }
 
-    fn prompt_flags(
-        &self,
-        snapshot: &GrokHostSnapshot,
-        session_mode: SessionModeId,
-        theme: &Theme,
-    ) -> Vec<PromptFlagContract> {
+    fn prompt_flags(&self, snapshot: &GrokHostSnapshot, theme: &Theme) -> Vec<PromptFlagContract> {
         let mut flags = vec![PromptFlagContract {
             text: self.agent_preset_label(snapshot),
             color: None,
             bold: true,
         }];
-        flags.extend(session_mode_flags(session_mode, theme));
+        if snapshot.controls.plan.target_active() {
+            flags.push(PromptFlagContract {
+                text: "plan".into(),
+                color: Some(theme.accent_plan),
+                bold: true,
+            });
+        }
+        if self.effective_permission_preset(snapshot) == YOLO_PRESET {
+            flags.push(PromptFlagContract {
+                text: "YOLO".into(),
+                color: Some(theme.warning),
+                bold: true,
+            });
+        }
         flags
     }
 
@@ -2132,6 +2158,14 @@ impl UiState {
             crate::terminal::terminal_context().shift_enter_unavailable(),
             None,
         );
+        // Grok's generic prompt hint hard-codes the upstream Shift+Tab mode
+        // cycle. DSH has independent Plan and permission controls, so replace
+        // that slot with Grok's own Ctrl+O ToggleYolo action definition.
+        if let Some(mode_hint) = hints.iter_mut().find(|hint| hint.label == "mode")
+            && let Some(def) = registry.find(ActionId::ToggleYolo)
+        {
+            *mode_hint = def.hint();
+        }
         if (self.shell.overlay() == Overlay::Queue || has_visible_queue)
             && active_pane != ActivePane::Queue
             && !self.queue_editing
@@ -2578,8 +2612,8 @@ impl UiState {
                 self.status = Some("Draft cleared".into());
                 Ok(false)
             }
-            ShellAction::CycleSessionMode => {
-                self.cycle_session_mode(transport, session)?;
+            ShellAction::ToggleYolo => {
+                self.toggle_yolo(transport, session)?;
                 Ok(false)
             }
             ShellAction::OpenModelPicker => {
@@ -4478,6 +4512,11 @@ impl UiState {
         interaction: &DshInteraction,
         snapshot: &GrokHostSnapshot,
     ) -> PagerResult<()> {
+        // Grok's approval overlay keeps the global Ctrl+O YOLO toggle
+        // reachable before the pending-response guard.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+            return self.toggle_yolo(transport, session);
+        }
         if key.code == KeyCode::Esc {
             self.shell.park_permission();
             self.status = Some(if self.interaction_pending.is_some() {
@@ -4495,7 +4534,6 @@ impl UiState {
             &snapshot.transcript,
             self.interaction_selected,
             false,
-            self.effective_session_mode(snapshot),
         ) else {
             return Ok(());
         };
@@ -4663,13 +4701,9 @@ impl UiState {
                             session,
                             Some(transport.control_plane()),
                         );
-                        let Some(permission) = permission_state(
-                            interaction,
-                            &snapshot.transcript,
-                            index,
-                            false,
-                            self.effective_session_mode(&snapshot),
-                        ) else {
+                        let Some(permission) =
+                            permission_state(interaction, &snapshot.transcript, index, false)
+                        else {
                             return Ok(());
                         };
                         if let Some(choice) =
@@ -4713,62 +4747,75 @@ impl UiState {
                 outcome: approval_outcome(choice).into(),
             },
         )?;
-        if choice == PermissionChoice::DontAskAgain {
-            self.submit_session_mode(transport, session, Some(SessionModeId::DangerFullAccess))?;
-        }
         Ok(())
     }
 
-    fn cycle_session_mode(
+    fn toggle_yolo(
         &mut self,
         transport: &mut RpcTransport,
         session: &SessionState,
     ) -> PagerResult<()> {
+        if let Some(pending) = self.pending_permission.as_ref() {
+            self.status = Some(format!(
+                "Permission switch to {} is already pending ({})",
+                pending.target, pending.operation.request_id
+            ));
+            return Ok(());
+        }
         let snapshot = GrokHostSnapshot::from_session_with_control_plane(
             session,
             Some(transport.control_plane()),
         );
-        let next = self.effective_session_mode(&snapshot).next();
-        self.submit_session_mode(transport, session, Some(next))
-    }
-
-    fn submit_session_mode(
-        &mut self,
-        transport: &mut RpcTransport,
-        session: &SessionState,
-        mode_id: Option<SessionModeId>,
-    ) -> PagerResult<()> {
-        if let Some(mode) = mode_id {
-            self.pending_session_mode = Some(mode);
-            self.status = Some(format!("Mode → {mode}"));
+        let target = next_permission_preset(snapshot.controls.permission.current_value.as_deref());
+        if !snapshot.controls.permission.supports(target) {
+            self.status = Some(format!(
+                "Permission preset {target} is unavailable from the host"
+            ));
+            return Ok(());
         }
         let receipt = self.submit_effect(
             transport,
-            UiIntent::SetSessionMode { mode_id },
+            UiIntent::SetPermissionPreset {
+                preset: target.to_string(),
+            },
             &UiContext::from_session(session),
         )?;
         match receipt.status {
             UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending => {
-                if let Some(mode) = mode_id {
-                    self.status = Some(format!("Mode → {mode}"));
-                }
+                self.pending_permission = Some(PendingPermissionSwitch {
+                    operation: receipt.operation.clone(),
+                    target: target.to_string(),
+                });
+                self.status = Some(format!("Permission → {target}"));
             }
             _ => {
-                self.pending_session_mode = None;
-                self.status = Some(receipt_status_message(&receipt, "Session mode"));
+                self.status = Some(receipt_status_message(&receipt, "Permission preset"));
             }
         }
         Ok(())
     }
 
-    fn reconcile_session_mode(&mut self, snapshot: &GrokHostSnapshot) {
-        if self.pending_session_mode == Some(snapshot.session_mode) {
-            self.pending_session_mode = None;
+    fn reconcile_permission(&mut self, snapshot: &GrokHostSnapshot) {
+        let Some(pending) = self.pending_permission.as_ref() else {
+            return;
+        };
+        if snapshot.controls.permission.current_value.as_deref() == Some(pending.target.as_str()) {
+            let enabled = pending.target == YOLO_PRESET;
+            self.pending_permission = None;
+            self.status = Some(if enabled {
+                "YOLO enabled".into()
+            } else {
+                "YOLO disabled; permission restored to workspace-write".into()
+            });
         }
     }
 
-    fn effective_session_mode(&self, snapshot: &GrokHostSnapshot) -> SessionModeId {
-        self.pending_session_mode.unwrap_or(snapshot.session_mode)
+    fn effective_permission_preset<'a>(&'a self, snapshot: &'a GrokHostSnapshot) -> &'a str {
+        self.pending_permission
+            .as_ref()
+            .map(|pending| pending.target.as_str())
+            .or(snapshot.controls.permission.current_value.as_deref())
+            .unwrap_or("unknown")
     }
 
     fn submit_interaction(
@@ -5117,19 +5164,11 @@ fn agent_status_message_with_subagents(snapshot: &AgentSnapshot, subagents: usiz
     }
 }
 
-fn session_mode_flags(mode: SessionModeId, theme: &Theme) -> Vec<PromptFlagContract> {
-    match mode {
-        SessionModeId::Normal => Vec::new(),
-        SessionModeId::Plan => vec![PromptFlagContract {
-            text: SessionModeId::Plan.as_str().into(),
-            color: Some(theme.accent_plan),
-            bold: true,
-        }],
-        SessionModeId::DangerFullAccess => vec![PromptFlagContract {
-            text: SessionModeId::DangerFullAccess.as_str().into(),
-            color: Some(theme.warning),
-            bold: true,
-        }],
+fn next_permission_preset(current: Option<&str>) -> &'static str {
+    if current == Some(YOLO_PRESET) {
+        DEFAULT_PERMISSION_PRESET
+    } else {
+        YOLO_PRESET
     }
 }
 
@@ -5167,6 +5206,7 @@ fn prompt_admission_message(status: &UiEffectStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::format_file_reference;
+    use super::next_permission_preset;
     use super::prompt_admission_message;
     use super::prompt_receipt_admitted;
     use super::render_file_search_content;
@@ -5352,6 +5392,29 @@ mod tests {
         let snapshot = GrokHostSnapshot::demo();
         assert_eq!(snapshot.model, "deepseek-reasoner");
         assert_eq!(snapshot.picker_entries().len(), 3);
+    }
+
+    #[test]
+    fn dsh_prompt_replaces_the_upstream_mode_hint_with_grok_toggle_yolo() {
+        let snapshot = GrokHostSnapshot::demo();
+        let mut ui = UiState::default();
+        ui.shell.focus_prompt();
+        let (hints, _) = ui.pane_shortcut_hints(&snapshot, false);
+        assert!(hints.iter().any(|hint| hint.label == "yolo"));
+        assert!(!hints.iter().any(|hint| hint.label == "mode"));
+    }
+
+    #[test]
+    fn yolo_toggle_restores_the_off_preset_without_touching_plan() {
+        assert_eq!(next_permission_preset(None), "danger-full-access");
+        assert_eq!(
+            next_permission_preset(Some("workspace-write")),
+            "danger-full-access"
+        );
+        assert_eq!(
+            next_permission_preset(Some("danger-full-access")),
+            "workspace-write"
+        );
     }
 
     #[test]
@@ -5653,12 +5716,12 @@ mod tests {
 
         assert_eq!(ui.shell.overlay(), crate::app::Overlay::Permission);
         assert_eq!(ui.shell.owner(), crate::app::KeyOwner::Interaction);
-        assert_eq!(ui.permission_option_rows.len(), 3);
+        assert_eq!(ui.permission_option_rows.len(), 2);
         assert!(screen.contains("List project files"));
         assert!(screen.contains("find /work -maxdepth 3"));
         assert!(screen.contains("1 (●) Yes, proceed"));
-        assert!(screen.contains("2 (○) Yes, don't ask again this conversation"));
-        assert!(screen.contains("3 (○) No, reject"));
+        assert!(screen.contains("2 (○) No, reject"));
+        assert!(!screen.contains("don't ask again"));
         assert!(screen.contains('◆'));
         assert!(screen.contains("List project files…"));
         assert!(ui.hit_map.regions().iter().any(|region| {

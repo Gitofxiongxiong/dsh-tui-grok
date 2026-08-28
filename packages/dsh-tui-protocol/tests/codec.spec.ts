@@ -16,7 +16,6 @@ import {
   decodeHelloResult,
   decodeJsonRpcMessage,
   decodeRespondParams,
-  decodeSetSessionModeParams,
   decodeSubscribeParams,
   isApiProxyMethod,
   isTuiNotificationMethod,
@@ -211,8 +210,8 @@ describe('classifyMethod', () => {
     expect(classifyMethod('session.history')).toBe('api')
     expect(classifyMethod('session/prompt')).toBe('unknown')
     expect(isTuiRequestMethod('tui.respond')).toBe(true)
-    expect(isTuiRequestMethod('tui.setSessionMode')).toBe(true)
-    expect(classifyMethod('tui.setSessionMode')).toBe('tui-request')
+    expect(isTuiRequestMethod('tui.setSessionMode')).toBe(false)
+    expect(classifyMethod('tui.setSessionMode')).toBe('unknown')
     expect(isTuiNotificationMethod('tui.serverDraining')).toBe(true)
     expect(isApiProxyMethod('llm.models')).toBe(true)
     expect(isApiProxyMethod('fileReferences.list')).toBe(true)
@@ -401,24 +400,6 @@ describe('session-scoped decoders', () => {
     expect(decodeRespondParams({ ...base, requestId: 'r', interaction: { type: 'question' } }).ok).toBe(false)
     expect(decodeRespondParams({ ...base, requestId: 'r', interaction: { type: 'plan' } }).ok).toBe(false)
     expect(decodeRespondParams({ ...base, requestId: 'r' }).ok).toBe(false)
-  })
-})
-
-describe('decodeSetSessionModeParams', () => {
-  it('accepts a cycle request and an explicit mode id', () => {
-    const base = { sessionId: 'sess-1', generation: 2 }
-    expect(decodeSetSessionModeParams(base)).toEqual({
-      ok: true,
-      value: { sessionId: SessionId('sess-1'), generation: 2 },
-    })
-    expect(decodeSetSessionModeParams({ ...base, modeId: 'plan' })).toEqual({
-      ok: true,
-      value: { sessionId: SessionId('sess-1'), generation: 2, modeId: 'plan' },
-    })
-    expect(decodeSetSessionModeParams({ ...base, modeId: 'danger-full-access' }).ok).toBe(true)
-    expect(decodeSetSessionModeParams({ ...base, modeId: 'yolo' }).ok).toBe(false)
-    expect(decodeSetSessionModeParams({ sessionId: 'sess-1', generation: -1 }).ok).toBe(false)
-    expect(decodeSetSessionModeParams(null).ok).toBe(false)
   })
 })
 

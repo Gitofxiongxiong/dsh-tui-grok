@@ -31,8 +31,6 @@ import type {
   TuiHelloResult,
   TuiInteractionResponse,
   TuiRespondParams,
-  TuiSessionModeId,
-  TuiSetSessionModeParams,
   TuiSubscribeScope,
   TuiSubscribeParams,
 } from './types.js'
@@ -50,7 +48,6 @@ export type DecodeResult<T> = { ok: true; value: T } | DecodeFailure
 
 const CLIENT_TYPES: ReadonlySet<string> = new Set(['tui', 'test'])
 const RESUME_CLASSES: ReadonlySet<string> = new Set(['resume-accepted', 'baseline-required'])
-const SESSION_MODE_IDS: ReadonlySet<string> = new Set(['normal', 'plan', 'danger-full-access'])
 const ATTACH_ROLES: ReadonlySet<string> = new Set(['driver', 'subscriber'])
 const SUBSCRIBE_SCOPES: ReadonlySet<string> = new Set(['session', 'control-plane', 'all'])
 
@@ -418,31 +415,6 @@ export function decodeRespondParams(params: unknown): DecodeResult<TuiRespondPar
       generation: base.value.generation,
       requestId: params.requestId,
       interaction: interaction.value,
-    },
-  }
-}
-
-/**
- * Decode `tui.setSessionMode` params.
- * @param params - the JSON-RPC params value.
- * @returns the typed params or a decode failure.
- */
-export function decodeSetSessionModeParams(params: unknown): DecodeResult<TuiSetSessionModeParams> {
-  const base = decodeSessionGeneration(params, 'session-mode-params')
-  if (!base.ok) return base
-  if (!isRecord(params)) return { ok: false, reason: 'session-mode-params' }
-  if (!Object.hasOwn(params, 'modeId')) {
-    return { ok: true, value: { sessionId: base.value.sessionId, generation: base.value.generation } }
-  }
-  if (typeof params.modeId !== 'string' || !SESSION_MODE_IDS.has(params.modeId)) {
-    return { ok: false, reason: 'mode-id' }
-  }
-  return {
-    ok: true,
-    value: {
-      sessionId: base.value.sessionId,
-      generation: base.value.generation,
-      modeId: params.modeId as TuiSessionModeId,
     },
   }
 }

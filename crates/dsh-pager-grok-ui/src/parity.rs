@@ -454,7 +454,12 @@ pub fn render_semantic(
         role: "prompt".into(),
         text: format!(
             "{} · {}",
-            snapshot.session_mode,
+            snapshot
+                .controls
+                .permission
+                .current_value
+                .as_deref()
+                .unwrap_or("permission unknown"),
             if snapshot.prompt.authoritative {
                 "Prompt"
             } else {
@@ -583,13 +588,23 @@ pub fn render_semantic(
     };
     let prompt_info = PromptInfoContract {
         model_name: snapshot.model.clone(),
-        flags: match snapshot.session_mode {
-            dsh_pager_protocol::SessionModeId::Normal => Vec::new(),
-            mode => vec![PromptFlagContract {
-                text: mode.as_str().into(),
-                color: None,
-                bold: true,
-            }],
+        flags: {
+            let mut flags = Vec::new();
+            if snapshot.controls.plan.target_active() {
+                flags.push(PromptFlagContract {
+                    text: "plan".into(),
+                    color: None,
+                    bold: true,
+                });
+            }
+            if snapshot.controls.permission.is_yolo() {
+                flags.push(PromptFlagContract {
+                    text: "YOLO".into(),
+                    color: None,
+                    bold: true,
+                });
+            }
+            flags
         },
         ..PromptInfoContract::default()
     };
