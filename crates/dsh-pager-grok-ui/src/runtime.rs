@@ -144,6 +144,13 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn register_model_label_click(last_click: &mut Option<Instant>, now: Instant) -> bool {
+    let double_click =
+        last_click.is_some_and(|previous| now.duration_since(previous) <= TRANSCRIPT_DOUBLE_CLICK);
+    *last_click = (!double_click).then_some(now);
+    double_click
+}
+
 fn agent_overlay_key_closes(key: crossterm::event::KeyEvent) -> bool {
     if key.code == KeyCode::Esc {
         return true;
@@ -684,6 +691,7 @@ struct UiState {
     child_follow: bool,
     child_history_at: Option<Instant>,
     last_agent_item_click: Option<(Instant, AgentItemId)>,
+    last_model_label_click: Option<Instant>,
     watchers_live: bool,
     dashboard: DashboardModel,
     workspace_tree: WorkspaceTreeController,
@@ -1463,6 +1471,15 @@ impl UiState {
                 Some(&prompt_info),
                 theme,
             );
+            if prompt_result.model_area.width > 0 && prompt_result.model_area.height > 0 {
+                self.hit_map.insert(crate::geometry::HitRegion {
+                    target: HitTarget::Overlay("model-label".into()),
+                    rect: prompt_result.model_area,
+                    label: "double-click to choose model".into(),
+                    link: None,
+                    priority: 24,
+                });
+            }
             if let Some(rect) = prompt_result
                 .info_flag_areas
                 .first()
@@ -2053,7 +2070,7 @@ impl UiState {
                 .current_model_name()
                 .unwrap_or_else(|| snapshot.model.clone());
             let model_label = compact_model_label(&model_name);
-            render_welcome(
+            let welcome = render_welcome(
                 frame.buffer_mut(),
                 transcript_inner,
                 elapsed,
@@ -2061,6 +2078,15 @@ impl UiState {
                 &self.agent_preset_label(snapshot),
                 theme,
             );
+            if welcome.model_area.width > 0 && welcome.model_area.height > 0 {
+                self.hit_map.insert(crate::geometry::HitRegion {
+                    target: HitTarget::Overlay("model-label".into()),
+                    rect: welcome.model_area,
+                    label: "double-click to choose model".into(),
+                    link: None,
+                    priority: 24,
+                });
+            }
         }
 
         if let Some(selection) = self.selection.selection() {
@@ -2668,6 +2694,15 @@ impl UiState {
                     self.open_preset_picker(transport, session);
                     return Ok(false);
                 }
+                if name == "model-label" {
+                    let now = Instant::now();
+                    if register_model_label_click(&mut self.last_model_label_click, now) {
+                        self.open_model_picker(transport, session);
+                    } else {
+                        self.status = Some("Model selected · double-click to choose".into());
+                    }
+                    return Ok(false);
+                }
                 if let Some(key) = name.strip_prefix("agent-item:")
                     && let Some(id) = agent_item_from_key(key)
                 {
@@ -3018,6 +3053,7 @@ impl UiState {
                 self.frame_links.clear();
                 self.geometry_lines.clear();
                 self.last_transcript_click = None;
+                self.last_model_label_click = None;
                 self.status = Some(format!("Resized to {}x{}", area.width, area.height));
                 Ok(false)
             }
@@ -5566,8 +5602,8 @@ mod tests {
     use super::steer_capability_available;
     use super::{
         MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand, TranscriptViewportState,
-        UiState, agent_overlay_close_click, agent_overlay_key_closes, render_agent_tasks_content,
-        render_image_preview_content,
+        UiState, agent_overlay_close_click, agent_overlay_key_closes, register_model_label_click,
+        render_agent_tasks_content, render_image_preview_content,
     };
     use crate::app::Overlay;
     use crate::effects::UiEffectStatus;
@@ -5581,6 +5617,27 @@ mod tests {
     #[test]
     fn notification_batch_matches_grok_streaming_input_fairness_contract() {
         assert_eq!(NOTIFICATION_BUDGET, 32);
+    }
+
+    #[test]
+    fn model_label_opens_only_on_a_bounded_second_click() {
+        let started = std::time::Instant::now();
+        let mut last_click = None;
+        assert!(!register_model_label_click(&mut last_click, started));
+        assert!(register_model_label_click(
+            &mut last_click,
+            started + std::time::Duration::from_millis(100)
+        ));
+        assert_eq!(last_click, None);
+
+        assert!(!register_model_label_click(
+            &mut last_click,
+            started + std::time::Duration::from_secs(1)
+        ));
+        assert!(!register_model_label_click(
+            &mut last_click,
+            started + std::time::Duration::from_millis(1_451)
+        ));
     }
     use crate::views::agent_panes::{AgentItemId, AgentPaneController};
     use crate::views::modal_window::{

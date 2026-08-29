@@ -3,25 +3,35 @@
 //! Copied from Grok `acp/model_state.rs`. Catalog identity is DSH's
 //! `{provider, model}` pair; Grok's single `ModelId` is `provider/model`.
 
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
 use dsh_pager_protocol::{ModelCatalogFailure, ModelSelection, SessionModelsValue};
+
+const MODEL_LABEL_ALIASES_JSON: &str = include_str!("../model-label-aliases.json");
+static MODEL_LABEL_ALIASES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
 /// Compact model label used only by space-constrained prompt/welcome chrome.
 ///
 /// Catalog names and wire identities stay untouched: pickers and RPC effects
-/// continue to use the Host-published value. This is only a visual alias for
-/// the DeepSeek V4 Flash family, including longer experimental display names.
+/// continue to use the Host-published value. Aliases are project-owned data;
+/// unknown names stay intact so the renderer can elide them to its real width.
 pub fn compact_model_label(name: &str) -> String {
-    let normalized = name.to_ascii_lowercase();
-    let tokens = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let has = |expected: &str| tokens.contains(&expected);
-    if has("deepseek") && has("v4") && has("flash") {
-        "dsv4 flash".to_string()
-    } else {
-        name.to_string()
-    }
+    model_label_aliases()
+        .get(&name.to_ascii_lowercase())
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn model_label_aliases() -> &'static BTreeMap<String, String> {
+    MODEL_LABEL_ALIASES.get_or_init(|| {
+        let aliases = serde_json::from_str::<BTreeMap<String, String>>(MODEL_LABEL_ALIASES_JSON)
+            .expect("model-label-aliases.json must be a string-to-string JSON object");
+        aliases
+            .into_iter()
+            .map(|(name, alias)| (name.to_ascii_lowercase(), alias))
+            .collect()
+    })
 }
 
 /// Why an effort token could not be applied to a model. Shared by `/model`'s
@@ -321,14 +331,39 @@ mod tests {
     }
 
     #[test]
-    fn compact_prompt_label_only_aliases_the_deepseek_v4_flash_family() {
+    fn compact_prompt_label_uses_the_checked_in_alias_table() {
+        assert_eq!(compact_model_label("DeepSeek-V4-Flash"), "dsv4 flash");
         assert_eq!(
             compact_model_label("DeepSeek-V4-Flash-Vision-Exp"),
-            "dsv4 flash"
+            "dsv4 flash-v"
         );
-        assert_eq!(compact_model_label("DeepSeek V4 Flash"), "dsv4 flash");
-        assert_eq!(compact_model_label("DeepSeek-V4-Pro"), "DeepSeek-V4-Pro");
+        assert_eq!(
+            compact_model_label("DeepSeek-V4-Flash-Vision-Preview"),
+            "dsv4 flash-v"
+        );
+        assert_eq!(compact_model_label("DeepSeek-V4-Pro"), "dsv4 pro");
+        assert_eq!(compact_model_label("deepseek-v4-pro"), "dsv4 pro");
+        assert_eq!(
+            compact_model_label("Preview-DeepSeek-V4-Flash"),
+            "Preview-DeepSeek-V4-Flash"
+        );
+        assert_eq!(
+            compact_model_label("DeepSeek V4 Flash"),
+            "DeepSeek V4 Flash"
+        );
         assert_eq!(compact_model_label("private-preview"), "private-preview");
+    }
+
+    #[test]
+    fn checked_in_alias_table_has_nonempty_unique_case_insensitive_keys() {
+        let raw = serde_json::from_str::<BTreeMap<String, String>>(MODEL_LABEL_ALIASES_JSON)
+            .expect("checked-in aliases parse");
+        assert!(!raw.is_empty());
+        assert!(
+            raw.iter()
+                .all(|(name, alias)| !name.is_empty() && !alias.is_empty())
+        );
+        assert_eq!(raw.len(), model_label_aliases().len());
     }
 
     #[test]

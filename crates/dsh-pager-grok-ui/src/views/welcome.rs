@@ -441,6 +441,19 @@ pub enum WelcomeLayout {
     Compact,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WelcomeRenderResult {
+    pub layout: WelcomeLayout,
+    /// Exact rectangle of the model text painted by the selected layout.
+    pub model_area: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactModelPresetLine {
+    text: String,
+    model_range: Option<(usize, usize)>,
+}
+
 #[derive(Debug, Default)]
 pub struct WelcomeAnimation {
     session_id: Option<String>,
@@ -484,14 +497,18 @@ pub fn render_welcome(
     model: &str,
     preset: &str,
     theme: &Theme,
-) -> WelcomeLayout {
+) -> WelcomeRenderResult {
     buf.set_style(area, Style::default().bg(theme.bg_base));
     if area.width >= WIDE_MIN_WIDTH && area.height >= WIDE_MIN_HEIGHT {
-        render_wide(buf, area, opening_frame(elapsed), model, preset, theme);
-        WelcomeLayout::Wide
+        WelcomeRenderResult {
+            layout: WelcomeLayout::Wide,
+            model_area: render_wide(buf, area, opening_frame(elapsed), model, preset, theme),
+        }
     } else {
-        render_compact(buf, area, model, preset, theme);
-        WelcomeLayout::Compact
+        WelcomeRenderResult {
+            layout: WelcomeLayout::Compact,
+            model_area: render_compact(buf, area, model, preset, theme),
+        }
     }
 }
 
@@ -525,7 +542,7 @@ fn render_wide(
     model: &str,
     preset: &str,
     theme: &Theme,
-) {
+) -> Rect {
     let group_width = WIDE_MIN_WIDTH.min(area.width);
     let group_x = area
         .x
@@ -549,9 +566,15 @@ fn render_wide(
 
     let value_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
     let label_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+    let model_prefix = "model  ";
+    let model_prefix_width = model_prefix.width();
+    let model = elide_middle(
+        model,
+        usize::from(text_width).saturating_sub(model_prefix_width),
+    );
     let model_line = Line::from(vec![
-        Span::styled("model  ", label_style),
-        Span::styled(model, value_style),
+        Span::styled(model_prefix, label_style),
+        Span::styled(model.clone(), value_style),
     ]);
     let preset_line = Line::from(vec![
         Span::styled("preset ", label_style),
@@ -572,11 +595,23 @@ fn render_wide(
         "Explore the uncharted!",
         Style::default().fg(BELLY).bg(theme.bg_base),
     );
+
+    let model_width = model.width() as u16;
+    if model_width == 0 {
+        Rect::default()
+    } else {
+        Rect::new(
+            text_x.saturating_add(model_prefix_width as u16),
+            group_y.saturating_add(4),
+            model_width,
+            1,
+        )
+    }
 }
 
-fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme: &Theme) {
+fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme: &Theme) -> Rect {
     if area.height == 0 || area.width == 0 {
-        return;
+        return Rect::default();
     }
     let rows = area.height.min(3);
     let y = area.y.saturating_add(area.height.saturating_sub(rows) / 2);
@@ -589,15 +624,28 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme
             .bg(theme.bg_base)
             .add_modifier(Modifier::BOLD),
     );
-    if rows >= 2 {
+    let model_area = if rows >= 2 {
         let model_preset = compact_model_preset_line(model, preset, area.width as usize);
-        render_centered(
+        let rendered = render_centered(
             buf,
             Rect::new(area.x, y.saturating_add(1), area.width, 1),
-            &model_preset,
+            &model_preset.text,
             Style::default().fg(theme.gray).bg(theme.bg_base),
         );
-    }
+        model_preset
+            .model_range
+            .map(|(start, width)| {
+                Rect::new(
+                    rendered.x.saturating_add(start as u16),
+                    rendered.y,
+                    width as u16,
+                    1,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        Rect::default()
+    };
     if rows >= 3 {
         render_centered(
             buf,
@@ -606,13 +654,21 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme
             Style::default().fg(theme.gray_dim).bg(theme.bg_base),
         );
     }
+    model_area
 }
 
 /// Keep the compact welcome preset semantic: elide the model first, and never
 /// turn a complete preset such as `标准模式` into the misleading `准模式`.
-fn compact_model_preset_line(model: &str, preset: &str, max_width: usize) -> String {
+fn compact_model_preset_line(
+    model: &str,
+    preset: &str,
+    max_width: usize,
+) -> CompactModelPresetLine {
     if max_width == 0 {
-        return String::new();
+        return CompactModelPresetLine {
+            text: String::new(),
+            model_range: None,
+        };
     }
 
     let preset_width = preset.width();
@@ -622,14 +678,26 @@ fn compact_model_preset_line(model: &str, preset: &str, max_width: usize) -> Str
         let model_budget = max_width.saturating_sub(preset_width + separator_width);
         if !model.is_empty() && model_budget > 0 {
             let model = elide_middle(model, model_budget);
-            return format!("{model}{separator}{preset}");
+            let model_width = model.width();
+            return CompactModelPresetLine {
+                text: format!("{model}{separator}{preset}"),
+                model_range: Some((0, model_width)),
+            };
         }
-        return preset.to_string();
+        return CompactModelPresetLine {
+            text: preset.to_string(),
+            model_range: None,
+        };
     }
 
     // At widths where the preset itself cannot fit, omit it as one atomic
     // label. The model remains useful context and is safe to elide.
-    elide_middle(model, max_width)
+    let model = elide_middle(model, max_width);
+    let model_width = model.width();
+    CompactModelPresetLine {
+        text: model,
+        model_range: (model_width > 0).then_some((0, model_width)),
+    }
 }
 
 fn paint_whale(buf: &mut Buffer, area: Rect, frame_index: usize, background: Color) {
@@ -678,14 +746,15 @@ fn palette(pixel: u8) -> Option<Color> {
     }
 }
 
-fn render_centered(buf: &mut Buffer, area: Rect, text: &str, style: Style) {
+fn render_centered(buf: &mut Buffer, area: Rect, text: &str, style: Style) -> Rect {
     if area.width == 0 || area.height == 0 {
-        return;
+        return Rect::default();
     }
     let text = elide_middle(text, area.width as usize);
     let width = UnicodeWidthStr::width(text.as_str()) as u16;
     let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
     buf.set_stringn(x, area.y, text, width as usize, style);
+    Rect::new(x, area.y, width, 1)
 }
 
 fn elide_middle(text: &str, max_width: usize) -> String {
@@ -779,7 +848,8 @@ mod tests {
                 "deepseek",
                 "标准模式",
                 theme,
-            ),
+            )
+            .layout,
             WelcomeLayout::Wide
         );
         let compact_area = Rect::new(0, 0, 63, 13);
@@ -792,7 +862,8 @@ mod tests {
                 "deepseek",
                 "标准模式",
                 theme,
-            ),
+            )
+            .layout,
             WelcomeLayout::Compact
         );
     }
@@ -800,17 +871,47 @@ mod tests {
     #[test]
     fn compact_welcome_elides_the_model_without_splitting_the_preset() {
         let line = compact_model_preset_line("DeepSeek-V4-Flash-Vision-Exp", "标准模式", 20);
-        assert!(line.ends_with("标准模式"));
-        assert!(line.contains('…'));
-        assert!(line.width() <= 20);
+        assert!(line.text.ends_with("标准模式"));
+        assert!(line.text.contains('…'));
+        assert!(line.text.width() <= 20);
+        assert!(line.model_range.is_some());
 
         assert_eq!(
-            compact_model_preset_line("dsv4 flash", "标准模式", 8),
+            compact_model_preset_line("dsv4 flash", "标准模式", 8).text,
             "标准模式"
         );
-        let narrower = compact_model_preset_line("dsv4 flash", "标准模式", 7);
+        let narrower = compact_model_preset_line("dsv4 flash", "标准模式", 7).text;
         assert!(!narrower.contains("标准模式"));
         assert!(!narrower.contains("准模式"));
+    }
+
+    #[test]
+    fn welcome_returns_the_exact_visible_model_geometry() {
+        let theme = Theme::current();
+        let wide_area = Rect::new(0, 0, 80, 20);
+        let mut wide = Buffer::empty(wide_area);
+        let wide_result = render_welcome(
+            &mut wide,
+            wide_area,
+            Duration::ZERO,
+            "dsv4 pro",
+            "标准模式",
+            theme,
+        );
+        assert_eq!(wide_result.model_area.width, 8);
+
+        let compact_area = Rect::new(0, 0, 32, 8);
+        let mut compact = Buffer::empty(compact_area);
+        let compact_result = render_welcome(
+            &mut compact,
+            compact_area,
+            Duration::ZERO,
+            "unmapped-model-name-that-is-long",
+            "标准模式",
+            theme,
+        );
+        assert!(compact_result.model_area.width > 0);
+        assert!(compact_result.model_area.right() <= compact_area.right());
     }
 
     #[test]

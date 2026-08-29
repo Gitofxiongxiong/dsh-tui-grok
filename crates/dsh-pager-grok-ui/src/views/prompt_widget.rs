@@ -23,6 +23,8 @@ const PREFIX_WIDTH: u16 = 2;
 pub(crate) struct PromptRenderResult {
     pub cursor_pos: Option<(u16, u16)>,
     pub textarea_area: Rect,
+    /// Exact paint-time rectangle of the visible model label.
+    pub model_area: Rect,
     /// Visible rectangles for `PromptInfoContract::flags`, in flag order.
     /// Returning draw-time geometry keeps mouse hit testing on the same
     /// truncation and right-alignment path as the Grok prompt painter.
@@ -78,6 +80,7 @@ impl GrokPromptRenderer {
         let accent_color = style.accent_color_override.unwrap_or(theme.accent_user);
         let geometry = PromptGeometry::compute(area, style, info.is_some(), PREFIX_WIDTH);
         self.textarea_area = geometry.textarea;
+        let mut model_area = Rect::default();
         let mut info_flag_areas = Vec::new();
 
         // Upstream establishes explicit colors before TextArea patches cells.
@@ -163,7 +166,7 @@ impl GrokPromptRenderer {
         if info.is_some() && style.chrome && style.show_borders && geometry.info.height > 0 {
             draw_divider(buf, area, geometry.info.y, '╰', '╯', border_color, bg);
             if let Some(info) = info.filter(|info| !info.is_blank()) {
-                info_flag_areas = render_info_line(
+                let rendered = render_info_line(
                     buf,
                     Rect::new(
                         geometry.content.x,
@@ -176,6 +179,8 @@ impl GrokPromptRenderer {
                     theme,
                     style.focused,
                 );
+                model_area = rendered.model_area;
+                info_flag_areas = rendered.flag_areas;
             }
         }
 
@@ -189,6 +194,7 @@ impl GrokPromptRenderer {
                 .then(|| textarea.cursor_pos_with_state(geometry.textarea, self.textarea_state))
                 .flatten(),
             textarea_area: geometry.textarea,
+            model_area,
             info_flag_areas,
         }
     }
@@ -205,7 +211,14 @@ impl GrokPromptRenderer {
 #[derive(Debug)]
 struct FittedInfoLine {
     line: Line<'static>,
+    model_range: Option<(usize, usize)>,
     flag_ranges: Vec<Option<(usize, usize)>>,
+}
+
+#[derive(Debug, Default)]
+struct RenderedInfoLine {
+    model_area: Rect,
+    flag_areas: Vec<Rect>,
 }
 
 /// Fit the prompt caption without ever splitting a semantic flag.
@@ -225,6 +238,7 @@ fn fit_info_line(
     if max_width < 2 {
         return FittedInfoLine {
             line: Line::default(),
+            model_range: None,
             flag_ranges,
         };
     }
@@ -279,6 +293,7 @@ fn fit_info_line(
     let mut spans = vec![Span::styled(" ", pad_style)];
     let mut cursor = 1usize;
     let mut has_item = false;
+    let mut model_range = None;
     let push_separator = |spans: &mut Vec<Span<'static>>, cursor: &mut usize| {
         spans.push(Span::styled(" · ", separator_style));
         *cursor = cursor.saturating_add(3);
@@ -302,11 +317,14 @@ fn fit_info_line(
         if has_item {
             push_separator(&mut spans, &mut cursor);
         }
-        cursor = cursor.saturating_add(model.width());
+        let start = cursor;
+        let width = model.width();
         spans.push(Span::styled(
             model,
             chrome_caption_style(bg, theme, focused),
         ));
+        cursor = cursor.saturating_add(width);
+        model_range = Some((start, width));
         has_item = true;
     }
 
@@ -339,6 +357,7 @@ fn fit_info_line(
 
     FittedInfoLine {
         line: Line::from(spans),
+        model_range,
         flag_ranges,
     }
 }
@@ -387,9 +406,9 @@ fn render_info_line(
     bg: Color,
     theme: &Theme,
     focused: bool,
-) -> Vec<Rect> {
+) -> RenderedInfoLine {
     if area.height == 0 || area.width == 0 {
-        return Vec::new();
+        return RenderedInfoLine::default();
     }
 
     let pad_style = Style::default().bg(bg);
@@ -420,22 +439,29 @@ fn render_info_line(
         buf.set_line(right_x, area.y, &right_line, right_width.min(area.width));
     }
 
-    fitted
+    let model_area = range_to_rect(fitted.model_range, left_x, area.y);
+    let flag_areas = fitted
         .flag_ranges
         .into_iter()
-        .map(|range| {
-            let Some((start, width)) = range else {
-                return Rect::default();
-            };
-            let start = u16::try_from(start).unwrap_or(u16::MAX);
-            let width = u16::try_from(width).unwrap_or(u16::MAX);
-            if width == 0 {
-                Rect::default()
-            } else {
-                Rect::new(left_x.saturating_add(start), area.y, width, 1)
-            }
-        })
-        .collect()
+        .map(|range| range_to_rect(range, left_x, area.y))
+        .collect();
+    RenderedInfoLine {
+        model_area,
+        flag_areas,
+    }
+}
+
+fn range_to_rect(range: Option<(usize, usize)>, left_x: u16, y: u16) -> Rect {
+    let Some((start, width)) = range else {
+        return Rect::default();
+    };
+    let start = u16::try_from(start).unwrap_or(u16::MAX);
+    let width = u16::try_from(width).unwrap_or(u16::MAX);
+    if width == 0 {
+        Rect::default()
+    } else {
+        Rect::new(left_x.saturating_add(start), y, width, 1)
+    }
 }
 
 fn chrome_caption_style(bg: Color, theme: &Theme, focused: bool) -> Style {
@@ -650,6 +676,7 @@ mod tests {
         );
 
         assert_eq!(result.info_flag_areas.len(), 2);
+        assert_eq!(result.model_area.width, 26);
         assert_eq!(result.info_flag_areas[0].width, 10);
         assert_eq!(result.info_flag_areas[1].width, 4);
         assert!(result.info_flag_areas[1].x > result.info_flag_areas[0].x);
@@ -681,7 +708,9 @@ mod tests {
         assert_eq!(fitted.line.width(), 48);
         assert!(text.contains("标准模式 ▾"));
         assert!(text.contains("YOLO"));
+        assert!(text.contains('…'));
         assert!(!text.contains("YOL "));
+        assert_eq!(fitted.model_range.map(|(_, width)| width), Some(26));
         assert_eq!(fitted.flag_ranges[0].map(|(_, width)| width), Some(10));
         assert_eq!(fitted.flag_ranges[1].map(|(_, width)| width), Some(4));
     }
@@ -708,6 +737,7 @@ mod tests {
 
         let both = fit_info_line(&info, 19, theme.bg_base, theme, true);
         assert!(rendered_text(&both.line).contains("标准模式 ▾ · YOLO"));
+        assert_eq!(both.model_range, None);
         assert_eq!(both.flag_ranges[0].map(|(_, width)| width), Some(10));
         assert_eq!(both.flag_ranges[1].map(|(_, width)| width), Some(4));
 
@@ -717,5 +747,27 @@ mod tests {
         assert!(text.contains("YOLO"));
         assert_eq!(yolo_only.flag_ranges[0], None);
         assert_eq!(yolo_only.flag_ranges[1].map(|(_, width)| width), Some(4));
+    }
+
+    #[test]
+    fn prompt_returns_the_exact_visible_alias_geometry() {
+        let area = Rect::new(0, 0, 48, 3);
+        let mut buffer = Buffer::empty(area);
+        let mut textarea = TextArea::new();
+        let result = GrokPromptRenderer::default().draw(
+            &mut buffer,
+            area,
+            &mut textarea,
+            &PromptStyleContract::default(),
+            Some(&PromptInfoContract {
+                model_name: "dsv4 flash-v".into(),
+                ..PromptInfoContract::default()
+            }),
+            Theme::current(),
+        );
+
+        assert_eq!(result.model_area.width, 12);
+        assert_eq!(result.model_area.y, 2);
+        assert!(result.model_area.right() < area.right());
     }
 }
