@@ -5,6 +5,25 @@
 
 use dsh_pager_protocol::{ModelCatalogFailure, ModelSelection, SessionModelsValue};
 
+/// Compact model label used only by space-constrained prompt/welcome chrome.
+///
+/// Catalog names and wire identities stay untouched: pickers and RPC effects
+/// continue to use the Host-published value. This is only a visual alias for
+/// the DeepSeek V4 Flash family, including longer experimental display names.
+pub fn compact_model_label(name: &str) -> String {
+    let normalized = name.to_ascii_lowercase();
+    let tokens = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let has = |expected: &str| tokens.contains(&expected);
+    if has("deepseek") && has("v4") && has("flash") {
+        "dsv4 flash".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Why an effort token could not be applied to a model. Shared by `/model`'s
 /// effort phase so typed input classifies the same way as the ArgPicker rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +318,17 @@ mod tests {
                 .model,
             "deepseek-chat"
         );
+    }
+
+    #[test]
+    fn compact_prompt_label_only_aliases_the_deepseek_v4_flash_family() {
+        assert_eq!(
+            compact_model_label("DeepSeek-V4-Flash-Vision-Exp"),
+            "dsv4 flash"
+        );
+        assert_eq!(compact_model_label("DeepSeek V4 Flash"), "dsv4 flash");
+        assert_eq!(compact_model_label("DeepSeek-V4-Pro"), "DeepSeek-V4-Pro");
+        assert_eq!(compact_model_label("private-preview"), "private-preview");
     }
 
     #[test]

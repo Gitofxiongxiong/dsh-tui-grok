@@ -61,7 +61,7 @@ use crate::media::{
     MediaPreviewBuffer, MediaPreviewController, MediaPreviewDecision, render_image_preview_content,
 };
 use crate::modal_window_state::ModalWindowState;
-use crate::model_state::{ModelId, ModelState};
+use crate::model_state::{ModelId, ModelState, compact_model_label};
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
 use crate::scrollback_adapter::{host_pane::DshScrollbackHost, tick::animation_tick};
@@ -1313,11 +1313,12 @@ impl UiState {
         let textarea_rows = self
             .prompt
             .desired_height(prompt_geometry.textarea.width.max(1));
+        let model_name = self
+            .models
+            .current_model_name()
+            .unwrap_or_else(|| snapshot.model.clone());
         let prompt_info = PromptInfoContract {
-            model_name: self
-                .models
-                .current_model_name()
-                .unwrap_or_else(|| snapshot.model.clone()),
+            model_name: compact_model_label(&model_name),
             flags: self.prompt_flags(&snapshot, theme),
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
@@ -2047,11 +2048,16 @@ impl UiState {
         }
         if empty {
             let elapsed = self.welcome_animation.elapsed(Instant::now());
+            let model_name = self
+                .models
+                .current_model_name()
+                .unwrap_or_else(|| snapshot.model.clone());
+            let model_label = compact_model_label(&model_name);
             render_welcome(
                 frame.buffer_mut(),
                 transcript_inner,
                 elapsed,
-                &snapshot.model,
+                &model_label,
                 &self.agent_preset_label(snapshot),
                 theme,
             );

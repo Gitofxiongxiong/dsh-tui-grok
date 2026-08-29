@@ -590,10 +590,11 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme
             .add_modifier(Modifier::BOLD),
     );
     if rows >= 2 {
+        let model_preset = compact_model_preset_line(model, preset, area.width as usize);
         render_centered(
             buf,
             Rect::new(area.x, y.saturating_add(1), area.width, 1),
-            &format!("{model} · {preset}"),
+            &model_preset,
             Style::default().fg(theme.gray).bg(theme.bg_base),
         );
     }
@@ -605,6 +606,30 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme
             Style::default().fg(theme.gray_dim).bg(theme.bg_base),
         );
     }
+}
+
+/// Keep the compact welcome preset semantic: elide the model first, and never
+/// turn a complete preset such as `标准模式` into the misleading `准模式`.
+fn compact_model_preset_line(model: &str, preset: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let preset_width = preset.width();
+    if preset_width <= max_width {
+        let separator = " · ";
+        let separator_width = separator.width();
+        let model_budget = max_width.saturating_sub(preset_width + separator_width);
+        if !model.is_empty() && model_budget > 0 {
+            let model = elide_middle(model, model_budget);
+            return format!("{model}{separator}{preset}");
+        }
+        return preset.to_string();
+    }
+
+    // At widths where the preset itself cannot fit, omit it as one atomic
+    // label. The model remains useful context and is safe to elide.
+    elide_middle(model, max_width)
 }
 
 fn paint_whale(buf: &mut Buffer, area: Rect, frame_index: usize, background: Color) {
@@ -770,6 +795,22 @@ mod tests {
             ),
             WelcomeLayout::Compact
         );
+    }
+
+    #[test]
+    fn compact_welcome_elides_the_model_without_splitting_the_preset() {
+        let line = compact_model_preset_line("DeepSeek-V4-Flash-Vision-Exp", "标准模式", 20);
+        assert!(line.ends_with("标准模式"));
+        assert!(line.contains('…'));
+        assert!(line.width() <= 20);
+
+        assert_eq!(
+            compact_model_preset_line("dsv4 flash", "标准模式", 8),
+            "标准模式"
+        );
+        let narrower = compact_model_preset_line("dsv4 flash", "标准模式", 7);
+        assert!(!narrower.contains("标准模式"));
+        assert!(!narrower.contains("准模式"));
     }
 
     #[test]

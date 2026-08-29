@@ -202,6 +202,184 @@ impl GrokPromptRenderer {
     }
 }
 
+#[derive(Debug)]
+struct FittedInfoLine {
+    line: Line<'static>,
+    flag_ranges: Vec<Option<(usize, usize)>>,
+}
+
+/// Fit the prompt caption without ever splitting a semantic flag.
+///
+/// DSH adds preset/plan/YOLO flags to Grok's model caption. A plain
+/// `Buffer::set_line(..., min(line.width(), area.width))` clips the last flag
+/// character-by-character (`YOLO` -> `YOL`). Keep right-most safety/mode flags
+/// atomically, then use whatever remains for a middle-elided model name.
+fn fit_info_line(
+    info: &PromptInfoContract,
+    max_width: usize,
+    bg: Color,
+    theme: &Theme,
+    focused: bool,
+) -> FittedInfoLine {
+    let mut flag_ranges = vec![None; info.flags.len()];
+    if max_width < 2 {
+        return FittedInfoLine {
+            line: Line::default(),
+            flag_ranges,
+        };
+    }
+
+    let separator_color = if focused {
+        theme.gray_dim
+    } else {
+        blend_color(bg, theme.gray_dim, 0.6).unwrap_or(theme.gray_dim)
+    };
+    let separator_style = Style::default().fg(separator_color).bg(bg);
+    let flag_opacity = if focused { 0.75 } else { 0.5 };
+    let pad_style = Style::default().bg(bg);
+    let inner_budget = max_width.saturating_sub(2);
+
+    // Select whole flags from right to left. The right-most items carry the
+    // most immediate state (YOLO after plan after preset) and therefore win
+    // when an extremely narrow terminal cannot show every flag.
+    let mut selected_flags = vec![false; info.flags.len()];
+    let mut used = 0usize;
+    let mut item_count = 0usize;
+    for (index, flag) in info.flags.iter().enumerate().rev() {
+        let width = flag.text.width();
+        let separator = usize::from(item_count > 0) * 3;
+        if width > 0 && used.saturating_add(separator).saturating_add(width) <= inner_budget {
+            selected_flags[index] = true;
+            used = used.saturating_add(separator).saturating_add(width);
+            item_count = item_count.saturating_add(1);
+        }
+    }
+
+    // Usage warnings are also atomic. They follow the flags in fit priority,
+    // while retaining their original left-most paint order when selected.
+    let selected_warning = info.usage_warning.as_ref().is_some_and(|warning| {
+        let width = warning.width();
+        let separator = usize::from(item_count > 0) * 3;
+        if width > 0 && used.saturating_add(separator).saturating_add(width) <= inner_budget {
+            used = used.saturating_add(separator).saturating_add(width);
+            item_count = item_count.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    });
+
+    // Model is the elastic item: middle-elide it into the remaining columns,
+    // or omit it entirely when the atomic labels consume the whole budget.
+    let model_separator = usize::from(item_count > 0) * 3;
+    let model_budget = inner_budget.saturating_sub(used.saturating_add(model_separator));
+    let fitted_model = (!info.model_name.is_empty() && model_budget > 0)
+        .then(|| elide_middle_to_width(&info.model_name, model_budget));
+
+    let mut spans = vec![Span::styled(" ", pad_style)];
+    let mut cursor = 1usize;
+    let mut has_item = false;
+    let push_separator = |spans: &mut Vec<Span<'static>>, cursor: &mut usize| {
+        spans.push(Span::styled(" · ", separator_style));
+        *cursor = cursor.saturating_add(3);
+    };
+
+    if selected_warning && let Some(warning) = &info.usage_warning {
+        let color = if info.usage_warning_critical {
+            theme.warning
+        } else {
+            separator_color
+        };
+        spans.push(Span::styled(
+            warning.clone(),
+            Style::default().fg(color).bg(bg),
+        ));
+        cursor = cursor.saturating_add(warning.width());
+        has_item = true;
+    }
+
+    if let Some(model) = fitted_model.filter(|model| !model.is_empty()) {
+        if has_item {
+            push_separator(&mut spans, &mut cursor);
+        }
+        cursor = cursor.saturating_add(model.width());
+        spans.push(Span::styled(
+            model,
+            chrome_caption_style(bg, theme, focused),
+        ));
+        has_item = true;
+    }
+
+    for (index, flag) in info.flags.iter().enumerate() {
+        if !selected_flags[index] {
+            continue;
+        }
+        if has_item {
+            push_separator(&mut spans, &mut cursor);
+        }
+        let start = cursor;
+        let width = flag.text.width();
+        let color = match (flag.color, flag.bold, focused) {
+            (Some(color), true, _) => color,
+            (Some(color), false, _) => blend_color(bg, color, flag_opacity).unwrap_or(theme.gray),
+            (None, true, _) => theme.text_primary,
+            (None, false, true) => theme.gray,
+            (None, false, false) => blend_color(bg, theme.gray, flag_opacity).unwrap_or(theme.gray),
+        };
+        let mut style = Style::default().fg(color).bg(bg);
+        if flag.bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(flag.text.clone(), style));
+        cursor = cursor.saturating_add(width);
+        flag_ranges[index] = Some((start, width));
+        has_item = true;
+    }
+    spans.push(Span::styled(" ", pad_style));
+
+    FittedInfoLine {
+        line: Line::from(spans),
+        flag_ranges,
+    }
+}
+
+fn elide_middle_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let remaining = max_width - 1;
+    let left_budget = remaining.div_ceil(2);
+    let right_budget = remaining - left_budget;
+    let mut left = String::new();
+    let mut left_width = 0usize;
+    for character in text.chars() {
+        let width = character.to_string().width();
+        if left_width.saturating_add(width) > left_budget {
+            break;
+        }
+        left.push(character);
+        left_width = left_width.saturating_add(width);
+    }
+    let mut right = String::new();
+    let mut right_width = 0usize;
+    for character in text.chars().rev() {
+        let width = character.to_string().width();
+        if right_width.saturating_add(width) > right_budget {
+            break;
+        }
+        right.insert(0, character);
+        right_width = right_width.saturating_add(width);
+    }
+    format!("{left}…{right}")
+}
+
 fn render_info_line(
     buf: &mut Buffer,
     area: Rect,
@@ -214,93 +392,47 @@ fn render_info_line(
         return Vec::new();
     }
 
-    let separator_color = if focused {
-        theme.gray_dim
-    } else {
-        blend_color(bg, theme.gray_dim, 0.6).unwrap_or(theme.gray_dim)
-    };
-    let separator_style = Style::default().fg(separator_color).bg(bg);
-    let flag_opacity = if focused { 0.75 } else { 0.5 };
     let pad_style = Style::default().bg(bg);
-    let mut left = vec![Span::styled(" ", pad_style)];
-    let mut left_width = 1usize;
-    if let Some(warning) = &info.usage_warning {
-        let color = if info.usage_warning_critical {
-            theme.warning
-        } else {
-            separator_color
-        };
-        left.push(Span::styled(
-            warning.clone(),
-            Style::default().fg(color).bg(bg),
-        ));
-        left.push(Span::styled(" · ", separator_style));
-        left_width = left_width.saturating_add(warning.width()).saturating_add(3);
-    }
-    left.push(Span::styled(
-        info.model_name.clone(),
-        chrome_caption_style(bg, theme, focused),
-    ));
-    left_width = left_width.saturating_add(info.model_name.width());
-    let mut flag_ranges = Vec::with_capacity(info.flags.len());
-    for flag in &info.flags {
-        left.push(Span::styled(" · ", separator_style));
-        left_width = left_width.saturating_add(3);
-        let flag_start = left_width;
-        let flag_width = flag.text.width();
-        let color = match (flag.color, flag.bold, focused) {
-            (Some(color), true, _) => color,
-            (Some(color), false, _) => blend_color(bg, color, flag_opacity).unwrap_or(theme.gray),
-            (None, true, _) => theme.text_primary,
-            (None, false, true) => theme.gray,
-            (None, false, false) => blend_color(bg, theme.gray, flag_opacity).unwrap_or(theme.gray),
-        };
-        let mut flag_style = Style::default().fg(color).bg(bg);
-        if flag.bold {
-            flag_style = flag_style.add_modifier(Modifier::BOLD);
-        }
-        left.push(Span::styled(flag.text.clone(), flag_style));
-        left_width = left_width.saturating_add(flag_width);
-        flag_ranges.push((flag_start, flag_width));
-    }
-    left.push(Span::styled(" ", pad_style));
-
-    let left_line = Line::from(left);
-    let (left_x, painted_left_width) = if info.multiline {
+    let (right_line, right_width) = if info.multiline {
         let right_line = Line::from(vec![
             Span::styled("multiline", Style::default().fg(theme.gray).bg(bg)),
             Span::styled(" ", pad_style),
         ]);
-        let right_width = right_line.width() as u16;
-        let left_width = (left_line.width() as u16)
-            .min(area.width.saturating_sub(right_width.saturating_add(1)));
-        let total_width = left_width.saturating_add(1).saturating_add(right_width);
-        let left_x = area.right().saturating_sub(total_width);
-        buf.set_line(left_x, area.y, &left_line, left_width);
+        let width = right_line.width() as u16;
+        (Some(right_line), width)
+    } else {
+        (None, 0)
+    };
+    let reserved_gap = u16::from(right_line.is_some());
+    let left_budget = area
+        .width
+        .saturating_sub(right_width.saturating_add(reserved_gap));
+    let fitted = fit_info_line(info, left_budget as usize, bg, theme, focused);
+    let left_width = fitted.line.width() as u16;
+    let gap = u16::from(left_width > 0 && right_line.is_some());
+    let total_width = left_width.saturating_add(gap).saturating_add(right_width);
+    let left_x = area.right().saturating_sub(total_width);
+    if left_width > 0 {
+        buf.set_line(left_x, area.y, &fitted.line, left_width);
+    }
+    if let Some(right_line) = right_line {
         let right_x = area.right().saturating_sub(right_width);
         buf.set_line(right_x, area.y, &right_line, right_width.min(area.width));
-        (left_x, left_width)
-    } else {
-        let width = (left_line.width() as u16).min(area.width);
-        let x = area.right().saturating_sub(width);
-        buf.set_line(x, area.y, &left_line, width);
-        (x, width)
-    };
+    }
 
-    flag_ranges
+    fitted
+        .flag_ranges
         .into_iter()
-        .map(|(start, width)| {
+        .map(|range| {
+            let Some((start, width)) = range else {
+                return Rect::default();
+            };
             let start = u16::try_from(start).unwrap_or(u16::MAX);
             let width = u16::try_from(width).unwrap_or(u16::MAX);
-            if start >= painted_left_width || width == 0 {
+            if width == 0 {
                 Rect::default()
             } else {
-                Rect::new(
-                    left_x.saturating_add(start),
-                    area.y,
-                    width.min(painted_left_width.saturating_sub(start)),
-                    1,
-                )
+                Rect::new(left_x.saturating_add(start), area.y, width, 1)
             }
         })
         .collect()
@@ -377,6 +509,13 @@ mod tests {
             multiline,
             ..PromptInfoContract::default()
         }
+    }
+
+    fn rendered_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
@@ -481,15 +620,15 @@ mod tests {
 
     #[test]
     fn info_flags_return_their_visible_draw_geometry() {
-        let area = Rect::new(0, 0, 48, 3);
+        let area = Rect::new(0, 0, 51, 3);
         let mut buffer = Buffer::empty(area);
         let mut textarea = TextArea::new();
         let mut renderer = GrokPromptRenderer::default();
         let info = PromptInfoContract {
-            model_name: "deepseek-v4".into(),
+            model_name: "DeepSeek-V4-Flash-Vision-Exp".into(),
             flags: vec![
                 crate::views::prompt_contract::PromptFlagContract {
-                    text: "standard ▾".into(),
+                    text: "标准模式 ▾".into(),
                     color: None,
                     bold: true,
                 },
@@ -511,8 +650,72 @@ mod tests {
         );
 
         assert_eq!(result.info_flag_areas.len(), 2);
-        assert!(result.info_flag_areas[0].width > 0);
+        assert_eq!(result.info_flag_areas[0].width, 10);
+        assert_eq!(result.info_flag_areas[1].width, 4);
         assert!(result.info_flag_areas[1].x > result.info_flag_areas[0].x);
         assert_eq!(result.info_flag_areas[0].y, 2);
+    }
+
+    #[test]
+    fn info_fitter_keeps_complete_mode_labels_at_the_regression_width() {
+        let info = PromptInfoContract {
+            model_name: "DeepSeek-V4-Flash-Vision-Exp".into(),
+            flags: vec![
+                crate::views::prompt_contract::PromptFlagContract {
+                    text: "标准模式 ▾".into(),
+                    color: None,
+                    bold: true,
+                },
+                crate::views::prompt_contract::PromptFlagContract {
+                    text: "YOLO".into(),
+                    color: None,
+                    bold: true,
+                },
+            ],
+            ..PromptInfoContract::default()
+        };
+        let theme = Theme::current();
+        let fitted = fit_info_line(&info, 48, theme.bg_base, theme, true);
+        let text = rendered_text(&fitted.line);
+
+        assert_eq!(fitted.line.width(), 48);
+        assert!(text.contains("标准模式 ▾"));
+        assert!(text.contains("YOLO"));
+        assert!(!text.contains("YOL "));
+        assert_eq!(fitted.flag_ranges[0].map(|(_, width)| width), Some(10));
+        assert_eq!(fitted.flag_ranges[1].map(|(_, width)| width), Some(4));
+    }
+
+    #[test]
+    fn info_fitter_omits_whole_lower_priority_items_when_extremely_narrow() {
+        let info = PromptInfoContract {
+            model_name: "dsv4 flash".into(),
+            flags: vec![
+                crate::views::prompt_contract::PromptFlagContract {
+                    text: "标准模式 ▾".into(),
+                    color: None,
+                    bold: true,
+                },
+                crate::views::prompt_contract::PromptFlagContract {
+                    text: "YOLO".into(),
+                    color: None,
+                    bold: true,
+                },
+            ],
+            ..PromptInfoContract::default()
+        };
+        let theme = Theme::current();
+
+        let both = fit_info_line(&info, 19, theme.bg_base, theme, true);
+        assert!(rendered_text(&both.line).contains("标准模式 ▾ · YOLO"));
+        assert_eq!(both.flag_ranges[0].map(|(_, width)| width), Some(10));
+        assert_eq!(both.flag_ranges[1].map(|(_, width)| width), Some(4));
+
+        let yolo_only = fit_info_line(&info, 18, theme.bg_base, theme, true);
+        let text = rendered_text(&yolo_only.line);
+        assert!(!text.contains("标准模式"));
+        assert!(text.contains("YOLO"));
+        assert_eq!(yolo_only.flag_ranges[0], None);
+        assert_eq!(yolo_only.flag_ranges[1].map(|(_, width)| width), Some(4));
     }
 }
