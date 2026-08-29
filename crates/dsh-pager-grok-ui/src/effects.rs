@@ -7,11 +7,46 @@ use dsh_pager::{
     RpcTransport, SessionState,
 };
 use dsh_pager_protocol::{
-    AgentPresetListValue, CommandDescriptor, CommandExecuteValue, CommandExecution, ModelSelection,
-    PromptMode, QueueAction, SessionModelsValue, SubagentAddress, TuiInteractionResponse,
+    AgentPresetListValue, CommandDescriptor, CommandExecuteValue, CommandExecution, CredentialInfo,
+    CredentialsDescribeValue, CredentialsSetValue, ModelSelection, PromptMode, QueueAction,
+    SessionModelsValue, SubagentAddress, TuiInteractionResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// Secret-bearing text that is redacted from diagnostics and zeroed on drop.
+///
+/// It intentionally does not implement serde. The one permitted wire crossing
+/// is assembled explicitly inside the `credentials.set` transport adapter.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SensitiveString(Vec<u8>);
+
+impl SensitiveString {
+    pub fn new(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+
+    fn expose(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("SensitiveString preserves UTF-8")
+    }
+
+    fn clear(&mut self) {
+        self.0.fill(0);
+        self.0.clear();
+    }
+}
+
+impl std::fmt::Debug for SensitiveString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SensitiveString([REDACTED])")
+    }
+}
+
+impl Drop for SensitiveString {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
 
 /// Semantic user intent emitted by a Grok view. It has no transport or
 /// renderer references and can be reduced in a host-neutral test harness.
@@ -87,6 +122,15 @@ pub enum UiIntent {
         provider: String,
         model: String,
         reasoning_effort: Option<String>,
+    },
+    DescribeCredential {
+        provider_id: String,
+        credential_ref: String,
+    },
+    SetCredential {
+        provider_id: String,
+        credential_ref: String,
+        value: SensitiveString,
     },
 }
 
@@ -183,7 +227,7 @@ pub fn receipt_status_message(receipt: &UiEffectReceipt, subject: &str) -> Strin
 }
 
 /// DSH-neutral effect after intent compilation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiEffect {
     CancelSession {
         operation: OperationKey,
@@ -279,6 +323,17 @@ pub enum UiEffect {
         provider: String,
         model: String,
         reasoning_effort: Option<String>,
+    },
+    DescribeCredential {
+        operation: OperationKey,
+        provider_id: String,
+        credential_ref: String,
+    },
+    SetCredential {
+        operation: OperationKey,
+        provider_id: String,
+        credential_ref: String,
+        value: SensitiveString,
     },
 }
 
@@ -421,6 +476,8 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
         UiIntent::SelectAgentPreset { .. } => "select-agent-preset",
         UiIntent::ListSessionModels { .. } => "list-session-models",
         UiIntent::SelectSessionModel { .. } => "select-session-model",
+        UiIntent::DescribeCredential { .. } => "describe-credential",
+        UiIntent::SetCredential { .. } => "set-credential",
     };
     let dedupe_key = match &intent {
         UiIntent::CancelSession => action_name.to_string(),
@@ -479,6 +536,15 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
             "{action_name}:{provider}:{model}:{}",
             reasoning_effort.as_deref().unwrap_or("-")
         ),
+        UiIntent::DescribeCredential {
+            provider_id,
+            credential_ref,
+        }
+        | UiIntent::SetCredential {
+            provider_id,
+            credential_ref,
+            ..
+        } => format!("{action_name}:{provider_id}:{credential_ref}"),
     };
     // Interaction request ids are host-owned correlation ids. Preserve them
     // even when a caller did not pre-seed an operation context; generation is
@@ -594,6 +660,24 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
             provider,
             model,
             reasoning_effort,
+        },
+        UiIntent::DescribeCredential {
+            provider_id,
+            credential_ref,
+        } => UiEffect::DescribeCredential {
+            operation,
+            provider_id,
+            credential_ref,
+        },
+        UiIntent::SetCredential {
+            provider_id,
+            credential_ref,
+            value,
+        } => UiEffect::SetCredential {
+            operation,
+            provider_id,
+            credential_ref,
+            value,
         },
     }
 }
@@ -911,6 +995,35 @@ impl DshEffectSink<'_, '_> {
                 );
                 (operation, result.map(|_| true))
             }
+            UiEffect::DescribeCredential {
+                mut operation,
+                credential_ref,
+                ..
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::describe_credentials(self.transport, &[credential_ref]);
+                (operation, result.map(|_| true))
+            }
+            UiEffect::SetCredential {
+                mut operation,
+                credential_ref,
+                value,
+                ..
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::set_credential(
+                    self.transport,
+                    &credential_ref,
+                    value.expose().to_string(),
+                );
+                (operation, result.map(|_| true))
+            }
         };
         match result {
             Ok(true) => {
@@ -955,6 +1068,7 @@ pub struct UiEffectCompletion {
     pub selected_agent_preset: Option<String>,
     pub session_models: Option<SessionModelsValue>,
     pub selected_model: Option<ModelSelection>,
+    pub credential_info: Option<CredentialInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -999,6 +1113,7 @@ impl AsyncEffectExecutor {
         };
         set_effect_operation(&mut effect, operation.clone());
         let request_id = transport.begin_call_value(method, params)?;
+        redact_effect_secret(&mut effect);
         self.pending.insert(request_id, PendingEffect { effect });
         Ok(UiEffectReceipt {
             status: UiEffectStatus::Pending,
@@ -1053,7 +1168,9 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
         | UiEffect::ListAgentPresets { operation, .. }
         | UiEffect::SelectAgentPreset { operation, .. }
         | UiEffect::ListSessionModels { operation, .. }
-        | UiEffect::SelectSessionModel { operation, .. } => operation,
+        | UiEffect::SelectSessionModel { operation, .. }
+        | UiEffect::DescribeCredential { operation, .. }
+        | UiEffect::SetCredential { operation, .. } => operation,
     }
 }
 
@@ -1120,7 +1237,19 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
         }
         | UiEffect::SelectSessionModel {
             operation: target, ..
+        }
+        | UiEffect::DescribeCredential {
+            operation: target, ..
+        }
+        | UiEffect::SetCredential {
+            operation: target, ..
         } => *target = operation,
+    }
+}
+
+fn redact_effect_secret(effect: &mut UiEffect) {
+    if let UiEffect::SetCredential { value, .. } = effect {
+        value.clear();
     }
 }
 
@@ -1263,6 +1392,17 @@ fn encode_async_request(
             }
             Some(("session.selectModel", params))
         }
+        UiEffect::DescribeCredential { credential_ref, .. } => {
+            Some(("credentials.describe", json!({"refs": [credential_ref]})))
+        }
+        UiEffect::SetCredential {
+            credential_ref,
+            value,
+            ..
+        } => Some((
+            "credentials.set",
+            json!({"ref": credential_ref, "value": value.expose()}),
+        )),
         UiEffect::AttachSession { .. } => None,
     };
     Ok(request)
@@ -1282,6 +1422,7 @@ struct DecodedAsyncResult {
     selected_agent_preset: Option<String>,
     session_models: Option<SessionModelsValue>,
     selected_model: Option<ModelSelection>,
+    credential_info: Option<CredentialInfo>,
 }
 
 fn decode_tui_result<T: serde::de::DeserializeOwned>(raw: Value) -> PagerResult<T> {
@@ -1399,6 +1540,30 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             ..DecodedAsyncResult::default()
         });
     }
+    if let UiEffect::DescribeCredential { credential_ref, .. } = effect {
+        let described: CredentialsDescribeValue = serde_json::from_value(value)?;
+        let info = described
+            .credentials
+            .get(credential_ref)
+            .cloned()
+            .ok_or_else(|| {
+                PagerError::new(format!(
+                    "credentials.describe omitted requested reference {credential_ref}"
+                ))
+            })?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            credential_info: Some(info),
+            ..DecodedAsyncResult::default()
+        });
+    }
+    if matches!(effect, UiEffect::SetCredential { .. }) {
+        let _: CredentialsSetValue = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            ..DecodedAsyncResult::default()
+        });
+    }
     let accepted = value
         .get("accepted")
         .and_then(Value::as_bool)
@@ -1485,6 +1650,7 @@ fn build_completion(
                 selected_agent_preset: decoded.selected_agent_preset,
                 session_models: decoded.session_models,
                 selected_model: decoded.selected_model,
+                credential_info: decoded.credential_info,
             }
         }
         Ok(decoded) => UiEffectCompletion {
@@ -1506,6 +1672,7 @@ fn build_completion(
             selected_agent_preset: decoded.selected_agent_preset,
             session_models: decoded.session_models,
             selected_model: decoded.selected_model,
+            credential_info: decoded.credential_info,
         },
         Err(error) => UiEffectCompletion {
             effect,
@@ -1526,6 +1693,7 @@ fn build_completion(
             selected_agent_preset: None,
             session_models: None,
             selected_model: None,
+            credential_info: None,
         },
     }
 }
@@ -2193,6 +2361,74 @@ mod tests {
         assert_eq!(params["sessionId"], "s");
         assert_eq!(params["mode"], "queue");
         assert_eq!(params["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn credential_effect_crosses_the_wire_once_without_diagnostic_leakage() {
+        let session = SessionState::new("s".into(), 4);
+        let secret = "sk-test-only-secret";
+        let mut effect = compile_intent(
+            UiIntent::SetCredential {
+                provider_id: "deepseek".into(),
+                credential_ref: "DEEPSEEK_API_KEY".into(),
+                value: SensitiveString::new(secret.into()),
+            },
+            &UiContext::for_operation(&session, DshRequestId::new("credential-1")),
+        );
+        let debug = format!("{effect:?}");
+        let operation = effect_operation(&effect).clone();
+        assert!(!debug.contains(secret));
+        assert!(!operation.dedupe_key.contains(secret));
+
+        let (method, params) = encode_async_request(&effect, &operation)
+            .expect("credential encoding")
+            .expect("supported credential effect");
+        assert_eq!(method, "credentials.set");
+        assert_eq!(params["ref"], "DEEPSEEK_API_KEY");
+        assert_eq!(params["value"], secret);
+
+        redact_effect_secret(&mut effect);
+        let (_, redacted) = encode_async_request(&effect, &operation)
+            .expect("redacted credential encoding")
+            .expect("supported credential effect");
+        assert_eq!(redacted["value"], "");
+        assert!(!format!("{effect:?}").contains(secret));
+    }
+
+    #[test]
+    fn credential_description_decodes_only_value_free_state() {
+        let session = SessionState::new("s".into(), 4);
+        let effect = compile_intent(
+            UiIntent::DescribeCredential {
+                provider_id: "deepseek".into(),
+                credential_ref: "DEEPSEEK_API_KEY".into(),
+            },
+            &UiContext::from_session(&session),
+        );
+        let decoded = decode_async_result(
+            &effect,
+            json!({
+                "ok": true,
+                "value": {
+                    "credentials": {
+                        "DEEPSEEK_API_KEY": {
+                            "configured": true,
+                            "source": "env",
+                            "writable": false
+                        }
+                    }
+                }
+            }),
+        )
+        .expect("credential description");
+        assert_eq!(
+            decoded.credential_info,
+            Some(CredentialInfo {
+                configured: true,
+                source: Some("env".into()),
+                writable: false,
+            })
+        );
     }
 
     #[test]

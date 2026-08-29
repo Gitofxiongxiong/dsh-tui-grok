@@ -39,8 +39,8 @@ use crate::appearance::{GrokAppearanceSnapshot, LayoutConfig, ScrollbarConfig};
 use crate::clipboard;
 use crate::diag;
 use crate::effects::{
-    AsyncEffectExecutor, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectCompletion,
-    UiEffectStatus, UiIntent, compile_intent, receipt_status_message,
+    AsyncEffectExecutor, EffectLedger, OperationKey, SensitiveString, UiContext, UiEffect,
+    UiEffectCompletion, UiEffectStatus, UiIntent, compile_intent, receipt_status_message,
 };
 use crate::esc::PendingEscAction;
 use crate::geometry::{
@@ -87,6 +87,7 @@ use crate::views::{
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
     file_search::{controller::FileSearchController, line_viewer::render_file_search_content},
     interaction::{approval_outcome, permission_state, question_state, response_for},
+    login::{DEEPSEEK_LOGIN_PROVIDER, LoginModalState, LoginOutcome},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
         render_modal_window,
@@ -553,6 +554,18 @@ struct PendingRewind {
     prompt_text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingLoginKind {
+    Describe,
+    Set,
+}
+
+#[derive(Debug, Clone)]
+struct PendingLogin {
+    operation: OperationKey,
+    kind: PendingLoginKind,
+}
+
 #[derive(Debug, Default)]
 struct UiState {
     shell: AppShell,
@@ -563,6 +576,8 @@ struct UiState {
     resume_picker: ResumePickerState,
     preset_picker: PresetPickerState,
     model_picker: ModelPickerState,
+    login: LoginModalState,
+    pending_login: Option<PendingLogin>,
     picker_kind: PickerKind,
     models: ModelState,
     models_for_session: Option<String>,
@@ -902,14 +917,76 @@ impl UiState {
             UiEffect::SelectAgentPreset { .. } => "Agent preset",
             UiEffect::ListSessionModels { .. } => "Model list",
             UiEffect::SelectSessionModel { .. } => "Model",
+            UiEffect::DescribeCredential { .. } => "Credential status",
+            UiEffect::SetCredential { .. } => "DeepSeek API key",
         };
-        if completion.receipt.operation.session_id.as_str() != session.session_id()
-            || completion.receipt.operation.generation != DshGeneration::new(session.generation())
+        let host_global = matches!(
+            &completion.effect,
+            UiEffect::DescribeCredential { .. } | UiEffect::SetCredential { .. }
+        );
+        if !host_global
+            && (completion.receipt.operation.session_id.as_str() != session.session_id()
+                || completion.receipt.operation.generation
+                    != DshGeneration::new(session.generation()))
         {
             self.status = Some(format!(
                 "Ignored stale {subject} completion for {}",
                 completion.receipt.operation.request_id
             ));
+            return;
+        }
+        if matches!(&completion.effect, UiEffect::DescribeCredential { .. }) {
+            let matches_pending = self.pending_login.as_ref().is_some_and(|pending| {
+                pending.kind == PendingLoginKind::Describe
+                    && pending.operation == completion.receipt.operation
+            });
+            if !matches_pending {
+                return;
+            }
+            self.pending_login = None;
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                if let Some(info) = completion.credential_info {
+                    self.login.apply_info(info);
+                    self.status = None;
+                } else {
+                    self.login
+                        .fail("Host returned no state for DEEPSEEK_API_KEY");
+                }
+            } else {
+                let message = completion
+                    .receipt
+                    .diagnostic
+                    .clone()
+                    .unwrap_or_else(|| receipt_status_message(&completion.receipt, subject));
+                self.login.fail(message.clone());
+                self.status = Some(format!("Credential status failed: {message}"));
+            }
+            return;
+        }
+        if matches!(&completion.effect, UiEffect::SetCredential { .. }) {
+            let matches_pending = self.pending_login.as_ref().is_some_and(|pending| {
+                pending.kind == PendingLoginKind::Set
+                    && pending.operation == completion.receipt.operation
+            });
+            if !matches_pending {
+                return;
+            }
+            self.pending_login = None;
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                self.login.clear_secret();
+                if self.shell.overlay() == Overlay::Login {
+                    self.shell.close_overlay();
+                }
+                self.status = Some("DeepSeek API key saved. The next request will use it.".into());
+            } else {
+                let message = completion
+                    .receipt
+                    .diagnostic
+                    .clone()
+                    .unwrap_or_else(|| receipt_status_message(&completion.receipt, subject));
+                self.login.fail(message.clone());
+                self.status = Some(format!("Couldn't save DeepSeek API key: {message}"));
+            }
             return;
         }
         if let UiEffect::ListSessions { revision, .. } = &completion.effect {
@@ -1552,7 +1629,9 @@ impl UiState {
                         );
                     }
                 }
-                frame.set_cursor_position((x, y));
+                if self.shell.overlay() != Overlay::Login {
+                    frame.set_cursor_position((x, y));
+                }
             }
         }
         let (prompt_target, prompt_label) = if permission.is_some() {
@@ -1764,6 +1843,13 @@ impl UiState {
             self.render_image_preview(frame, area, &snapshot);
         } else if self.shell.overlay() == Overlay::AgentTasks {
             self.render_agent_tasks(frame, area, &snapshot);
+        } else if self.shell.overlay() == Overlay::Login {
+            if let Some(cursor) =
+                self.login
+                    .render(frame.buffer_mut(), area, Theme::current(), compact)
+            {
+                frame.set_cursor_position(cursor);
+            }
         } else if self.shell.overlay() == Overlay::Dashboard {
             self.render_dashboard(frame, area, &snapshot.workspace);
         }
@@ -3179,6 +3265,18 @@ impl UiState {
                 self.handle_agent_tasks_mouse(mouse, transport, session);
                 Ok(false)
             }
+            ShellAction::LoginKey(key) => {
+                self.handle_login_event(Event::Key(key), transport, session)?;
+                Ok(false)
+            }
+            ShellAction::LoginMouse(mouse) => {
+                self.handle_login_event(Event::Mouse(mouse), transport, session)?;
+                Ok(false)
+            }
+            ShellAction::LoginPaste(text) => {
+                self.handle_login_event(Event::Paste(text.into_inner()), transport, session)?;
+                Ok(false)
+            }
             ShellAction::DashboardKey(key) => {
                 self.handle_dashboard_key(key, transport, session)?;
                 Ok(false)
@@ -4041,6 +4139,13 @@ impl UiState {
                 self.prompt_history_index = None;
                 true
             }
+            crate::slash::DispatchResult::Action(crate::slash::Action::Login) => {
+                self.open_login(transport, session);
+                self.prompt.reset();
+                self.slash.reset();
+                self.prompt_history_index = None;
+                true
+            }
             crate::slash::DispatchResult::Action(crate::slash::Action::ToggleTimestamps) => {
                 let enabled = !self
                     .timestamps_enabled
@@ -4198,6 +4303,109 @@ impl UiState {
         let revision = self.model_picker.open(&self.models);
         self.request_session_models(transport, session, revision);
         self.status = None;
+    }
+
+    fn open_login(&mut self, transport: &mut RpcTransport, session: &SessionState) {
+        if self
+            .pending_login
+            .as_ref()
+            .is_some_and(|pending| pending.kind == PendingLoginKind::Set)
+        {
+            self.status = Some("DeepSeek API key save is still pending".into());
+            return;
+        }
+        self.shell.open_login();
+        self.login.open(DEEPSEEK_LOGIN_PROVIDER);
+        let provider = self.login.provider();
+        match self.submit_effect(
+            transport,
+            UiIntent::DescribeCredential {
+                provider_id: provider.id.to_string(),
+                credential_ref: provider.credential_ref.to_string(),
+            },
+            &UiContext::from_session(session),
+        ) {
+            Ok(receipt) if receipt.status == UiEffectStatus::Pending => {
+                self.pending_login = Some(PendingLogin {
+                    operation: receipt.operation,
+                    kind: PendingLoginKind::Describe,
+                });
+                self.status = None;
+            }
+            Ok(receipt) => {
+                let message = receipt_status_message(&receipt, "Credential status");
+                self.login.fail(message.clone());
+                self.status = Some(message);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.login.fail(message.clone());
+                self.status = Some(format!("Credential status failed: {message}"));
+            }
+        }
+    }
+
+    fn handle_login_event(
+        &mut self,
+        event: Event,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+    ) -> PagerResult<()> {
+        match self.login.handle_event(event) {
+            LoginOutcome::Close => {
+                let saving = self
+                    .pending_login
+                    .as_ref()
+                    .is_some_and(|pending| pending.kind == PendingLoginKind::Set);
+                if !saving {
+                    self.pending_login = None;
+                }
+                self.shell.close_overlay();
+                self.status = Some(if saving {
+                    "DeepSeek API key save is still pending".into()
+                } else {
+                    "Login canceled".into()
+                });
+            }
+            LoginOutcome::Submit(value) => {
+                if self.pending_login.is_some() {
+                    return Ok(());
+                }
+                let provider = self.login.provider();
+                let submission = self.submit_effect(
+                    transport,
+                    UiIntent::SetCredential {
+                        provider_id: provider.id.to_string(),
+                        credential_ref: provider.credential_ref.to_string(),
+                        value: SensitiveString::new(value),
+                    },
+                    &UiContext::from_session(session),
+                );
+                match submission {
+                    Ok(receipt) if receipt.status == UiEffectStatus::Pending => {
+                        self.login.mark_saving();
+                        self.pending_login = Some(PendingLogin {
+                            operation: receipt.operation,
+                            kind: PendingLoginKind::Set,
+                        });
+                        self.status = Some("Saving DeepSeek API key…".into());
+                    }
+                    Ok(receipt) => {
+                        let message = receipt_status_message(&receipt, "DeepSeek API key");
+                        self.login.fail(message.clone());
+                        self.status = Some(message);
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.login.fail(message.clone());
+                        self.status = Some(format!("Couldn't save DeepSeek API key: {message}"));
+                    }
+                }
+            }
+            LoginOutcome::Changed => self.status = None,
+            LoginOutcome::Unchanged => {}
+        }
+        Ok(())
     }
 
     fn apply_model_slash(
@@ -6034,18 +6242,22 @@ mod tests {
     use super::render_transcript_selection_box;
     use super::steer_capability_available;
     use super::{
-        MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand, UiState,
-        agent_overlay_close_click, agent_overlay_key_closes, register_model_label_click,
-        render_agent_tasks_content, render_image_preview_content, rewind_points,
+        DEEPSEEK_LOGIN_PROVIDER, MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand,
+        PendingLogin, PendingLoginKind, UiState, agent_overlay_close_click,
+        agent_overlay_key_closes, register_model_label_click, render_agent_tasks_content,
+        render_image_preview_content, rewind_points,
     };
     use crate::app::Overlay;
-    use crate::effects::UiEffectStatus;
+    use crate::effects::{
+        OperationKey, SensitiveString, UiEffect, UiEffectCompletion, UiEffectStatus,
+    };
     use crate::geometry::{GeometryLine, HitMap, HitRegion, HitTarget};
     use crate::host_adapter::{
         AgentSnapshot, FeatureStatus, FileSearchSnapshot, GrokHostSnapshot, MediaSnapshot,
     };
     use crate::modal_window_state::ModalWindowState;
     use crate::theme::Theme;
+    use dsh_pager::{DshGeneration, DshRequestId};
 
     #[test]
     fn notification_batch_matches_grok_streaming_input_fairness_contract() {
@@ -6285,6 +6497,7 @@ mod tests {
                 selected_agent_preset: None,
                 session_models: None,
                 selected_model: None,
+                credential_info: None,
             },
             &session,
         );
@@ -6336,6 +6549,7 @@ mod tests {
                 selected_agent_preset: None,
                 session_models: None,
                 selected_model: None,
+                credential_info: None,
             },
             &session,
         );
@@ -6407,6 +6621,7 @@ mod tests {
                 selected_agent_preset: None,
                 session_models: None,
                 selected_model: None,
+                credential_info: None,
             },
             &session,
         );
@@ -6465,6 +6680,7 @@ mod tests {
                 selected_agent_preset: None,
                 session_models: None,
                 selected_model: None,
+                credential_info: None,
             },
             &session,
         );
@@ -7549,6 +7765,70 @@ mod tests {
         assert!(
             ui.scrollback_pane.total_height(&mut session.scrollback) > 0,
             "transcript must keep the four tool calls"
+        );
+    }
+
+    #[test]
+    fn host_global_credential_completion_survives_session_generation_change() {
+        let operation = OperationKey {
+            session_id: dsh_pager::DshSessionId::new("old-session"),
+            generation: DshGeneration::new(1),
+            request_id: DshRequestId::new("credential-1"),
+            action: "set-credential".into(),
+            dedupe_key: "set-credential:deepseek:DEEPSEEK_API_KEY".into(),
+        };
+        let mut ui = UiState {
+            pending_login: Some(PendingLogin {
+                operation: operation.clone(),
+                kind: PendingLoginKind::Set,
+            }),
+            ..UiState::default()
+        };
+        ui.shell.open_login();
+        ui.login.open(DEEPSEEK_LOGIN_PROVIDER);
+        ui.login.apply_info(dsh_pager_protocol::CredentialInfo {
+            configured: false,
+            source: None,
+            writable: true,
+        });
+        ui.login.mark_saving();
+
+        let current = SessionState::new("new-session".into(), 9);
+        ui.apply_effect_completion(
+            UiEffectCompletion {
+                effect: UiEffect::SetCredential {
+                    operation: operation.clone(),
+                    provider_id: "deepseek".into(),
+                    credential_ref: "DEEPSEEK_API_KEY".into(),
+                    value: SensitiveString::new(String::new()),
+                },
+                receipt: crate::effects::UiEffectReceipt {
+                    status: UiEffectStatus::Accepted,
+                    operation,
+                    diagnostic: None,
+                    retryable: Some(false),
+                },
+                session_list: None,
+                session_search: None,
+                forked_session_id: None,
+                file_references: None,
+                attachment_preview: None,
+                commands: None,
+                command_execution: None,
+                agent_preset_list: None,
+                selected_agent_preset: None,
+                session_models: None,
+                selected_model: None,
+                credential_info: None,
+            },
+            &current,
+        );
+
+        assert!(ui.pending_login.is_none());
+        assert_eq!(ui.shell.overlay(), Overlay::None);
+        assert_eq!(
+            ui.status.as_deref(),
+            Some("DeepSeek API key saved. The next request will use it.")
         );
     }
 }

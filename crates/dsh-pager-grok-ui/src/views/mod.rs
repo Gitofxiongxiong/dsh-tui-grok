@@ -18,6 +18,7 @@ pub mod execute_tool {
 }
 pub mod execute_tool_adapter;
 pub mod interaction;
+pub mod login;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/modal_window.rs"]
 #[allow(dead_code)]
 pub mod modal_window;

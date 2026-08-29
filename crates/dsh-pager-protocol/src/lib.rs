@@ -404,6 +404,51 @@ pub struct AcceptedResult {
     pub accepted: bool,
 }
 
+/// Value-free state of one Host credential reference.
+///
+/// The credential value deliberately has no representation in this response
+/// type. It only crosses the wire in [`CredentialsSetParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialInfo {
+    pub configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub writable: bool,
+}
+
+/// Batch request for `credentials.describe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialsDescribeParams {
+    pub refs: Vec<String>,
+}
+
+/// Value returned by `credentials.describe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialsDescribeValue {
+    pub credentials: std::collections::BTreeMap<String, CredentialInfo>,
+}
+
+/// One-way secret payload accepted by `credentials.set`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialsSetParams {
+    #[serde(rename = "ref")]
+    pub credential_ref: String,
+    pub value: String,
+}
+
+impl fmt::Debug for CredentialsSetParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialsSetParams")
+            .field("credential_ref", &self.credential_ref)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Empty success value returned by `credentials.set`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialsSetValue {}
+
 /// One ApiProxy business error carried inside a successful JSON-RPC response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
@@ -1082,6 +1127,39 @@ mod tests {
             failure.into_result().expect_err("error").code,
             "session-not-found"
         );
+    }
+
+    #[test]
+    fn credential_payloads_are_value_free_on_read_and_redacted_in_debug() {
+        let described: CredentialsDescribeValue = serde_json::from_value(serde_json::json!({
+            "credentials": {
+                "DEEPSEEK_API_KEY": {
+                    "configured": true,
+                    "source": "file",
+                    "writable": true
+                }
+            }
+        }))
+        .expect("credential description");
+        let info = &described.credentials["DEEPSEEK_API_KEY"];
+        assert!(info.configured);
+        assert!(info.writable);
+        assert_eq!(info.source.as_deref(), Some("file"));
+
+        let set = CredentialsSetParams {
+            credential_ref: "DEEPSEEK_API_KEY".into(),
+            value: "sk-test-secret".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&set).expect("set params"),
+            serde_json::json!({
+                "ref": "DEEPSEEK_API_KEY",
+                "value": "sk-test-secret"
+            })
+        );
+        let debug = format!("{set:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sk-test-secret"));
     }
 
     #[test]

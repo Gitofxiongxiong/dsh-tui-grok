@@ -36,6 +36,7 @@ pub enum Overlay {
     ImagePreview,
     AgentTasks,
     Modal,
+    Login,
     Dashboard,
 }
 
@@ -87,12 +88,13 @@ impl Overlay {
             Self::ImagePreview => KeyOwner::ImagePreview,
             Self::AgentTasks => KeyOwner::AgentTasks,
             Self::Modal => KeyOwner::Modal,
+            Self::Login => KeyOwner::Modal,
             Self::Dashboard => KeyOwner::Dashboard,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ShellEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
@@ -100,6 +102,38 @@ pub enum ShellEvent {
     Resize { width: u16, height: u16 },
     Tick,
     Notification,
+}
+
+impl std::fmt::Debug for ShellEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => f.debug_tuple("Key").field(key).finish(),
+            Self::Mouse(mouse) => f.debug_tuple("Mouse").field(mouse).finish(),
+            Self::Paste(_) => f.write_str("Paste([REDACTED])"),
+            Self::Resize { width, height } => f
+                .debug_struct("Resize")
+                .field("width", width)
+                .field("height", height)
+                .finish(),
+            Self::Tick => f.write_str("Tick"),
+            Self::Notification => f.write_str("Notification"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RedactedInput(String);
+
+impl RedactedInput {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for RedactedInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedactedInput([REDACTED])")
+    }
 }
 
 /// Homepage (no overlay) inputs for the Esc / Ctrl+C policy.
@@ -183,6 +217,9 @@ pub enum ShellAction {
     ImagePreviewMouse(MouseEvent),
     AgentTasksKey(KeyEvent),
     AgentTasksMouse(MouseEvent),
+    LoginKey(KeyEvent),
+    LoginMouse(MouseEvent),
+    LoginPaste(RedactedInput),
     DashboardKey(KeyEvent),
     DashboardMouse(MouseEvent),
     DashboardPaste(String),
@@ -409,6 +446,12 @@ impl AppShell {
         self.owner = KeyOwner::AgentTasks;
     }
 
+    pub fn open_login(&mut self) {
+        self.previous_owner = self.owner;
+        self.overlay = Overlay::Login;
+        self.owner = KeyOwner::Modal;
+    }
+
     pub fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
         self.owner = self.previous_owner;
@@ -458,6 +501,9 @@ impl AppShell {
                 KeyOwner::Interaction => ShellAction::InteractionPaste(text),
                 KeyOwner::FileSearch => ShellAction::FileSearchPaste(text),
                 KeyOwner::Dashboard => ShellAction::DashboardPaste(text),
+                KeyOwner::Modal if self.overlay == Overlay::Login => {
+                    ShellAction::LoginPaste(RedactedInput(text))
+                }
                 _ => ShellAction::PromptPaste(text),
             },
             ShellEvent::Mouse(mouse) => {
@@ -481,6 +527,9 @@ impl AppShell {
                 }
                 if self.overlay == Overlay::AgentTasks {
                     return ShellAction::AgentTasksMouse(mouse);
+                }
+                if self.overlay == Overlay::Login {
+                    return ShellAction::LoginMouse(mouse);
                 }
                 if self.overlay == Overlay::Dashboard {
                     return ShellAction::DashboardMouse(mouse);
@@ -547,6 +596,9 @@ impl AppShell {
             }
             if self.overlay == Overlay::AgentTasks {
                 return ShellAction::AgentTasksKey(key);
+            }
+            if self.overlay == Overlay::Login {
+                return ShellAction::LoginKey(key);
             }
             if self.overlay == Overlay::Dashboard {
                 return ShellAction::DashboardKey(key);
@@ -1126,6 +1178,36 @@ mod tests {
         ));
         shell.close_overlay();
         assert_eq!(shell.overlay(), Overlay::None);
+    }
+
+    #[test]
+    fn login_modal_owns_key_mouse_and_paste_until_runtime_closes_it() {
+        let mut shell = AppShell::default();
+        shell.focus_prompt();
+        shell.open_login();
+        assert_eq!(shell.overlay(), Overlay::Login);
+        assert_eq!(shell.owner(), KeyOwner::Modal);
+        assert!(matches!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
+            ShellAction::LoginKey(_)
+        ));
+        let paste = shell.dispatch(ShellEvent::Paste("sk-placeholder".into()), true);
+        assert!(matches!(paste, ShellAction::LoginPaste(_)));
+        assert!(!format!("{paste:?}").contains("sk-placeholder"));
+        assert!(matches!(
+            shell.dispatch(
+                ShellEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: 1,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                true,
+            ),
+            ShellAction::LoginMouse(_)
+        ));
+        shell.close_overlay();
+        assert_eq!(shell.owner(), KeyOwner::Prompt);
     }
 
     #[test]

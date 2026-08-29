@@ -1,6 +1,7 @@
 use dsh_pager_protocol::{
     AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult, CommandDescriptor,
-    CommandExecuteValue, FileReferencesListValue, PromptContentPart, PromptMode, QueueAction,
+    CommandExecuteValue, CredentialsDescribeParams, CredentialsDescribeValue, CredentialsSetParams,
+    CredentialsSetValue, FileReferencesListValue, PromptContentPart, PromptMode, QueueAction,
     SessionCancelParams, SessionCreateValue, SessionForkParams, SessionForkResult,
     SessionHistoryValue, SessionListValue, SessionModelsValue, SessionPromptParams,
     SessionPromptResult, SessionRenameParams, SessionRenameResult, SessionSearchValue,
@@ -125,6 +126,36 @@ pub fn list_file_references(
         transport,
         "fileReferences.list",
         json!({ "sessionId": session_id, "query": query }),
+    )
+}
+
+/// Describe credential references without ever returning their values.
+pub fn describe_credentials(
+    transport: &mut RpcTransport,
+    refs: &[String],
+) -> PagerResult<CredentialsDescribeValue> {
+    api_call(
+        transport,
+        "credentials.describe",
+        serde_json::to_value(CredentialsDescribeParams {
+            refs: refs.to_vec(),
+        })?,
+    )
+}
+
+/// Store one credential in the Host-owned writable credential layer.
+pub fn set_credential(
+    transport: &mut RpcTransport,
+    credential_ref: &str,
+    value: String,
+) -> PagerResult<CredentialsSetValue> {
+    api_call(
+        transport,
+        "credentials.set",
+        serde_json::to_value(CredentialsSetParams {
+            credential_ref: credential_ref.to_string(),
+            value,
+        })?,
     )
 }
 

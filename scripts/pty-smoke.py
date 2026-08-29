@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Small PTY smoke for the Grok-derived successor UI.
 
-It checks the new vertical slice: load a real mock session, run `/resume`,
-open/close the Grok session picker, and leave the terminal in a restored
-state. More specialized view behavior belongs in widget tests and future
-golden PTY fixtures.
+It checks the vertical slice: load a real mock session, save a masked fake
+DeepSeek credential through `/login`, run `/resume`, open/close the Grok
+session picker, and leave the terminal in a restored state. More specialized
+view behavior belongs in widget tests and future golden PTY fixtures.
 """
 
 from __future__ import annotations
@@ -236,6 +236,37 @@ def main() -> int:
             pump()
         if b"SessionLoaded" not in visible():
             raise RuntimeError("timed out loading backend session")
+
+        # `/login` is local UI over the Host credential seam. The fake value
+        # must render only as bullets and must never be echoed into the PTY
+        # output, status line, or transcript.
+        fake_key = b"sk-pty-placeholder"
+        os.write(fd, b"/login\r")
+        while time.monotonic() < deadline:
+            pump()
+            login_screen = screen.text()
+            if "Log in to DeepSeek" in login_screen and "Enter your DeepSeek API key" in login_screen:
+                break
+        login_screen = screen.text()
+        if "Log in to DeepSeek" not in login_screen:
+            raise RuntimeError("/login did not render the DeepSeek credential modal")
+        if "Enter your DeepSeek API key" not in login_screen:
+            raise RuntimeError("credential describe did not enable the API key input")
+        os.write(fd, fake_key)
+        pump(0.3)
+        if fake_key.decode() in screen.text() or fake_key in visible():
+            raise RuntimeError("DeepSeek API key leaked into terminal output")
+        if "•" not in screen.text():
+            raise RuntimeError("DeepSeek API key was not rendered as masked input")
+        os.write(fd, b"\r")
+        while time.monotonic() < deadline:
+            pump()
+            if "Log in to DeepSeek" not in screen.text():
+                break
+        if "Log in to DeepSeek" in screen.text():
+            raise RuntimeError("credential save did not close the login modal")
+        if fake_key in visible():
+            raise RuntimeError("DeepSeek API key leaked after credential save")
 
         # Grok native resume vertical slice: dispatch the local slash command,
         # wait for modal chrome and its inactive search hint, activate search,

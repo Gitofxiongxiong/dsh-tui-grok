@@ -329,6 +329,7 @@ let approvalPending = false
 let questionPending = false
 let cancelPending = false
 let cancelAttempts = 0
+let deepseekCredentialConfigured = false
 let archivedSessionIds = []
 let queue = [
   {
@@ -656,6 +657,27 @@ rl.on('line', (line) => {
         input: { hint: '[off|message]', images: true },
       },
     ])
+    return
+  }
+  if (message?.method === 'credentials.describe') {
+    const refs = Array.isArray(message.params?.refs) ? message.params.refs : []
+    const credentials = Object.fromEntries(refs.map((ref) => [ref, {
+      configured: ref === 'DEEPSEEK_API_KEY' && deepseekCredentialConfigured,
+      ...(ref === 'DEEPSEEK_API_KEY' && deepseekCredentialConfigured ? { source: 'file' } : {}),
+      writable: true,
+    }]))
+    success(message.id, { credentials })
+    return
+  }
+  if (message?.method === 'credentials.set') {
+    const ref = String(message.params?.ref ?? '')
+    const value = String(message.params?.value ?? '')
+    if (ref !== 'DEEPSEEK_API_KEY' || value.length === 0) {
+      failure(message.id, -32602, 'invalid mock credential payload')
+      return
+    }
+    deepseekCredentialConfigured = true
+    success(message.id, {})
     return
   }
   if (message?.method === 'session.prompt') {

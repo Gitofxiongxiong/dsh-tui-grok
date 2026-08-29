@@ -506,7 +506,7 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 | M2 terminal/render | ◐ 部分完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；但完整 Grok Appearance/render primitive 和主界面组件树尚未成为默认生产路径 | 完成 Grok theme/render/scrollback primitive parity |
 | M3 AppView/AgentView | ◐ 部分完成（自建 AppShell 基线） | 已有 `AppShell` reducer、KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch；M3.5 的 bare-Esc pending-action、双击 clear/silent rewind、cancel retry/保护窗和 Grok rewind picker/confirm 已按 source manifest 接入，并有 unit + PTY + ttyd/Playwright 对照；但 `runtime.rs` 仍是手工布局，完整 Grok AppView/AgentView 未接入 | 按 M3.1-M3.4/M3.6-M3.8 移植完整组件树并移除 runtime 手工主屏 |
 | M4 scrollback/blocks | ◐ 部分完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 Grok scrollback/block renderer、reference golden、selection/link map 和 50k 性能门禁 | 完成 M4.1-M4.8 rich renderer/reference/selection/perf |
-| M5 prompt | ◐ 部分完成（completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；完整 Grok prompt widget、外部进程真实 terminal handoff 与 mouse-selection golden 仍缺 | 完成 M5 prompt widget/state/effect parity |
+| M5 prompt | ◐ 部分完成（completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；`/login` 已以 Grok modal/focus 接入 Host `credentials.describe/set`，遮罩且不记录 API Key；完整 Grok prompt widget、外部进程真实 terminal handoff 与 mouse-selection golden 仍缺 | 完成 M5 prompt widget/state/effect parity |
 | M6 picker/dashboard | ◐ 部分完成（completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；真实双 session race、完整 Grok picker/list pane 和 reference golden 仍缺 | 完成 M6.1-M6.8 multi-session/reference parity |
 | M7 queue/interactions | ◐ 部分完成（completion slice） | queue/interaction effect RPC errors 已映射 conflict/stale/timeout/unsupported/failed receipt；approval 已使用 Grok-derived composer blocking card、callId tool 关联、radio/Tab/数字/鼠标和 Esc park-focus；status、Dashboard jobs/status 已接入；完整 reorder drag、复杂 question 表单、always-approve host contract 和 reference matrix 仍缺 | 完成 M7.1-M7.8 queue/interaction/status parity |
 | M8 mouse/media | ◐ 部分完成（completion slice） | `HitMap` 在 render-time 统一产出 entry/block/prompt 命中矩形；selection 使用 grapheme/display column，resize 清空旧 map；OSC52/system clipboard、OSC8 link、image placeholder 和 mouse fallback 有 typed capability 路径；完整 Grok mouse/selection/media golden 和旧 fallback 删除仍缺 | 完成 M8.1-M8.8 Grok geometry/capability parity |
@@ -761,6 +761,13 @@ queue/steer/submit 能力。
 **出口**：用户感受到的是 Grok prompt，而不是当前 Paragraph 文本框；DSH
 提交模式差异只出现在 intent/effect 和明确的状态文案。
 
+**本批次证据（2026-08-29 `/login`）**：Grok 的 `/login` 命令名称、modal
+chrome 和 focus/Esc 路由已接入；DSH `credentials.describe/set` 是唯一凭据
+真源。当前 provider 目录只有 DeepSeek，因此跳过 provider picker 直接输入
+`DEEPSEEK_API_KEY`；新 provider 可通过 `LoginProvider`/`LoginMethod` 目录增加。
+成功 receipt 只表示已保存，不隐式发送模型请求；Grok OAuth/auth runtime
+仍属于 D 排除范围。
+
 ### M6：Session Picker、Dashboard、Attach/Detach 和 Workspace 投影
 
 **目标**：把 Grok picker/list/dashboard 的前端体验接到 DSH roster 和
@@ -997,6 +1004,7 @@ mock 结果也不能替代这些尚未完成的真实 parity 出口。
 | H7 | workspace/peek/rename/fork/archive | typed action and capability | M6/M7 | unsupported action feedback |
 | H8 | SharedAuto/connect-or-spawn/daemon lifecycle | identity digest、owner、shutdown | M9/M10 | no orphan process, reconnect |
 | H9 | worktree/rewind/media/advanced operations | contract-blocked typed effects | M8/M11 | capability gate, no fake success |
+| H10 | credential describe/set | value-free state、one-way secret effect、Host-global receipt | M5/M7 | no secret echo/log、read-only source refusal、no fake validation |
 
 每一项 H 工作必须先补 host contract 和 fixture，再让 Grok view 暴露入口。
 如果 Harness 暂未支持某动作，UI 应显示 disabled/unsupported，而不是在本地

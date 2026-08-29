@@ -120,6 +120,7 @@ impl SlashSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     ShowSessionPicker,
+    Login,
     ToggleTimestamps,
     SetTimestamps(bool),
     NewSession,
@@ -154,6 +155,8 @@ pub enum DispatchResult {
 
 const RESUME: ResumeCommand = ResumeCommand;
 const MODEL: ModelCommand = ModelCommand;
+const LOGIN_USAGE: &str = "/login";
+const LOGIN_DESCRIPTION: &str = "Log in or replace the DeepSeek API key";
 const TIMESTAMPS_USAGE: &str = "/timestamps";
 const TIMESTAMPS_DESCRIPTION: &str = "Show or hide transcript timestamps";
 const TIMESTAMPS_USAGE_TEXT: &str = "/timestamps [on|off]";
@@ -174,11 +177,19 @@ struct CommandSpec {
     placeholder: Option<&'static str>,
 }
 
-const COMMANDS: [CommandSpec; 4] = [
+const COMMANDS: [CommandSpec; 5] = [
     CommandSpec {
         name: "resume",
         aliases: &[],
         description: "Resume a previous session",
+        takes_args: false,
+        args_required: false,
+        placeholder: None,
+    },
+    CommandSpec {
+        name: "login",
+        aliases: &[],
+        description: LOGIN_DESCRIPTION,
         takes_args: false,
         args_required: false,
         placeholder: None,
@@ -710,6 +721,13 @@ pub fn dispatch_with_models(input: &str, models: &ModelState) -> DispatchResult 
     let split_at = command.find(char::is_whitespace).unwrap_or(command.len());
     let (name, args) = command.split_at(split_at);
     match name {
+        "login" => {
+            if args.trim().is_empty() {
+                DispatchResult::Action(Action::Login)
+            } else {
+                DispatchResult::InvalidUsage(LOGIN_USAGE)
+            }
+        }
         "timestamps" => match args.trim() {
             "" => DispatchResult::Action(Action::ToggleTimestamps),
             "on" => DispatchResult::Action(Action::SetTimestamps(true)),
@@ -749,6 +767,8 @@ pub fn dispatch_with_models(input: &str, models: &ModelState) -> DispatchResult 
 pub fn command_description(command: &str) -> Option<&'static str> {
     if command == RESUME.usage() {
         Some(RESUME.description())
+    } else if command == LOGIN_USAGE {
+        Some(LOGIN_DESCRIPTION)
     } else if command == TIMESTAMPS_USAGE || command == TIMESTAMPS_USAGE_TEXT {
         Some(TIMESTAMPS_DESCRIPTION)
     } else if command == NEW_USAGE || command == NEW_USAGE_TEXT {
@@ -794,9 +814,10 @@ mod tests {
         controller.refresh("/", 1, &models(), &[], &[]);
         let snapshot = controller.snapshot();
         assert!(snapshot.open);
-        assert_eq!(snapshot.matches.len(), 4);
+        assert_eq!(snapshot.matches.len(), 5);
         assert_eq!(snapshot.matches[0].display, "/resume");
         assert!(!snapshot.matches[0].description.is_empty());
+        assert!(snapshot.matches.iter().any(|row| row.display == "/login"));
         assert!(snapshot.matches.iter().any(|row| row.display == "/model"));
     }
 
@@ -958,6 +979,11 @@ mod tests {
 
     #[test]
     fn timestamps_stays_local_and_preset_is_not_a_slash_command() {
+        assert_eq!(dispatch("/login"), DispatchResult::Action(Action::Login));
+        assert_eq!(
+            dispatch("/login extra"),
+            DispatchResult::InvalidUsage("/login")
+        );
         assert_eq!(
             dispatch("/timestamps off"),
             DispatchResult::Action(Action::SetTimestamps(false))
