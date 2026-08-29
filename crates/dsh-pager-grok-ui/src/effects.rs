@@ -921,6 +921,9 @@ pub struct UiEffectCompletion {
     pub file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
     pub commands: Option<Vec<CommandDescriptor>>,
+    /// True when `session.prompt` was handled by DSH's command runtime and
+    /// therefore did not start a model turn.
+    pub command_handled: bool,
     pub command_result_text: Option<String>,
     pub agent_preset_list: Option<AgentPresetListValue>,
     pub selected_agent_preset: Option<String>,
@@ -1235,6 +1238,7 @@ struct DecodedAsyncResult {
     file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
     commands: Option<Vec<CommandDescriptor>>,
+    command_handled: bool,
     command_result_text: Option<String>,
     agent_preset_list: Option<AgentPresetListValue>,
     selected_agent_preset: Option<String>,
@@ -1265,6 +1269,7 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         UiEffect::SubmitPrompt { .. } | UiEffect::SetPermissionPreset { .. }
     ) {
         let prompt: dsh_pager_protocol::SessionPromptResult = serde_json::from_value(value)?;
+        let command_handled = prompt.command.is_some();
         let command_result_text = prompt
             .command
             .as_ref()
@@ -1273,6 +1278,7 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
             .map(str::to_string);
         return Ok(DecodedAsyncResult {
             accepted: prompt.accepted,
+            command_handled,
             command_result_text,
             ..DecodedAsyncResult::default()
         });
@@ -1428,6 +1434,7 @@ fn build_completion(
                 file_references: decoded.file_references,
                 attachment_preview: decoded.attachment_preview,
                 commands: decoded.commands,
+                command_handled: decoded.command_handled,
                 command_result_text: decoded.command_result_text,
                 agent_preset_list: decoded.agent_preset_list,
                 selected_agent_preset: decoded.selected_agent_preset,
@@ -1448,6 +1455,7 @@ fn build_completion(
             file_references: decoded.file_references,
             attachment_preview: decoded.attachment_preview,
             commands: decoded.commands,
+            command_handled: decoded.command_handled,
             command_result_text: decoded.command_result_text,
             agent_preset_list: decoded.agent_preset_list,
             selected_agent_preset: decoded.selected_agent_preset,
@@ -1467,6 +1475,7 @@ fn build_completion(
             file_references: None,
             attachment_preview: None,
             commands: None,
+            command_handled: false,
             command_result_text: None,
             agent_preset_list: None,
             selected_agent_preset: None,
@@ -1686,6 +1695,7 @@ mod tests {
             decoded.command_result_text.as_deref(),
             Some("Plan mode enabled")
         );
+        assert!(decoded.command_handled);
     }
 
     #[test]

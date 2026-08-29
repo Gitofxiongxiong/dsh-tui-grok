@@ -122,9 +122,6 @@ pub enum Action {
     ShowSessionPicker,
     ToggleTimestamps,
     SetTimestamps(bool),
-    ShowPresetPicker,
-    SelectPreset(String),
-    PresetStatus,
     NewSession,
     ShowModelPicker,
     SetDefaultModel(ModelId),
@@ -160,9 +157,6 @@ const MODEL: ModelCommand = ModelCommand;
 const TIMESTAMPS_USAGE: &str = "/timestamps";
 const TIMESTAMPS_DESCRIPTION: &str = "Show or hide transcript timestamps";
 const TIMESTAMPS_USAGE_TEXT: &str = "/timestamps [on|off]";
-const PRESET_USAGE: &str = "/preset";
-const PRESET_DESCRIPTION: &str = "Choose the agent preset for this blank session";
-const PRESET_USAGE_TEXT: &str = "/preset [status|<id>]";
 const NEW_USAGE: &str = "/new";
 const NEW_DESCRIPTION: &str = "Start a blank session and choose its agent preset";
 const NEW_USAGE_TEXT: &str = "/new";
@@ -180,7 +174,7 @@ struct CommandSpec {
     placeholder: Option<&'static str>,
 }
 
-const COMMANDS: [CommandSpec; 5] = [
+const COMMANDS: [CommandSpec; 4] = [
     CommandSpec {
         name: "resume",
         aliases: &[],
@@ -188,14 +182,6 @@ const COMMANDS: [CommandSpec; 5] = [
         takes_args: false,
         args_required: false,
         placeholder: None,
-    },
-    CommandSpec {
-        name: "preset",
-        aliases: &[],
-        description: PRESET_DESCRIPTION,
-        takes_args: true,
-        args_required: false,
-        placeholder: Some("[status|<id>]"),
     },
     CommandSpec {
         name: "new",
@@ -440,7 +426,9 @@ impl SlashController {
         for command in &self.host_commands {
             let name = command.name.trim();
             let display = format!("/{name}");
-            if !valid_command_name(name) || candidates.iter().any(|row| row.display == display) {
+            if !visible_host_command_name(name)
+                || candidates.iter().any(|row| row.display == display)
+            {
                 continue;
             }
             candidates.push(SuggestionRow {
@@ -489,12 +477,6 @@ impl SlashController {
         };
         let items = match command_spec(invocation.token).map(|spec| spec.name) {
             Some("model") => MODEL.suggest_args(models, &input.args_query),
-            Some("preset") => Some(vec![ArgItem {
-                display: "status".into(),
-                match_text: "status".into(),
-                insert_text: "status".into(),
-                description: "Show the active agent preset".into(),
-            }]),
             Some("timestamps") => Some(vec![
                 ArgItem {
                     display: "on".into(),
@@ -558,9 +540,9 @@ impl SlashController {
     }
 
     fn host_command(&self, name: &str) -> Option<&CommandDescriptor> {
-        self.host_commands
-            .iter()
-            .find(|command| command.name == name && command_spec(name).is_none())
+        self.host_commands.iter().find(|command| {
+            command.name == name && command_spec(name).is_none() && visible_host_command_name(name)
+        })
     }
 }
 
@@ -569,6 +551,10 @@ fn valid_command_name(name: &str) -> bool {
         && name.chars().all(|character| {
             character.is_ascii_alphanumeric() || character == '-' || character == '_'
         })
+}
+
+fn visible_host_command_name(name: &str) -> bool {
+    valid_command_name(name) && name != "preset"
 }
 
 struct SlashInput {
@@ -716,12 +702,10 @@ pub fn dispatch_with_models(input: &str, models: &ModelState) -> DispatchResult 
             "off" => DispatchResult::Action(Action::SetTimestamps(false)),
             _ => DispatchResult::InvalidUsage(TIMESTAMPS_USAGE_TEXT),
         },
-        "preset" => match args.trim() {
-            "" => DispatchResult::Action(Action::ShowPresetPicker),
-            "status" => DispatchResult::Action(Action::PresetStatus),
-            id if is_preset_id(id) => DispatchResult::Action(Action::SelectPreset(id.to_string())),
-            _ => DispatchResult::InvalidUsage(PRESET_USAGE_TEXT),
-        },
+        "preset" => DispatchResult::Error(
+            "Agent preset is chosen before the first turn; press Shift+Tab or click the preset label"
+                .into(),
+        ),
         "new" => {
             if args.trim().is_empty() {
                 DispatchResult::Action(Action::NewSession)
@@ -748,24 +732,11 @@ pub fn dispatch_with_models(input: &str, models: &ModelState) -> DispatchResult 
     }
 }
 
-fn is_preset_id(id: &str) -> bool {
-    let mut chars = id.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
-}
-
 pub fn command_description(command: &str) -> Option<&'static str> {
     if command == RESUME.usage() {
         Some(RESUME.description())
     } else if command == TIMESTAMPS_USAGE || command == TIMESTAMPS_USAGE_TEXT {
         Some(TIMESTAMPS_DESCRIPTION)
-    } else if command == PRESET_USAGE || command == PRESET_USAGE_TEXT {
-        Some(PRESET_DESCRIPTION)
     } else if command == NEW_USAGE || command == NEW_USAGE_TEXT {
         Some(NEW_DESCRIPTION)
     } else if command == MODEL_USAGE || command == MODEL_USAGE_TEXT || command == "/m" {
@@ -809,7 +780,7 @@ mod tests {
         controller.refresh("/", 1, &models(), &[], &[]);
         let snapshot = controller.snapshot();
         assert!(snapshot.open);
-        assert_eq!(snapshot.matches.len(), 5);
+        assert_eq!(snapshot.matches.len(), 4);
         assert_eq!(snapshot.matches[0].display, "/resume");
         assert!(!snapshot.matches[0].description.is_empty());
         assert!(snapshot.matches.iter().any(|row| row.display == "/model"));
@@ -872,6 +843,11 @@ mod tests {
                 description: "Host collision must not replace local model".into(),
                 input: None,
             },
+            CommandDescriptor {
+                name: "preset".into(),
+                description: "Host collision must stay hidden".into(),
+                input: None,
+            },
         ]
     }
 
@@ -906,6 +882,7 @@ mod tests {
                 .description,
             MODEL_DESCRIPTION
         );
+        assert!(!snapshot.matches.iter().any(|row| row.display == "/preset"));
     }
 
     #[test]
@@ -952,15 +929,12 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_and_preset_commands_remain_local() {
+    fn timestamps_stays_local_and_preset_is_not_a_slash_command() {
         assert_eq!(
             dispatch("/timestamps off"),
             DispatchResult::Action(Action::SetTimestamps(false))
         );
-        assert_eq!(
-            dispatch("/preset"),
-            DispatchResult::Action(Action::ShowPresetPicker)
-        );
+        assert!(matches!(dispatch("/preset"), DispatchResult::Error(_)));
         assert_eq!(dispatch("plain prompt"), DispatchResult::NotLocal);
     }
 }

@@ -562,10 +562,7 @@ fn render_wide(
 
     let tip = Line::from(vec![
         Span::styled("Tip: ", label_style),
-        Span::styled(
-            "/preset changes agent · Shift+Tab plan/sandbox",
-            value_style,
-        ),
+        Span::styled("Shift+Tab preset · Ctrl+O yolo", value_style),
     ]);
     buf.set_line(text_x, group_y.saturating_add(8), &tip, text_width);
 
@@ -604,7 +601,7 @@ fn render_compact(buf: &mut Buffer, area: Rect, model: &str, preset: &str, theme
         render_centered(
             buf,
             Rect::new(area.x, y.saturating_add(2), area.width, 1),
-            "/preset changes agent",
+            "Shift+Tab preset",
             Style::default().fg(theme.gray_dim).bg(theme.bg_base),
         );
     }

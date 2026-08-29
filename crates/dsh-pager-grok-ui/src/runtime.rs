@@ -274,6 +274,12 @@ struct PendingPermissionSwitch {
     target: String,
 }
 
+#[derive(Debug, Clone)]
+struct PendingAgentPresetSwitch {
+    operation: OperationKey,
+    previous: Option<String>,
+}
+
 /// Run the default Grok-derived UI until the user closes it.
 pub fn run_interactive(mut transport: RpcTransport, mut session: SessionState) -> PagerResult<()> {
     diag::install_panic_hook();
@@ -625,7 +631,11 @@ struct UiState {
     command_catalog: Vec<CommandDescriptor>,
     commands_for_session: Option<String>,
     command_catalog_revision: u64,
+    preset_session_key: Option<(String, u64)>,
     pending_agent_preset: Option<String>,
+    pending_agent_preset_switch: Option<PendingAgentPresetSwitch>,
+    pending_first_prompt: Option<OperationKey>,
+    preset_locked_locally: bool,
     agent_preset_roster: Vec<dsh_pager_protocol::AgentPresetEntry>,
     roster_requested: bool,
     modal: ModalWindowState,
@@ -970,21 +980,34 @@ impl UiState {
                 self.turn_stop_hovered = false;
             }
         }
-        if let UiEffect::SubmitPrompt { text, .. } = &completion.effect
-            && completion.receipt.status == UiEffectStatus::Accepted
-        {
-            let prompt_unchanged = self.prompt.text() == text;
-            if prompt_unchanged {
-                let text = text.clone();
-                self.record_prompt_history(&text);
-                self.prompt.reset();
-                self.slash.reset();
+        if let UiEffect::SubmitPrompt { text, .. } = &completion.effect {
+            let matches_first = self.pending_first_prompt.as_ref().is_some_and(|pending| {
+                pending.request_id == completion.receipt.operation.request_id
+            });
+            if matches_first {
+                if completion.receipt.status == UiEffectStatus::Accepted
+                    && !completion.command_handled
+                {
+                    // Bridge the small window before the control-plane
+                    // projection publishes `blank=false`.
+                    self.preset_locked_locally = true;
+                }
+                self.pending_first_prompt = None;
             }
-            if prompt_unchanged || completion.command_result_text.is_some() {
-                self.status = completion
-                    .command_result_text
-                    .clone()
-                    .or_else(|| Some(prompt_admission_message(&completion.receipt.status)));
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                let prompt_unchanged = self.prompt.text() == text;
+                if prompt_unchanged {
+                    let text = text.clone();
+                    self.record_prompt_history(&text);
+                    self.prompt.reset();
+                    self.slash.reset();
+                }
+                if prompt_unchanged || completion.command_handled {
+                    self.status = completion
+                        .command_result_text
+                        .clone()
+                        .or_else(|| Some(prompt_admission_message(&completion.receipt.status)));
+                }
             }
         }
         if let UiEffect::SetPermissionPreset { preset, .. } = &completion.effect {
@@ -1045,21 +1068,32 @@ impl UiState {
             return;
         }
         if let UiEffect::SelectAgentPreset { agent_preset, .. } = &completion.effect {
+            let matches_pending =
+                self.pending_agent_preset_switch
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.operation.request_id == completion.receipt.operation.request_id
+                    });
+            if !matches_pending {
+                self.status = Some("Ignored stale Agent preset completion".into());
+                return;
+            }
+            let pending = self.pending_agent_preset_switch.take();
             if completion.receipt.status == UiEffectStatus::Accepted {
                 let id = completion
                     .selected_agent_preset
                     .clone()
                     .unwrap_or_else(|| agent_preset.clone());
                 self.pending_agent_preset = Some(id.clone());
+                self.models_for_session = None;
+                self.model_picker.close();
                 self.command_catalog.clear();
                 self.commands_for_session = None;
                 self.command_catalog_revision = self.command_catalog_revision.saturating_add(1);
                 let label = current_agent_preset_label(Some(&id), &self.agent_preset_roster);
                 self.status = Some(format!("Preset → {label}"));
-                self.preset_picker.close();
-                self.shell.close_overlay();
             } else {
-                self.pending_agent_preset = None;
+                self.pending_agent_preset = pending.and_then(|pending| pending.previous);
                 self.status = Some(receipt_status_message(&completion.receipt, subject));
             }
             return;
@@ -1166,6 +1200,7 @@ impl UiState {
         self.apply_file_search_result(&mut snapshot);
         self.sync_dashboard(control_plane);
         self.agent_pane.sync(&snapshot.agent);
+        self.reconcile_preset_session(&snapshot);
         self.reconcile_snapshot(&snapshot);
         self.reconcile_permission(&snapshot);
         self.welcome_animation.observe_session(&snapshot.session_id);
@@ -1371,6 +1406,25 @@ impl UiState {
                 Some(&prompt_info),
                 theme,
             );
+            if let Some(rect) = prompt_result
+                .info_flag_areas
+                .first()
+                .copied()
+                .filter(|rect| rect.width > 0 && rect.height > 0)
+            {
+                self.hit_map.insert(crate::geometry::HitRegion {
+                    target: HitTarget::Overlay("agent-preset".into()),
+                    rect,
+                    label: if self.preset_editable(&snapshot) {
+                        "choose agent preset"
+                    } else {
+                        "agent preset fixed for this conversation"
+                    }
+                    .into(),
+                    link: None,
+                    priority: 24,
+                });
+            }
             if let Some((x, y)) = prompt_result.cursor_pos {
                 let slash = self.slash.snapshot();
                 if slash.args_query_is_empty
@@ -2062,9 +2116,68 @@ impl UiState {
         )
     }
 
+    fn preset_session_key(snapshot: &GrokHostSnapshot) -> (String, u64) {
+        (
+            snapshot.session_id.clone(),
+            snapshot.session_header.generation.get(),
+        )
+    }
+
+    fn bind_preset_session(&mut self, session: &SessionState, preset: Option<String>) {
+        self.preset_session_key = Some((session.session_id().to_string(), session.generation()));
+        self.pending_agent_preset = preset;
+        self.pending_agent_preset_switch = None;
+        self.pending_first_prompt = None;
+        self.preset_locked_locally = false;
+    }
+
+    fn reconcile_preset_session(&mut self, snapshot: &GrokHostSnapshot) {
+        let key = Self::preset_session_key(snapshot);
+        if self.preset_session_key.as_ref() != Some(&key) {
+            self.preset_session_key = Some(key);
+            self.pending_agent_preset = snapshot.agent_preset.clone();
+            self.pending_agent_preset_switch = None;
+            self.pending_first_prompt = None;
+            self.preset_locked_locally = false;
+            self.preset_picker.close();
+        }
+        if !snapshot.session_blank {
+            self.preset_locked_locally = true;
+            self.pending_first_prompt = None;
+        }
+        if self.pending_agent_preset_switch.is_none()
+            && let Some(authoritative) = snapshot.agent_preset.as_ref()
+        {
+            self.pending_agent_preset = Some(authoritative.clone());
+        }
+    }
+
+    fn preset_editable(&self, snapshot: &GrokHostSnapshot) -> bool {
+        snapshot.session_blank
+            && !self.preset_locked_locally
+            && self.pending_agent_preset_switch.is_none()
+            && self.pending_first_prompt.is_none()
+    }
+
+    fn preset_fixed_message(&self) -> String {
+        if self.pending_agent_preset_switch.is_some() {
+            "Agent preset is switching; wait for the Host before sending".into()
+        } else if self.pending_first_prompt.is_some() {
+            "First prompt is pending; preset selection waits for the Host result".into()
+        } else {
+            "Agent preset is fixed for this conversation; use /new to choose another".into()
+        }
+    }
+
     fn prompt_flags(&self, snapshot: &GrokHostSnapshot, theme: &Theme) -> Vec<PromptFlagContract> {
+        let mut preset = self.agent_preset_label(snapshot);
+        if self.preset_editable(snapshot) {
+            preset.push_str(" ▾");
+        } else if self.pending_agent_preset_switch.is_some() {
+            preset.push_str(" …");
+        }
         let mut flags = vec![PromptFlagContract {
-            text: self.agent_preset_label(snapshot),
+            text: preset,
             color: None,
             bold: true,
         }];
@@ -2189,10 +2302,20 @@ impl UiState {
             crate::terminal::terminal_context().shift_enter_unavailable(),
             None,
         );
-        // Grok's generic prompt hint hard-codes the upstream Shift+Tab mode
-        // cycle. DSH has independent Plan and permission controls, so replace
-        // that slot with Grok's own Ctrl+O ToggleYolo action definition.
-        if let Some(mode_hint) = hints.iter_mut().find(|hint| hint.label == "mode")
+        // Reuse Grok's canonical Shift+Tab binding while the DSH conversation
+        // is blank. Once the first real turn starts, that conditional entry
+        // disappears and the persistent Ctrl+O YOLO hint occupies the slot.
+        if self.preset_editable(snapshot) {
+            if let Some(mode_hint) = hints.iter_mut().find(|hint| hint.label == "mode") {
+                mode_hint.label = "preset".into();
+                mode_hint.description = Some("Choose agent preset before the first turn".into());
+            }
+            if !hints.iter().any(|hint| hint.label == "yolo")
+                && let Some(def) = registry.find(ActionId::ToggleYolo)
+            {
+                hints.push(def.hint());
+            }
+        } else if let Some(mode_hint) = hints.iter_mut().find(|hint| hint.label == "mode")
             && let Some(def) = registry.find(ActionId::ToggleYolo)
         {
             *mode_hint = def.hint();
@@ -2469,6 +2592,10 @@ impl UiState {
                 && let Some(region) = self.hit_map.hit_test(mouse.column, mouse.row)
                 && let HitTarget::Overlay(name) = &region.target
             {
+                if name == "agent-preset" {
+                    self.open_preset_picker(transport, session);
+                    return Ok(false);
+                }
                 if let Some(key) = name.strip_prefix("agent-item:")
                     && let Some(id) = agent_item_from_key(key)
                 {
@@ -2645,6 +2772,10 @@ impl UiState {
             }
             ShellAction::ToggleYolo => {
                 self.toggle_yolo(transport, session)?;
+                Ok(false)
+            }
+            ShellAction::OpenPresetPicker => {
+                self.open_preset_picker(transport, session);
                 Ok(false)
             }
             ShellAction::OpenModelPicker => {
@@ -3424,21 +3555,6 @@ impl UiState {
                 self.set_timestamps_enabled(enabled);
                 true
             }
-            crate::slash::DispatchResult::Action(crate::slash::Action::ShowPresetPicker) => {
-                self.open_preset_picker(transport, session);
-                self.prompt.reset();
-                self.slash.reset();
-                self.prompt_history_index = None;
-                true
-            }
-            crate::slash::DispatchResult::Action(crate::slash::Action::PresetStatus) => {
-                self.show_preset_status(session, transport);
-                true
-            }
-            crate::slash::DispatchResult::Action(crate::slash::Action::SelectPreset(id)) => {
-                self.select_agent_preset(transport, session, &id);
-                true
-            }
             crate::slash::DispatchResult::Action(crate::slash::Action::NewSession) => {
                 match self.start_new_session(transport, session) {
                     Ok(()) => {}
@@ -3592,13 +3708,17 @@ impl UiState {
             session,
             Some(transport.control_plane()),
         );
+        self.reconcile_preset_session(&snapshot);
+        if !self.preset_editable(&snapshot) {
+            self.status = Some(self.preset_fixed_message());
+            return;
+        }
         self.picker_kind = PickerKind::AgentPreset;
         self.shell.open_picker();
         let revision = self.preset_picker.open(
             self.pending_agent_preset
                 .as_deref()
                 .or(snapshot.agent_preset.as_deref()),
-            !snapshot.session_blank,
         );
         if !self.agent_preset_roster.is_empty() {
             let _ = self
@@ -3616,23 +3736,6 @@ impl UiState {
         }
     }
 
-    fn show_preset_status(&mut self, session: &SessionState, transport: &RpcTransport) {
-        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
-            session,
-            Some(transport.control_plane()),
-        );
-        let label = self.agent_preset_label(&snapshot);
-        let lock = if snapshot.session_blank {
-            "blank, switchable"
-        } else {
-            "locked after first turn"
-        };
-        self.prompt.reset();
-        self.slash.reset();
-        self.prompt_history_index = None;
-        self.status = Some(format!("Preset: {label} ({lock})"));
-    }
-
     fn select_agent_preset(
         &mut self,
         transport: &mut RpcTransport,
@@ -3643,13 +3746,22 @@ impl UiState {
             session,
             Some(transport.control_plane()),
         );
-        self.prompt.reset();
-        self.slash.reset();
-        self.prompt_history_index = None;
-        if !snapshot.session_blank {
-            self.status = Some(
-                "Agent preset is locked after the first turn; /new starts a blank session".into(),
-            );
+        self.reconcile_preset_session(&snapshot);
+        if !self.preset_editable(&snapshot) {
+            self.status = Some(self.preset_fixed_message());
+            return;
+        }
+        let previous = self
+            .pending_agent_preset
+            .clone()
+            .or_else(|| snapshot.agent_preset.clone());
+        if previous.as_deref() == Some(agent_preset) {
+            self.preset_picker.close();
+            self.shell.close_overlay();
+            self.status = Some(format!(
+                "Preset already {}",
+                current_agent_preset_label(Some(agent_preset), &self.agent_preset_roster)
+            ));
             return;
         }
         self.pending_agent_preset = Some(agent_preset.to_string());
@@ -3666,16 +3778,22 @@ impl UiState {
                     UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
                 ) =>
             {
+                self.pending_agent_preset_switch = Some(PendingAgentPresetSwitch {
+                    operation: receipt.operation,
+                    previous,
+                });
                 let label =
                     current_agent_preset_label(Some(agent_preset), &self.agent_preset_roster);
-                self.status = Some(format!("Preset → {label}"));
+                self.preset_picker.close();
+                self.shell.close_overlay();
+                self.status = Some(format!("Switching preset → {label}…"));
             }
             Ok(receipt) => {
-                self.pending_agent_preset = None;
+                self.pending_agent_preset = previous;
                 self.status = Some(receipt_status_message(&receipt, "Agent preset"));
             }
             Err(error) => {
-                self.pending_agent_preset = None;
+                self.pending_agent_preset = previous;
                 self.status = Some(format!("Agent preset failed: {error}"));
             }
         }
@@ -3706,7 +3824,7 @@ impl UiState {
             Ok(next) => {
                 *session = next;
                 self.reset_transcript_view();
-                self.pending_agent_preset = created.agent_preset.or(requested);
+                self.bind_preset_session(session, created.agent_preset.or(requested));
                 self.models = ModelState::default();
                 self.models_for_session = None;
                 self.pending_model = None;
@@ -3777,11 +3895,25 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<()> {
+        if self.pending_agent_preset_switch.is_some() {
+            self.status =
+                Some("Agent preset is switching; wait for the Host before sending".into());
+            return Ok(());
+        }
+        if self.pending_first_prompt.is_some() {
+            self.status = Some("First prompt is still waiting for Host admission".into());
+            return Ok(());
+        }
         let text = self.prompt.text().to_string();
         if text.trim().is_empty() {
             self.status = Some("Prompt is empty".into());
             return Ok(());
         }
+        let snapshot = GrokHostSnapshot::from_session_with_control_plane(
+            session,
+            Some(transport.control_plane()),
+        );
+        self.reconcile_preset_session(&snapshot);
         let context = UiContext::from_session(session);
         let receipt = self.submit_effect(
             transport,
@@ -3791,6 +3923,14 @@ impl UiState {
             },
             &context,
         )?;
+        if snapshot.session_blank
+            && matches!(
+                receipt.status,
+                UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+            )
+        {
+            self.pending_first_prompt = Some(receipt.operation.clone());
+        }
         if prompt_receipt_admitted(&receipt.status) {
             self.record_prompt_history(&text);
             self.prompt.reset();
@@ -4219,6 +4359,7 @@ impl UiState {
             Ok(next) => {
                 *session = next;
                 self.reset_transcript_view();
+                self.bind_preset_session(session, None);
                 self.command_catalog.clear();
                 self.commands_for_session = None;
                 self.command_catalog_revision = self.command_catalog_revision.saturating_add(1);
@@ -4989,6 +5130,7 @@ impl UiState {
                     Ok(next) => {
                         *session = next;
                         self.reset_transcript_view();
+                        self.bind_preset_session(session, None);
                         self.command_catalog.clear();
                         self.commands_for_session = None;
                         self.command_catalog_revision =
@@ -5452,6 +5594,89 @@ mod tests {
     }
 
     #[test]
+    fn blank_session_exposes_preset_and_yolo_as_separate_shortcuts() {
+        let mut snapshot = GrokHostSnapshot::demo();
+        snapshot.session_blank = true;
+        let mut ui = UiState::default();
+        ui.shell.focus_prompt();
+
+        let (hints, _) = ui.pane_shortcut_hints(&snapshot, false);
+
+        assert!(hints.iter().any(|hint| hint.label == "preset"));
+        assert!(hints.iter().any(|hint| hint.label == "yolo"));
+        assert!(!hints.iter().any(|hint| hint.label == "mode"));
+        assert!(
+            ui.prompt_flags(&snapshot, &Theme::current())[0]
+                .text
+                .ends_with(" ▾")
+        );
+
+        ui.preset_locked_locally = true;
+        assert!(
+            !ui.prompt_flags(&snapshot, &Theme::current())[0]
+                .text
+                .ends_with(" ▾")
+        );
+    }
+
+    #[test]
+    fn accepted_real_prompt_locks_preset_but_official_command_does_not() {
+        let session = SessionState::new("blank-session".into(), 7);
+        let completion = |request_id: &str, command_handled: bool| {
+            let operation = crate::effects::OperationKey {
+                session_id: dsh_pager::DshSessionId::new("blank-session"),
+                generation: dsh_pager::DshGeneration::new(7),
+                request_id: dsh_pager::DshRequestId::new(request_id),
+                action: "submit".into(),
+                dedupe_key: format!("submit:{request_id}"),
+            };
+            let value = crate::effects::UiEffectCompletion {
+                effect: crate::effects::UiEffect::SubmitPrompt {
+                    operation: operation.clone(),
+                    text: "hello".into(),
+                    mode: dsh_pager_protocol::PromptMode::Steer,
+                },
+                receipt: crate::effects::UiEffectReceipt {
+                    status: UiEffectStatus::Accepted,
+                    operation: operation.clone(),
+                    diagnostic: None,
+                    retryable: Some(false),
+                },
+                session_list: None,
+                session_search: None,
+                file_references: None,
+                attachment_preview: None,
+                commands: None,
+                command_handled,
+                command_result_text: None,
+                agent_preset_list: None,
+                selected_agent_preset: None,
+                session_models: None,
+                selected_model: None,
+            };
+            (operation, value)
+        };
+
+        let (operation, value) = completion("turn", false);
+        let mut turn_ui = UiState {
+            pending_first_prompt: Some(operation),
+            ..UiState::default()
+        };
+        turn_ui.apply_effect_completion(value, &session);
+        assert!(turn_ui.preset_locked_locally);
+        assert!(turn_ui.pending_first_prompt.is_none());
+
+        let (operation, value) = completion("command", true);
+        let mut command_ui = UiState {
+            pending_first_prompt: Some(operation),
+            ..UiState::default()
+        };
+        command_ui.apply_effect_completion(value, &session);
+        assert!(!command_ui.preset_locked_locally);
+        assert!(command_ui.pending_first_prompt.is_none());
+    }
+
+    #[test]
     fn yolo_toggle_restores_the_off_preset_without_touching_plan() {
         assert_eq!(next_permission_preset(None), "danger-full-access");
         assert_eq!(
@@ -5507,6 +5732,7 @@ mod tests {
                 file_references: None,
                 attachment_preview: None,
                 commands: None,
+                command_handled: false,
                 command_result_text: None,
                 agent_preset_list: None,
                 selected_agent_preset: None,
@@ -5669,8 +5895,12 @@ mod tests {
         assert!(wide.contains("/work/project"));
         assert!(wide.contains("DeepSeek Harness"));
         assert!(wide.contains("Explore the uncharted!"));
-        assert!(wide.contains("/preset changes agent"));
+        assert!(wide.contains("Shift+Tab preset"));
         assert!(wide.contains("preset"));
+        assert!(ui.hit_map.regions().iter().any(|region| {
+            matches!(&region.target, HitTarget::Overlay(name) if name == "agent-preset")
+                && region.rect.width > 0
+        }));
         assert!(!wide.contains("private-session-id"));
         assert!(!wide.contains("No transcript events yet"));
         assert!(wide_buffer.content.iter().any(|cell| {
@@ -5689,7 +5919,7 @@ mod tests {
             .expect("render compact welcome");
         let compact = buffer_text(compact_terminal.backend().buffer(), 40, 12);
         assert!(compact.contains("DeepSeek Harness"));
-        assert!(compact.contains("/preset changes agent"));
+        assert!(compact.contains("Shift+Tab preset"));
         assert!(!compact.contains("Explore the uncharted!"));
         assert!(!compact.contains("private-session-id"));
     }
@@ -6294,7 +6524,7 @@ mod tests {
                 .iter()
                 .map(|row| row.display.as_str())
                 .collect::<Vec<_>>(),
-            vec!["/resume", "/preset"]
+            vec!["/resume"]
         );
     }
 

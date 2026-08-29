@@ -30,7 +30,6 @@ pub fn current_agent_preset_label(
 ) -> String {
     match agent_preset.map(str::trim).filter(|id| !id.is_empty()) {
         Some(id) => agent_preset_label(id, roster),
-        None if roster.is_empty() => "host".to_string(),
         None => roster
             .iter()
             .find(|entry| entry.is_default)
@@ -68,5 +67,10 @@ mod tests {
         let roster = vec![entry("standard", "My Standard", true)];
         assert_eq!(agent_preset_label("standard", &roster), "My Standard");
         assert_eq!(current_agent_preset_label(None, &roster), "My Standard");
+    }
+
+    #[test]
+    fn roster_loading_still_shows_the_standard_default() {
+        assert_eq!(current_agent_preset_label(None, &[]), "标准模式");
     }
 }

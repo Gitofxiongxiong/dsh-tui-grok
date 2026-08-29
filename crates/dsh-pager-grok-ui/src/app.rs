@@ -133,6 +133,7 @@ pub enum ShellAction {
     SubmitPrompt,
     PromptNewline,
     ToggleYolo,
+    OpenPresetPicker,
     OpenQueue,
     OpenInteraction,
     OpenFileSearch,
@@ -530,6 +531,13 @@ impl AppShell {
             self.owner = KeyOwner::Prompt;
             return ShellAction::ToggleYolo;
         }
+        // DSH assigns Grok's canonical Shift+Tab chord to the blank-session
+        // Agent preset picker. Runtime authority decides whether the current
+        // session is still eligible; the shell only normalizes the key.
+        if crate::input::key::is_shift_tab(&key) {
+            self.owner = KeyOwner::Prompt;
+            return ShellAction::OpenPresetPicker;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
@@ -827,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_yolo_and_newline_chords_reach_the_same_actions() {
+    fn grok_yolo_preset_and_newline_chords_reach_the_same_actions() {
         let mut shell = AppShell::default();
         let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
         assert_eq!(
@@ -837,7 +845,12 @@ mod tests {
         let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
         assert_eq!(
             shell.dispatch(ShellEvent::Key(shift_tab), true),
-            ShellAction::PromptKey(shift_tab)
+            ShellAction::OpenPresetPicker
+        );
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(back_tab), true),
+            ShellAction::OpenPresetPicker
         );
         let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
         assert_eq!(

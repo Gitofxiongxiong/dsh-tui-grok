@@ -34,7 +34,6 @@ pub struct PresetPickerState {
     loading: bool,
     error: Option<String>,
     current: Option<String>,
-    locked: bool,
     list_revision: u64,
 }
 
@@ -47,21 +46,19 @@ impl Default for PresetPickerState {
             loading: false,
             error: None,
             current: None,
-            locked: false,
             list_revision: 0,
         }
     }
 }
 
 impl PresetPickerState {
-    pub fn open(&mut self, current: Option<&str>, locked: bool) -> u64 {
+    pub fn open(&mut self, current: Option<&str>) -> u64 {
         self.list_revision = self.list_revision.saturating_add(1);
         self.picker = PickerState::default();
         self.window = crate::modal_window_state::ModalWindowState::new();
         self.loading = true;
         self.error = None;
         self.current = current.map(str::to_string);
-        self.locked = locked;
         self.list_revision
     }
 
@@ -162,11 +159,7 @@ impl PresetPickerState {
         compact: bool,
         tick: u64,
     ) {
-        let title = if self.locked {
-            "Agent preset · locked"
-        } else {
-            "Agent preset"
-        };
+        let title = "Agent preset";
         let shortcuts = [
             Shortcut {
                 label: "Enter select",
@@ -307,7 +300,7 @@ mod tests {
     #[test]
     fn enter_selects_the_current_row_and_skips_broken() {
         let mut picker = PresetPickerState::default();
-        let revision = picker.open(Some("standard"), false);
+        let revision = picker.open(Some("standard"));
         assert!(picker.apply_entries(
             revision,
             vec![
