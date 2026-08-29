@@ -101,7 +101,11 @@ fi
 
 printf 'Starting a new conversation with profile %s. Press Ctrl+C to exit.\n' \
   "$tui_profile" >&2
+# This project-specific launcher promises the colored Grok TUI surface. Some
+# agent shells inject NO_COLOR for command output; do not let that unrelated
+# parent preference collapse the running rail gradient into a static line.
+# TERM and COLORTERM remain untouched so crossterm still sees the real terminal.
 if (( use_env_backend == 1 )); then
-  exec "$pager" --new
+  exec env -u NO_COLOR "$pager" --new
 fi
-exec "$pager" --new "${dsh_tui_pager_backend_argv[@]}"
+exec env -u NO_COLOR "$pager" --new "${dsh_tui_pager_backend_argv[@]}"
