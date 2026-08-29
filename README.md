@@ -1,99 +1,202 @@
+<div align="center">
+
 # dsh-tui-grok
 
-DeepSeek Harness 的原生终端 UI 实验项目。
+**DeepSeek Harness 的原生终端体验。**<br>Grok Build 风格交互 × Rust TUI × DSH 原生后端。
 
-这是一个独立仓库（`git@github.com:Gitofxiongxiong/dsh-tui-grok.git`），从 `dsh-pager`
-拆出并接入 Grok Build UI。DeepSeek Harness 原仓库只作为外部 backend/profile 宿主；
-本仓库包含自己的 Rust TUI、DSH-neutral adapter、协议/transport 和三个外置 TypeScript
-插件包，不需要把 Harness 整个仓库复制进来。
+[简体中文](README.md) · [English](README.en.md)
 
-## 当前边界
+[![CI](https://img.shields.io/github/actions/workflow/status/Gitofxiongxiong/dsh-tui-grok/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/Gitofxiongxiong/dsh-tui-grok/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40dsh-pager-grok%2Fcli?style=flat-square&logo=npm&label=npm)](https://www.npmjs.com/package/@dsh-pager-grok/cli) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-4f6ef7?style=flat-square) [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#许可证与来源)
 
-```text
-backend / RPC
-    -> dsh-pager (session、loader、control-plane、协议 DTO)
-    -> dsh-pager-grok-ui (Grok 视图、输入、布局和交互状态)
-    -> dsh-pager-bin (进程入口与命令行 smoke)
-```
+[快速开始](#快速开始) · [功能亮点](#功能亮点) · [常用操作](#常用操作) · [参与项目](#参与项目)
 
-复用优先级是：Grok 的视图和交互状态机 > Grok 的渲染辅助模块 > 本项目已有的 runtime/protocol；只有 host 数据模型、RPC effect 和无法直接匹配的终端生命周期才写适配代码。旧的 monolithic `app` 不再是新项目的 UI 入口。
+</div>
 
-## 构建与验证
+![dsh-tui-grok 欢迎页：DeepSeek Harness 原生终端 UI](docs/assets/readme/welcome.png)
 
-```bash
-cargo check --workspace
-cargo test --workspace
-cargo run -p dsh-pager-bin -- --help
+<p align="center"><sub>当前仓库源码的欢迎页；界面与命令可能领先于 npm 0.1.0。</sub></p>
 
-# TypeScript external DSH packages
-pnpm install
-pnpm run verify:ts
-```
+`dsh-tui-grok` 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+提供一个原生终端前端：DeepSeek Harness 继续负责会话、模型和工具执行，Rust
+pager 负责紧凑的终端呈现，并复用 Grok Build 的交互与视觉语言。
 
-## 产品安装（v2）
+> [!NOTE]
+> 这是非官方社区项目，与 DeepSeek 或 xAI 无隶属关系。项目不会把 Grok 的
+> agent runtime 带入 DSH；两者只在明确的 adapter 边界连接。
+
+## 为什么做这个项目
+
+很多终端 AI 工具只能在“简陋日志”和“全屏聊天应用”之间二选一。这个项目希望
+保留终端的速度、键盘操作和原生滚动，同时把思考过程、工具调用、后台任务、
+会话恢复和交互式确认放进一套一致的 TUI。
+
+| 能力 | 体验 |
+|---|---|
+| **原生终端界面** | Rust + ratatui 渲染，支持键盘、鼠标、选择、复制、滚动与窗口缩放。 |
+| **Agent 工作流可见** | 结构化展示思考、工具调用、队列、交互问题、后台任务和 subagent。 |
+| **Grok 风格交互** | 复用其 prompt、picker、modal、状态栏、滚动和快捷键设计。 |
+| **DSH 是唯一真源** | 会话、事件、权限和副作用都来自 DeepSeek Harness，不在 UI 中伪造状态。 |
+| **一条命令安装** | npm CLI 自带精确版本的 DSH、pnpm runtime 和当前平台预编译程序。 |
+| **会话管理** | 原生会话选择器、搜索与稳定会话身份；当前源码还提供显式 `--resume`。 |
+
+## 快速开始
+
+前置要求：Node.js `^22.19.0` 或 `>=24.0.0`，以及一个 DeepSeek API Key。
 
 ```bash
 npm install -g @dsh-pager-grok/cli
-dsh-pager
+dsh-pager --new
 ```
 
-CLI 自带钉死版本的 DeepSeek Harness 与 pnpm，首次运行会把 `@dsh-pager-grok/runtime`
-装进 profile `dsh-pager-grok`，并启动当前平台的预编译 pager。不要在 TTY 上直接
-`dsh --profile dsh-pager-grok`。
+首次启动会在独立的 `dsh-pager-grok` profile 中准备所需 runtime，不会要求你
+手工复制 Harness 仓库。公开版 `0.1.0` 启动前需要由 DeepSeek Harness 的凭据层
+提供 API Key，例如设置 `DEEPSEEK_API_KEY` 或使用已有的 `$DSH_HOME/.credentials.yaml`。
 
-## 启动新对话
+> [!IMPORTANT]
+> npm `0.1.0` 还没有当前源码中的 `/login`、`/model`、agent preset 和
+> `--resume` 命令。上面的 `--new` 是公开版与当前源码都支持的确定性启动方式。
 
-本机开发环境可直接运行。首次运行会自动检查并构建三个 TypeScript 包，然后把它们
-一次性 link 到项目专属的 `dsh-pager-grok-dev` profile；profile 位于 Harness 的
-`$DSH_HOME`，不会修改 `deepseek-harness` checkout：
+建议安装后先做一次不显示密钥值的环境检查：
 
 ```bash
-./scripts/start-new-chat.sh
+dsh-pager doctor
 ```
 
-脚本随后会构建最新 `dsh-pager`，连接该 profile，并使用 `--new` 创建新会话。只检查
-backend/profile 是否可用而不创建会话时运行：
+## 功能亮点
+
+- **结构化对话**：Markdown、思考过程、工具调用、结果、diff 与时间信息各自呈现。
+- **会话管理**：新建、搜索和恢复历史会话；支持 `/resume` 会话选择器。
+- **模型与模式（当前源码）**：在 TUI 内使用 `/model` 切换模型，使用 `Shift+Tab` 切换 preset。
+- **后台工作**：Tasks pane 汇总后台命令、monitor、subagent 与运行状态。
+- **安全交互**：approval/question 由带身份的 Host 请求驱动，避免 UI 假成功。
+- **终端体验**：流式滚动、快捷键、鼠标命中、选择复制、OSC52 fallback 和窗口缩放。
+- **产品化启动器**：提供 `doctor`、`update`、`repair`、`uninstall`，卸载不会删除会话。
+
+## 常用操作
+
+### npm 0.1.0
+
+| 命令 | 作用 |
+|---|---|
+| `dsh-pager` | 打开最近的顶层会话；没有历史时创建会话 |
+| `dsh-pager --new` | 显式创建新会话 |
+| `dsh-pager --session <session-id>` | 打开指定会话 |
+| `dsh-pager --session-search <query>` | 搜索并打开历史会话 |
+| `dsh-pager doctor` | 检查 Node、平台包、DSH profile 与 runtime |
+| `dsh-pager update` | 将 profile runtime 重新对齐到当前 CLI 版本 |
+| `dsh-pager repair` | 把损坏的 profile 改名备份后重建 |
+| `dsh-pager uninstall` | 移除产品 profile runtime，保留历史会话 |
+
+公开版 TUI 还提供 `/resume` 会话选择器、`/timestamps` 和 `Ctrl+G` Tasks pane。
+
+### 当前源码（下一次发布候选）
+
+| 操作 | 作用 |
+|---|---|
+| `/login` | 保存或替换 DeepSeek API Key |
+| `/new` | 开始空白会话并选择 agent preset |
+| `dsh-pager` | 默认开始新对话 |
+| `dsh-pager --resume [session-id]` | 恢复最近或指定会话 |
+| `/resume` | 打开历史会话选择器 |
+| `/model` | 选择当前模型与 effort |
+| `Shift+Tab` | 切换 agent preset |
+| `Ctrl+O` | 切换 YOLO 权限模式 |
+| `Ctrl+G` | 打开或关闭 Tasks pane |
+| `Ctrl+X` | 打开当前上下文的快捷键提示 |
+
+## 支持的平台
+
+| 系统 | 架构 | 状态 |
+|---|---|---|
+| Linux glibc | x64、arm64 | 支持 |
+| macOS | Intel x64、Apple Silicon | 支持 |
+| Windows | x64 | 支持 |
+| Alpine / Linux musl | — | 暂不支持 |
+| Windows on ARM | arm64 | 暂不支持 |
+
+原生程序通过 npm `optionalDependencies` 按平台安装，不在首次运行时临时下载
+GitHub Release。
+
+## 它是如何工作的
+
+```text
+DeepSeek Harness backend / profile
+              │
+              │ JSON-RPC + DSH authoritative state
+              ▼
+@dsh-pager-grok/runtime (TypeScript adapter)
+              │
+              │ DSH-neutral protocol
+              ▼
+dsh-pager (Rust host) ──► Grok-derived views ──► terminal
+```
+
+项目是独立、树外的适配器：不要求修改 DeepSeek Harness checkout，也不会复制
+Harness 整仓。详细边界见 [架构文档](docs/ARCHITECTURE.md) 和
+[外置插件说明](docs/EXTERNAL_DSH_PLUGIN.md)。
+
+## 当前状态
+
+当前公开版本是 `0.1.0`，属于早期版本，发布于 2026-08-26。npm 发布包精确钉住
+`@deepseek-ai/dsh@0.1.0-rc.8`。当前仓库源码已经继续加入 `/login`、模型/preset
+选择和显式恢复语义，但尚未发布为新的 npm 版本。
+
+对 Harness `0.1.2-alpha.1` 的适配仍在规划，请参阅
+[升级差异分析](dsh-tui-grok-升级到harness-0.1.2-alpha.1分析.md)。
+
+这意味着：现在可以按上面的 npm 路径使用已验证组合，但不要把“能启动”理解为
+已经兼容任意 DeepSeek Harness 新版本。
+
+## 本地开发
+
+<details>
+<summary>展开构建、测试与真实 Harness 接线说明</summary>
 
 ```bash
-./scripts/start-new-chat.sh --check
+corepack enable
+pnpm install --frozen-lockfile
+
+cargo check --workspace
+cargo test --workspace --locked
+pnpm run verify:ts
 ```
 
-需要显式准备 profile 时运行：
+连接本地 DeepSeek Harness：
 
 ```bash
-./scripts/setup-dev-profile.sh
+DSH_HARNESS_ROOT=/path/to/deepseek-harness \
+  ./scripts/start-new-chat.sh
 ```
 
-启动脚本默认会自举 profile；`--skip-setup` 只适合已经准备好 profile 的场景。默认
-backend 是 `--backend <node>`、`--backend-arg <absolute apps/cli/lib/bin.js>`、
-`--backend-arg --profile`、`--backend-arg <profile>`，不设置 `DSH_TUI_SERVER`。
-可用 `DSH_HARNESS_ROOT`、`DSH_HOME`、`DSH_TUI_PROFILE` 和 `DSH_TUI_CARGO`
-覆盖本机默认路径。`DSH_TUI_SERVER` 是完整 backend 命令的高级覆盖（空白拆分，
-路径不得含空格）；设置后不再注入默认 `--backend` 链。指定已有的非本项目
-profile 时，初始化脚本默认拒绝覆盖；确认后可设置 `DSH_TUI_PROFILE_ALLOW_UPDATE=1`。
-
-真实 E2E 使用同一套 profile 自举逻辑。下面的命令显式使用隔离 profile；脚本会一次性
-link 本仓库的三个 TypeScript 包：
+只检查 backend/profile 而不创建会话：
 
 ```bash
-DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-DSH_TUI_PROFILE=dsh-pager-grok-e2e \
-DSH_TUI_INSTALL_LOCAL=1 \
-bash scripts/real-e2e.sh
+DSH_HARNESS_ROOT=/path/to/deepseek-harness \
+  ./scripts/start-new-chat.sh --check
 ```
 
-正式安装时，也可以将构建后的 `@dsh-pager-grok/tui-embedded` 安装到 profile，
-再运行 `dsh --profile <profile>`；需要自定义 backend 时使用 `--backend` 和
-`--backend-arg` 覆盖。真实 prompt/多轮联调的安全边界见 [验证策略](docs/TESTING.md)。
+更多说明：
 
-## 文档
-
-- [架构边界](docs/ARCHITECTURE.md)
-- [迁移计划](docs/MIGRATION_PLAN.md)
-- [源码复用与许可证策略](docs/SOURCE_POLICY.md)
 - [验证策略](docs/TESTING.md)
-- [外置 DSH 插件安装与 profile](docs/EXTERNAL_DSH_PLUGIN.md)
+- [产品启动器设计](docs/PRODUCT_PLUGIN_LAUNCHER.md)
+- [源码复用与许可证策略](docs/SOURCE_POLICY.md)
+- [迁移计划](docs/MIGRATION_PLAN.md)
 
-## 许可证
+</details>
 
-项目自身沿用 Apache-2.0/MIT 兼容声明；复制进来的 Grok 源文件及其许可证见 `crates/dsh-pager-grok-ui/vendor/grok/LICENSE` 和 [源码策略](docs/SOURCE_POLICY.md)。
+## 参与项目
+
+欢迎提交 [Issue](https://github.com/Gitofxiongxiong/dsh-tui-grok/issues) 报告 bug、
+讨论体验或提出功能建议。问题中最好附上操作系统、终端、Node.js 版本、复现步骤，
+以及已经脱敏的 `dsh-pager doctor` 输出。
+
+如果这个项目让 DeepSeek Harness 在终端里更好用，请给它一个
+[⭐ Star](https://github.com/Gitofxiongxiong/dsh-tui-grok)。这会帮助更多终端和
+AI 工具爱好者发现它。
+
+## 许可证与来源
+
+本项目自身采用 [MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE) 双许可证。
+Grok-derived 文件保留各自来源、版权与许可证，详见
+[`SOURCE_MANIFEST.md`](crates/dsh-pager-grok-ui/SOURCE_MANIFEST.md) 和
+[`vendor/grok/LICENSE`](crates/dsh-pager-grok-ui/vendor/grok/LICENSE)。
