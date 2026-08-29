@@ -28,6 +28,7 @@ function composedRows(): Map<string, EntryOptions> {
   const patches = loadPatch(packageRoot)
   const baseRows: EntryOptions[] = [
     { id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr' },
+    { id: 'session-telemetry-otel', name: '@deepseek-ai/dsh-session-telemetry-otel' },
     { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
     { id: 'tool-str-replace-editor', name: '@deepseek-ai/dsh-tool-str-replace-editor' },
     { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
@@ -53,8 +54,11 @@ describe('dsh-tui-embedded bundle', () => {
     expect(Array.isArray(loadPatch(packageRoot))).toBe(true)
     expect('default' in TuiEmbedded).toBe(false)
     expect(manifest.dependencies).toHaveProperty('@dsh-pager-grok/tui-server')
-    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-host-apiproxy')
-    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-session-projection-cache')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-api-session-controller')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-api-settings-controller')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-api-workspace-controller')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-tool-subagent')
+    expect(manifest.dependencies).not.toHaveProperty('@deepseek-ai/dsh-host-apiproxy')
     expect(manifest.dependencies).not.toHaveProperty('@deepseek-ai/dsh-host-webserver')
   })
 
@@ -62,13 +66,16 @@ describe('dsh-tui-embedded bundle', () => {
     const rows = composedRows()
     expect(rows.get('hmr')?.disabled).toBe(true)
     expect(rows.get('code-runtime')?.name).toBe('@deepseek-ai/dsh-code-runtime-worker-thread')
-    expect(rows.get('storage')?.name).toBe('@deepseek-ai/dsh-storage')
-    expect(rows.get('session-projection-cache')?.name).toBe('@deepseek-ai/dsh-session-projection-cache')
+    expect(rows.get('session-telemetry-otel')?.disabled).toBe(true)
     expect(rows.get('workspace')?.name).toBe('@deepseek-ai/dsh-workspace')
     expect(rows.get('directory-picker')?.name).toBe('@deepseek-ai/dsh-host-directory-picker-browse')
-    expect(rows.get('api-gateway')?.name).toBe('@deepseek-ai/dsh-host-apiproxy')
-    expect(rows.get('session-list-projection-recovery')?.name)
-      .toBe('@dsh-pager-grok/tui-session-projection-recovery')
+    expect(rows.get('session-controller')?.name).toBe('@deepseek-ai/dsh-api-session-controller')
+    expect(rows.get('settings-controller')?.name).toBe('@deepseek-ai/dsh-api-settings-controller')
+    expect(rows.get('workspace-controller')?.name).toBe('@deepseek-ai/dsh-api-workspace-controller')
+    expect(rows.get('subagent-model-selection-settings')?.name)
+      .toBe('@deepseek-ai/dsh-tool-subagent/model-selection-settings')
+    expect(rows.has('api-gateway')).toBe(false)
+    expect(rows.has('session-list-projection-recovery')).toBe(false)
     expect(rows.get('tui-server')?.name).toBe('@dsh-pager-grok/tui-server')
     expect(rows.get('agent-presets')?.name).toBe('@deepseek-ai/dsh-agent-presets')
     expect(rows.get('cordis-host-runner')?.name).toBe('@deepseek-ai/dsh-cordis-host-runner')

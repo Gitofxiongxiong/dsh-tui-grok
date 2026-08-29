@@ -5,11 +5,15 @@ use dsh_pager::{RpcTransport, validate_backend_program};
 use dsh_pager_test_support::TestSandbox;
 
 const HELLO_SCRIPT: &str = r#"
-import { writeSync } from 'node:fs'
+import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 
-writeSync(2, 'Y'.repeat(128 * 1024))
-writeSync(2, '\nSTDERR_FLOOD_DONE\n')
+async function writeStderr(value) {
+  if (!process.stderr.write(value)) await once(process.stderr, 'drain')
+}
+
+await writeStderr('Y'.repeat(128 * 1024))
+await writeStderr('\nSTDERR_FLOOD_DONE\n')
 
 const rl = createInterface({ input: process.stdin })
 rl.on('line', (line) => {

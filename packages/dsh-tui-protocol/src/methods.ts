@@ -1,25 +1,15 @@
 /**
- * Runtime method tables. Control methods are TUI-owned; ApiProxy unary
- * methods are forwarded unchanged under their RpcMethodMap names.
+ * Runtime method tables. The native TUI owns this compatibility catalog;
+ * Harness controllers are an implementation detail of the server bridge.
  *
  * @module @dsh-pager-grok/tui-protocol/methods
  */
 
-import type { RpcMethodMap } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { TuiNotificationMethod, TuiRequestMethod } from './types.js'
 
-/** External TUI-only seam added without changing Harness' ApiProxy contract. */
-type TuiRpcMethodMap = RpcMethodMap & {
-  'fileReferences.list': unknown
-  /** DSH CommandRuntime Remote endpoint, adapted onto the native stdio carrier. */
-  'commands/list': unknown
-  /** DSH CommandRuntime execution endpoint; never falls through to session.prompt. */
-  'commands/execute': unknown
-}
-
 /**
- * Every ApiProxy unary method the TUI connection may forward. The `satisfies`
- * clause fails compilation when RpcMethodMap gains or loses a key.
+ * Every legacy unary method the TUI connection accepts. This list is frozen
+ * independently of Harness' generated Typert catalog.
  */
 export const API_PROXY_METHOD_SET = {
   'session.list': true,
@@ -77,7 +67,7 @@ export const API_PROXY_METHOD_SET = {
   'llm.providers': true,
   'llm.models': true,
   'llm.discoverModels': true,
-} as const satisfies Record<keyof TuiRpcMethodMap, true>
+} as const
 
 export type ApiProxyMethod = keyof typeof API_PROXY_METHOD_SET
 

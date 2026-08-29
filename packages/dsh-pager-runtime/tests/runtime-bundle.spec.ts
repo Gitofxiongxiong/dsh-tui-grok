@@ -34,6 +34,7 @@ describe('@dsh-pager-grok/runtime bundle', () => {
     for (const row of applyEntryPatches(
       [
         { id: 'hmr', name: '@deepseek-ai/cordis-plugin-hmr' },
+        { id: 'session-telemetry-otel', name: '@deepseek-ai/dsh-session-telemetry-otel' },
         { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
       ],
       loadPatch(),
@@ -42,9 +43,11 @@ describe('@dsh-pager-grok/runtime bundle', () => {
       if (typeof row.id === 'string') rows.set(row.id, row)
     }
     expect(rows.get('hmr')?.disabled).toBe(true)
-    expect(rows.get('session-list-projection-recovery')?.name).toBe(
-      '@dsh-pager-grok/runtime/recovery',
-    )
+    expect(rows.get('session-telemetry-otel')?.disabled).toBe(true)
+    expect(rows.get('session-controller')?.name).toBe('@deepseek-ai/dsh-api-session-controller')
+    expect(rows.get('settings-controller')?.name).toBe('@deepseek-ai/dsh-api-settings-controller')
+    expect(rows.get('workspace-controller')?.name).toBe('@deepseek-ai/dsh-api-workspace-controller')
+    expect(rows.has('session-list-projection-recovery')).toBe(false)
     expect(rows.get('tui-server')?.name).toBe('@dsh-pager-grok/runtime/server')
     expect(rows.get('agent-presets')?.name).toBe('@deepseek-ai/dsh-agent-presets')
     expect(rows.get('cordis-host-runner')?.name).toBe('@deepseek-ai/dsh-cordis-host-runner')

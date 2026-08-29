@@ -618,6 +618,10 @@ rl.on('line', (line) => {
     return
   }
   if (message?.method === 'subagent.prompt') {
+    if (typeof message.params?.requestId !== 'string' || message.params.requestId.length === 0) {
+      failure(message.id, -32602, 'subagent.prompt requires requestId')
+      return
+    }
     success(message.id, { messageId: 'child-message-mock' })
     return
   }
@@ -682,6 +686,10 @@ rl.on('line', (line) => {
     return
   }
   if (message?.method === 'session.prompt') {
+    if (typeof message.params?.requestId !== 'string' || message.params.requestId.length === 0) {
+      failure(message.id, -32602, 'session.prompt requires requestId')
+      return
+    }
     const promptText = message.params?.content?.[0]?.text ?? ''
     if (promptText === '/permission') {
       success(message.id, {

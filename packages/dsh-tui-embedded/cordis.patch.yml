@@ -17,36 +17,27 @@
 
 - id: tools
   config:
-    # TEMPORARY process-wide Code Mode opt-in. Unset keeps the schema default
-    # (native). Per-session Code Mode is the `code` agent preset; do not set
+    # TEMPORARY process-wide PTC opt-in. Unset keeps the schema default
+    # (native). Per-session PTC is the `ptc` agent preset; do not set
     # this when sessions should choose a preset independently.
     mode: !!js process.env.DSH_TOOLS_MODE
 
+# The base defaults to feedback-gated raw session export. The native TUI
+# profile is explicitly local-only unless an operator chooses another profile.
+- id: session-telemetry-otel
+  disabled: true
+
 - insert:
+    # Agent presets enable model-selectable subagent delegation. The setting
+    # owner is Host-scoped (the same contract used by the Web surface) so a
+    # standing preset can sample it without publishing a process-global
+    # service from inside its isolated agent realm.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
     # Code Mode is a core execution capability, not a Web component.
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-
-    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-
-    - id: storage-json
-      name: '@deepseek-ai/dsh-storage-json'
-      config:
-        root: !!js dshHomePath('storages')
-
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: json
-
-    # Persist projection checkpoints so session.list can seed cold rows with
-    # titles. The host recovers rows created before this cache was mounted.
-    - id: session-projection-cache
-      name: '@deepseek-ai/dsh-session-projection-cache'
-      config:
-        writeEveryEvents: 200
-        writeIntervalMs: 5000
 
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
@@ -56,16 +47,15 @@
     - id: directory-picker
       name: '@deepseek-ai/dsh-host-directory-picker-browse'
 
-    # The API gateway: the transport-agnostic dispatch face every client
-    # shape shares. tui-server injects ctx.apiProxy from this row.
-    - id: api-gateway
-      name: '@deepseek-ai/dsh-host-apiproxy'
+    # Direct in-process Typert business owners used by the stdio bridge.
+    - id: session-controller
+      name: '@deepseek-ai/dsh-api-session-controller'
 
-    # Recover projection values for cold rows that predate their first cache
-    # checkpoint. This stays outside Harness' host package and decorates the
-    # public ApiProxy seam after both host services are mounted.
-    - id: session-list-projection-recovery
-      name: '@dsh-pager-grok/tui-session-projection-recovery'
+    - id: settings-controller
+      name: '@deepseek-ai/dsh-api-settings-controller'
+
+    - id: workspace-controller
+      name: '@deepseek-ai/dsh-api-workspace-controller'
 
     # The external server adapts this public provider into its optional
     # fileReferences.list TUI method; the Harness host API itself is untouched.
@@ -152,9 +142,8 @@
 - id: tool-web
   disabled: true
 
-# The preset roster. `id` MUST stay `agent-presets` so CLI profile-boot can
-# inject the shipped `config/agent-presets/` system root. The writable user
-# root is `dsh-agent-presets`' own `includeUserRoot` default.
+# The preset roster. Harness 0.1.2 supplies its trusted shipped root from the
+# package and keeps the writable `$DSH_HOME/.agent-presets` user root.
 - insert:
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'

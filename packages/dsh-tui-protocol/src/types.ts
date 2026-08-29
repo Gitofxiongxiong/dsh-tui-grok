@@ -5,11 +5,109 @@
  */
 
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { HostFrame, MuxFrame, RpcMethodMap } from '@deepseek-ai/dsh-host-apiproxy/api'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
 
-export type { HostFrame, MuxFrame, RpcMethodMap }
 export type { SessionId }
+
+/** Stable business error carried inside a successful JSON-RPC response. */
+export interface ApiError {
+  code: string
+  message: string
+  details: unknown
+}
+
+/** Harness-independent business result frozen by the native TUI v1 wire. */
+export type ApiResult<Value = unknown> =
+  | { ok: true; value: Value }
+  | { ok: false; error: ApiError }
+
+/** Host-computed render intent for one tool event. */
+export type ToolEventView =
+  | { for: 'call'; view: unknown }
+  | { for: 'result'; view: unknown }
+
+/** One pending inbox occurrence in a complete queue snapshot. */
+export interface QueuedInboxItem {
+  id: string
+  placement: 'queued' | 'steering' | 'context'
+  message: unknown
+  /** New Harness prompt correlation; old clients safely ignore it. */
+  rpcId?: string
+}
+
+/** Browser-safe background job projection. */
+export interface JobView {
+  id: string
+  kind: string
+  label: string
+  status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+  detail?: string
+  startedAt: number
+  finishedAt?: number
+}
+
+/** Workspace row frozen at the former ApiProxy wire shape. */
+export interface WorkspaceView {
+  workspaceId: string
+  path: string
+  title: string
+  sessionIds: SessionId[]
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * Stable mux vocabulary consumed by the Rust pager. Harness 0.1.2 emits
+ * follow/control/waterfall surfaces; the server bridge translates those
+ * surfaces back to this union.
+ */
+export type MuxFrame =
+  | { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView }
+  | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
+  | {
+    type: 'approval/requested'
+    sessionId: SessionId
+    approvalId: string
+    toolName: string
+    callId?: string
+    reason?: string
+  }
+  | { type: 'approval/resolved'; sessionId: SessionId; approvalId: string; outcome: unknown }
+  | { type: 'question/requested'; sessionId: SessionId; questions: unknown[] }
+  | {
+    type: 'question/resolved'
+    sessionId: SessionId
+    questionRpcId: string
+    outcome: 'answered' | 'cancelled'
+  }
+  | { type: 'session/queue'; sessionId: SessionId; items: QueuedInboxItem[] }
+  | { type: 'session/jobs'; sessionId: SessionId; jobs: JobView[] }
+  | { type: 'session/projection'; sessionId: SessionId; key: string; value: unknown; seq: number }
+  | { type: 'stream/error'; error: ApiError }
+
+/** Stable Host-control vocabulary consumed by the Rust pager. */
+export type HostFrame =
+  | {
+    type: 'host/session-added'
+    sessionId: SessionId
+    blank: boolean
+    parentSessionId?: SessionId
+    origin?: 'subagent'
+    cwd?: string
+    agentPreset?: string
+  }
+  | { type: 'host/session-removed'; sessionId: SessionId }
+  | { type: 'host/session-status'; sessionId: SessionId; running: boolean }
+  | { type: 'host/agent-error'; sessionId: SessionId; message: string }
+  | { type: 'host/workspace-changed'; workspace: WorkspaceView }
+  | { type: 'host/workspace-removed'; workspaceId: string }
+  | { type: 'host/workspace-order-changed'; workspaceIds: string[] }
+  | { type: 'host/archived-sessions-changed'; archivedSessionIds: SessionId[] }
+  | { type: 'host/remote-event'; event: string; args: unknown[] }
+  | { type: 'stream/error'; error: ApiError }
+
+/** Compatibility name retained for downstream type imports. */
+export type RpcMethodMap = Record<string, unknown>
 
 /** JSON-RPC 2.0 correlation id. */
 export type JsonRpcId = string | number

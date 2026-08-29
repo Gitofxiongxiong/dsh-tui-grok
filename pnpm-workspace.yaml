@@ -2,10 +2,31 @@ packages:
   - packages/dsh-tui-protocol
   - packages/dsh-tui-server
   - packages/dsh-tui-embedded
-  - packages/dsh-tui-session-projection-recovery
   - packages/dsh-pager-runtime
   - packages/dsh-pager-cli
   - packages/native/*
+overrides:
+  '@deepseek-ai/cordis': link:../deepseek-harness-latest/vendor/cordis
+  '@deepseek-ai/dsh': link:../deepseek-harness-latest/apps/cli
+  '@deepseek-ai/dsh-agent': link:../deepseek-harness-latest/packages/core/agent
+  '@deepseek-ai/dsh-agent-presets': link:../deepseek-harness-latest/packages/preset/agent-presets
+  '@deepseek-ai/dsh-api-session-controller': link:../deepseek-harness-latest/packages/api/session-controller
+  '@deepseek-ai/dsh-api-settings-controller': link:../deepseek-harness-latest/packages/api/settings-controller
+  '@deepseek-ai/dsh-api-workspace-controller': link:../deepseek-harness-latest/packages/api/workspace-controller
+  '@deepseek-ai/dsh-brand': link:../deepseek-harness-latest/packages/util/brand
+  '@deepseek-ai/dsh-code-runtime-worker-thread': link:../deepseek-harness-latest/packages/code-runtime/code-runtime-worker-thread
+  '@deepseek-ai/dsh-commands': link:../deepseek-harness-latest/packages/interaction/commands
+  '@deepseek-ai/dsh-cordis-host-runner': link:../deepseek-harness-latest/packages/extensions/cordis-host-runner
+  '@deepseek-ai/dsh-file-reference': link:../deepseek-harness-latest/packages/context/file-reference
+  '@deepseek-ai/dsh-file-reference-local': link:../deepseek-harness-latest/packages/context/file-reference-local
+  '@deepseek-ai/dsh-goal': link:../deepseek-harness-latest/packages/goal/goal
+  '@deepseek-ai/dsh-host-directory-picker-browse': link:../deepseek-harness-latest/packages/host/directory-picker-browse
+  '@deepseek-ai/dsh-invariants': link:../deepseek-harness-latest/packages/runtime-diagnostics/invariants
+  '@deepseek-ai/dsh-llm': link:../deepseek-harness-latest/packages/llm/llm
+  '@deepseek-ai/dsh-session': link:../deepseek-harness-latest/packages/core/session
+  '@deepseek-ai/dsh-subagent': link:../deepseek-harness-latest/packages/subagent/subagent
+  '@deepseek-ai/dsh-tool-subagent': link:../deepseek-harness-latest/packages/subagent/tool-subagent
+  '@deepseek-ai/dsh-workspace': link:../deepseek-harness-latest/packages/workspace/workspace
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': false

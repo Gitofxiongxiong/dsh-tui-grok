@@ -48,6 +48,7 @@ class AnsiScreen:
         self.row = 0
         self.col = 0
         self.saved = (0, 0)
+        self._pending = b""
 
     def resize(self, rows: int, cols: int) -> None:
         old = self.grid
@@ -90,22 +91,43 @@ class AnsiScreen:
             self.col = self.cols - 1
 
     def feed(self, data: bytes) -> None:
+        data = self._pending + data
+        self._pending = b""
         index = 0
         while index < len(data):
             if data[index] != 0x1B:
+                first = data[index]
+                if first < 0x80:
+                    size = 1
+                elif 0xC2 <= first <= 0xDF:
+                    size = 2
+                elif 0xE0 <= first <= 0xEF:
+                    size = 3
+                elif 0xF0 <= first <= 0xF4:
+                    size = 4
+                else:
+                    index += 1
+                    continue
+                if index + size > len(data):
+                    self._pending = data[index:]
+                    return
                 try:
-                    char = data[index:].decode("utf-8")[0]
+                    char = data[index : index + size].decode("utf-8")
                 except UnicodeDecodeError:
                     index += 1
                     continue
                 self._put(char)
-                index += len(char.encode("utf-8"))
+                index += size
                 continue
+            if index + 1 == len(data):
+                self._pending = data[index:]
+                return
             if data.startswith(b"\x1b]", index):
                 bell = data.find(b"\x07", index + 2)
                 st = data.find(b"\x1b\\", index + 2)
                 ends = [end for end in (bell, st) if end >= 0]
                 if not ends:
+                    self._pending = data[index:]
                     return
                 end = min(ends)
                 index = end + (1 if end == bell else 2)
@@ -113,8 +135,8 @@ class AnsiScreen:
             if data.startswith(b"\x1b[", index):
                 match = CSI_RE.match(data, index)
                 if match is None:
-                    index += 1
-                    continue
+                    self._pending = data[index:]
+                    return
                 raw_params = match.group(1).decode()
                 final = match.group(2).decode()
                 private = raw_params.startswith("?")
@@ -225,6 +247,20 @@ def main() -> int:
         if CURSOR_QUERY in chunk:
             os.write(fd, CURSOR_REPLY)
 
+    def drain_ready() -> None:
+        """Consume output already buffered after the child has exited."""
+        while select.select([fd], [], [], 0)[0]:
+            try:
+                chunk = os.read(fd, 16384)
+            except OSError as error:
+                if error.errno in (errno.EIO, errno.EBADF):
+                    return
+                raise
+            if not chunk:
+                return
+            output.extend(chunk)
+            screen.feed(chunk)
+
     def visible() -> bytes:
         return ANSI_RE.sub(b"", bytes(output))
 
@@ -241,7 +277,18 @@ def main() -> int:
         # must render only as bullets and must never be echoed into the PTY
         # output, status line, or transcript.
         fake_key = b"sk-pty-placeholder"
-        os.write(fd, b"/login\r")
+        os.write(fd, b"/login")
+        while time.monotonic() < deadline:
+            pump()
+            login_suggestion_screen = screen.text()
+            if (
+                "/login" in login_suggestion_screen
+                and "Log in or replace the DeepSeek API key" in login_suggestion_screen
+            ):
+                break
+        if "Log in or replace the DeepSeek API key" not in screen.text():
+            raise RuntimeError("/login exact suggestion did not reach a stable frame")
+        os.write(fd, b"\r")
         while time.monotonic() < deadline:
             pump()
             login_screen = screen.text()
@@ -350,6 +397,7 @@ def main() -> int:
                 code = os.waitstatus_to_exitcode(status)
                 if code != 0:
                     raise RuntimeError(f"dsh-pager exited with {code}")
+                drain_ready()
                 if b"\x1b[?1049l" not in output or b"\x1b[?25h" not in output:
                     raise RuntimeError("terminal surface was not restored")
                 return 0

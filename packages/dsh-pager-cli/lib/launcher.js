@@ -253,8 +253,12 @@ export function printDoctor(ownVersion, env = process.env) {
     } else {
       const text = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
       const hasServer = text.includes('@dsh-pager-grok/runtime/server')
-      const hasRecovery = text.includes('@dsh-pager-grok/runtime/recovery')
-      mark(dump.status === 0 && hasServer && hasRecovery, 'dump-config', dump.status === 0 ? 'runtime rows present' : 'failed')
+      const hasRetiredRecovery = text.includes('@dsh-pager-grok/runtime/recovery')
+      mark(
+        dump.status === 0 && hasServer && !hasRetiredRecovery,
+        'dump-config',
+        dump.status === 0 ? 'runtime bridge present; retired recovery absent' : 'failed',
+      )
     }
   } catch (error) {
     mark(false, 'dump-config', error.message)

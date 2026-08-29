@@ -8,4 +8,3 @@ dsh-pager-grok` on a TTY — stdout is the JSON-RPC pipe.
 Subpath exports:
 
 - `@dsh-pager-grok/runtime/server` — Cordis TUI gateway plugin
-- `@dsh-pager-grok/runtime/recovery` — session.list projection recovery plugin

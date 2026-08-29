@@ -54,6 +54,20 @@ def visible_tail_indices(screen: AnsiScreen) -> list[int]:
     return [int(value) for value in TAIL_RE.findall(screen.text())]
 
 
+def common_marker_row_delta(
+    before: list[tuple[int, int]],
+    after: list[tuple[int, int]],
+) -> int | None:
+    before_rows = dict(before)
+    after_rows = dict(after)
+    deltas = {
+        after_rows[marker] - before_row
+        for marker, before_row in before_rows.items()
+        if marker in after_rows
+    }
+    return deltas.pop() if len(deltas) == 1 else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -125,7 +139,28 @@ def main() -> int:
 
     try:
         wait_until(lambda: "SessionLoaded" in screen.text(), "loaded session")
-        os.write(fd, b"stream scroll smoke\r")
+        wait_until(
+            lambda: "Space:prompt" in screen.text() or "Enter:send" in screen.text(),
+            "interactive surface readiness",
+        )
+        if "Space:prompt" in screen.text():
+            os.write(fd, b" ")
+            wait_until(
+                lambda: "Space:prompt" not in screen.text()
+                and "Ctrl+o:yolo" in screen.text(),
+                "interactive prompt focus",
+            )
+        # The focus helper is a real Space key. Clear any character admitted
+        # at the owner transition before entering the exact mock fixture.
+        os.write(fd, b"\x15")
+        pump(0.05)
+        os.write(fd, b"stream scroll smoke")
+        wait_until(
+            lambda: "stream scroll smoke" in screen.text()
+            and "Enter:send" in screen.text(),
+            "stable prompt draft",
+        )
+        os.write(fd, b"\r")
         wait_until(
             lambda: bool(visible_marker_rows(screen)) and bool(visible_tail_indices(screen)),
             "streaming marker fixture",
@@ -136,33 +171,35 @@ def main() -> int:
         before_rows = visible_marker_rows(screen)
         if not before_rows:
             raise RuntimeError(f"no baseline marker\nscreen:\n{screen.text()}")
-        top_before, _ = before_rows[0]
+        top_before, top_before_row = before_rows[0]
 
         # Grok forced-wheel pricing on a Zed ept=1 profile: one report is one row.
         os.write(fd, wheel(64))
         wait_until(
-            lambda: bool(visible_marker_rows(screen))
-            and visible_marker_rows(screen)[0][0] < top_before,
+            lambda: common_marker_row_delta(before_rows, visible_marker_rows(screen)) == 1,
             "one-row wheel-up movement",
         )
         parked_rows = visible_marker_rows(screen)
-        parked_marker, parked_screen_row = parked_rows[0]
-        if top_before - parked_marker != 1:
+        row_delta = common_marker_row_delta(before_rows, parked_rows)
+        if row_delta != 1:
             raise AssertionError(
                 "forced wheel report must move exactly one row: "
-                f"{top_before} -> {parked_marker}\nscreen:\n{screen.text()}"
+                f"delta={row_delta}\nscreen:\n{screen.text()}"
             )
+        parked_marker = top_before
+        parked_screen_row = dict(parked_rows)[parked_marker]
 
         # No more input: live deltas continue, but the parked marker must not drift.
         observe_until = time.monotonic() + 0.7
         while time.monotonic() < observe_until:
             pump()
         later_rows = visible_marker_rows(screen)
-        if not later_rows or later_rows[0] != (parked_marker, parked_screen_row):
+        later_parked_row = dict(later_rows).get(parked_marker)
+        if later_parked_row != parked_screen_row:
             raise AssertionError(
                 "parked marker moved while live deltas arrived: "
                 f"{(parked_marker, parked_screen_row)} -> "
-                f"{later_rows[0] if later_rows else None}\nscreen:\n{screen.text()}"
+                f"{(parked_marker, later_parked_row)}\nscreen:\n{screen.text()}"
             )
 
         # Travel to the tail with a bounded, human-sized gesture.  The previous
@@ -206,7 +243,8 @@ def main() -> int:
         wait_for_exit()
         print(
             "stream scroll PTY ok: "
-            f"top={top_before}->{parked_marker}, down_reports={down_reports}, "
+            f"marker={top_before} row={top_before_row}->{parked_screen_row}, "
+            f"down_reports={down_reports}, "
             f"tail={tail_after_down}->"
             f"{max(tails_following)}"
         )

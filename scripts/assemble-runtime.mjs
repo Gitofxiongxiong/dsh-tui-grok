@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Copy built protocol/server/recovery libs into @dsh-pager-grok/runtime and
+ * Copy built protocol/server libs into @dsh-pager-grok/runtime and
  * rewrite in-workspace grok specifiers to relative paths so the published
- * tarball does not depend on workspace:* or the four public TS packages.
+ * tarball does not depend on workspace:* or the development TS packages.
  */
 import { spawnSync } from 'node:child_process'
 import {
@@ -26,11 +26,6 @@ const outLib = join(runtimeRoot, 'lib')
 const PACKAGES = [
   { name: '@dsh-pager-grok/tui-protocol', dir: 'dsh-tui-protocol', dest: 'protocol' },
   { name: '@dsh-pager-grok/tui-server', dir: 'dsh-tui-server', dest: 'server' },
-  {
-    name: '@dsh-pager-grok/tui-session-projection-recovery',
-    dir: 'dsh-tui-session-projection-recovery',
-    dest: 'recovery',
-  },
 ]
 
 const SKIP_NAMES = new Set(['tsconfig.tsbuildinfo'])
@@ -68,7 +63,7 @@ function walkFiles(root, suffix) {
 
 function rewriteSpecifiers(source, filePath) {
   return source.replaceAll(
-    /(['"])(@dsh-pager-grok\/tui-(?:protocol|server|session-projection-recovery))(\/[^'"]+)?\1/g,
+    /(['"])(@dsh-pager-grok\/tui-(?:protocol|server))(\/[^'"]+)?\1/g,
     (match, quote, pkg, subpath) => {
       const dest = PACKAGES.find((item) => item.name === pkg)?.dest
       if (!dest) return match
@@ -123,16 +118,8 @@ function main() {
     "export * from './server/index.js'\n",
   )
   writeFileSync(
-    join(outLib, 'recovery-entry.js'),
-    "export * from './recovery/index.js'\n",
-  )
-  writeFileSync(
     join(outLib, 'server-entry.d.ts'),
     "export * from './server/index.js'\n",
-  )
-  writeFileSync(
-    join(outLib, 'recovery-entry.d.ts'),
-    "export * from './recovery/index.js'\n",
   )
 
   const embeddedPatch = readFileSync(
@@ -140,10 +127,6 @@ function main() {
     'utf8',
   )
   const runtimePatch = embeddedPatch
-    .replaceAll(
-      "name: '@dsh-pager-grok/tui-session-projection-recovery'",
-      "name: '@dsh-pager-grok/runtime/recovery'",
-    )
     .replaceAll(
       "name: '@dsh-pager-grok/tui-server'",
       "name: '@dsh-pager-grok/runtime/server'",

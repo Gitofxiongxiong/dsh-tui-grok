@@ -30,10 +30,6 @@
       "types": "./lib/server-entry.d.ts",
       "default": "./lib/server-entry.js"
     },
-    "./recovery": {
-      "types": "./lib/recovery-entry.d.ts",
-      "default": "./lib/recovery-entry.js"
-    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -52,23 +48,24 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-agent-presets": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-api-remotes": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-cordis-host-runner": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-brand": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-file-reference": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-file-reference-local": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-host-apiproxy": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-invariants": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-session": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-session-projection-cache": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-storage": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-storage-json": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-workspace": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-agent": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-agent-presets": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-api-session-controller": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-api-settings-controller": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-brand": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-commands": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-cordis-host-runner": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-file-reference": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-file-reference-local": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-goal": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-invariants": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-llm": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-session": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-subagent": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-workspace": "0.1.2-alpha.1",
     "@deepseek-ai/schemastery": "3.18.1"
   }
 }

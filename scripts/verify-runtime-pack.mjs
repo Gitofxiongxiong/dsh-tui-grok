@@ -47,9 +47,7 @@ const names = extract.stdout.split('\n').filter(Boolean)
 if (!names.includes('package/lib/server/index.js')) {
   fail(`missing server entry: ${names.join(', ')}`)
 }
-if (!names.includes('package/lib/recovery/index.js')) {
-  fail('missing recovery entry')
-}
+if (names.some(name => name.includes('/recovery'))) fail('retired recovery files leaked into runtime pack')
 if (!names.includes('package/cordis.patch.yml')) {
   fail('missing cordis.patch.yml')
 }

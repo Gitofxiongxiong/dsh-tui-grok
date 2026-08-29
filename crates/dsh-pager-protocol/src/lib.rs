@@ -187,6 +187,7 @@ pub enum PromptContentPart {
 #[serde(rename_all = "camelCase")]
 pub struct SessionPromptParams {
     pub session_id: String,
+    pub request_id: String,
     pub mode: PromptMode,
     pub content: Vec<PromptContentPart>,
 }
@@ -790,6 +791,7 @@ pub type SubagentHistoryValue = SessionHistoryValue;
 pub struct SubagentPromptParams {
     pub parent_session_id: String,
     pub child_session_id: String,
+    pub request_id: String,
     pub mode: SubagentMode,
     pub content: Vec<PromptContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1166,6 +1168,7 @@ mod tests {
     fn prompt_and_response_payloads_use_host_wire_names() {
         let prompt = SessionPromptParams {
             session_id: "s-1".into(),
+            request_id: "operation-7".into(),
             mode: PromptMode::Steer,
             content: vec![PromptContentPart::Text {
                 text: "你好".into(),
@@ -1173,6 +1176,7 @@ mod tests {
         };
         let value = serde_json::to_value(&prompt).expect("prompt json");
         assert_eq!(value["sessionId"], "s-1");
+        assert_eq!(value["requestId"], "operation-7");
         assert_eq!(value["mode"], "steer");
         assert_eq!(value["content"][0]["type"], "text");
         let decoded: SessionPromptParams = serde_json::from_value(value).expect("prompt decode");

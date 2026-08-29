@@ -5,44 +5,35 @@
  */
 
 import type { Readable, Writable } from 'node:stream'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
-import type { FileReferenceService } from '@deepseek-ai/dsh-file-reference'
+import { TuiHarnessBridge } from './bridge.js'
 import { TuiGateway } from './gateway.js'
 import { TuiLineTransport, type TuiLineTransportOptions } from './transport.js'
-import type { TuiDispatchExtensions } from './dispatch.js'
-import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 
 export interface TuiServeOptions extends TuiLineTransportOptions {
-  /** Optional public Harness file-reference provider mounted by the profile. */
-  fileReferences?: FileReferenceService
-  /** Public Harness session-to-agent resolver used by file-reference lookup. */
-  resolveAgent?: TuiDispatchExtensions['resolveAgent']
-  /** Official DSH per-agent command directory. */
-  commands?: Pick<CommandRuntime, 'list' | 'execute'>
 }
 
 /**
  * Bind a TUI gateway to caller-owned streams.
- * @param api - host ApiProxy.
+ * @param bridge - in-process Harness controller adapter.
  * @param input - framed request stream.
  * @param output - framed response/notification stream.
  * @param options - bounded output/backpressure policy.
  * @returns a disposer that aborts pumps and detaches listeners.
  */
 export function serve(
-  api: ApiProxy,
+  bridge: TuiHarnessBridge,
   input: Readable,
   output: Writable,
   options: TuiServeOptions = {},
 ): () => void {
-  const { fileReferences, resolveAgent, commands, ...transportOptions } = options
-  const transport = new TuiLineTransport(input, output, transportOptions)
-  const gateway = new TuiGateway(api, transport, { fileReferences, resolveAgent, commands })
+  const transport = new TuiLineTransport(input, output, options)
+  const gateway = new TuiGateway(bridge, transport)
   transport.onRequest(async (method, params, id) =>
     gateway.handleRequest(method, params, String(id)))
   transport.start()
   return () => {
     gateway.dispose()
+    bridge.dispose()
     transport.close()
   }
 }

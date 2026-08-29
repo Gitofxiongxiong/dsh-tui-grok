@@ -1,5 +1,5 @@
 /**
- * One TUI client on one framed connection: hello, attach, ApiProxy forward,
+ * One TUI client on one framed connection: hello, attach, bridge dispatch,
  * and mux/host fan-out with a per-session live buffer until history returns.
  *
  * @module @dsh-pager-grok/tui-server/gateway
@@ -9,9 +9,6 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ApiProxy, HostFrame, MuxFrame } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
   TUI_PROTOCOL_VERSION,
   TUI_SERVER_INFO_NAME,
@@ -23,12 +20,16 @@ import {
   decodeSubscribeParams,
   TuiClientId,
   type ConnectionGeneration,
+  type HostFrame,
+  type MuxFrame,
+  type SessionId,
   type TuiHelloResult,
   type TuiMuxFrame,
   type TuiSubscribeResult,
 } from '@dsh-pager-grok/tui-protocol'
 import { ControlPlaneRouter } from './control-plane.js'
-import { dispatchRespond, dispatchUnary, type TuiDispatchExtensions } from './dispatch.js'
+import type { TuiHarnessBridge } from './bridge.js'
+import { dispatchRespond, dispatchUnary } from './dispatch.js'
 import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
 
 /** Outbound notification sink. */
@@ -88,6 +89,7 @@ export class TuiGateway {
   readonly controlPlane = new ControlPlaneRouter()
   private muxAbort: AbortController | undefined
   private hostAbort: AbortController | undefined
+  private readonly followerAborts = new Map<string, AbortController>()
   /** Cancels request-scoped Host work when this connection generation ends. */
   private requestAbort = new AbortController()
   /**
@@ -98,16 +100,18 @@ export class TuiGateway {
   private readonly respondedRequests = new Map<string, { fingerprint: string; promise: Promise<unknown> }>()
 
   constructor(
-    private readonly api: ApiProxy,
+    private readonly bridge: TuiHarnessBridge,
     private readonly peer: TuiNotifyPeer,
-    private readonly extensions: TuiDispatchExtensions = {},
   ) {}
 
   /** Abort mux/host pumps. */
   dispose(): void {
     this.muxAbort?.abort()
     this.hostAbort?.abort()
+    for (const controller of this.followerAborts.values()) controller.abort()
+    this.followerAborts.clear()
     this.requestAbort.abort()
+    this.bridge.resetConnection()
   }
 
   /**
@@ -125,11 +129,10 @@ export class TuiGateway {
     if (kind === 'tui-request') return await this.handleControl(method, params)
     if (kind === 'api') {
       const result = await dispatchUnary(
-        this.api,
+        this.bridge,
         method,
         params,
         rpcId,
-        this.extensions,
         this.requestAbort.signal,
       )
       if (method === 'session.list' && apiResultSucceeded(result)) {
@@ -207,6 +210,8 @@ export class TuiGateway {
     this.attached.add(id)
     this.subscriptions.add(id)
     if (!this.buffering.has(id)) this.buffering.set(id, [])
+    this.bridge.attachSession(decoded.value.sessionId)
+    this.startFollower(decoded.value.sessionId)
     this.ensurePumps()
     return { attached: true, role: 'driver' }
   }
@@ -222,6 +227,9 @@ export class TuiGateway {
     this.attached.delete(id)
     this.subscriptions.delete(id)
     this.buffering.delete(id)
+    this.followerAborts.get(id)?.abort()
+    this.followerAborts.delete(id)
+    this.bridge.detachSession(decoded.value.sessionId)
     this.stopPumpsIfUnused()
     return {}
   }
@@ -305,7 +313,7 @@ export class TuiGateway {
       }
       return await previous.promise
     }
-    const pending = dispatchRespond(this.api, decoded.value.requestId, value)
+    const pending = dispatchRespond(this.bridge, decoded.value.requestId, value)
     this.respondedRequests.set(requestKey, { fingerprint, promise: pending })
     let result: unknown
     try {
@@ -359,11 +367,8 @@ export class TuiGateway {
 
   private async pumpMux(signal: AbortSignal, generation: ConnectionGeneration): Promise<void> {
     try {
-      for await (const envelope of this.api.events.mux(
-        { rpcId: RpcId('tui-mux'), payload: {} },
-        signal,
-      )) {
-        this.emitMux(envelope.payload, String(envelope.rpcId), generation)
+      for await (const envelope of this.bridge.muxFrames(signal)) {
+        this.emitMux(envelope.frame, envelope.requestId, generation)
       }
       if (!signal.aborted) this.notifyStreamClosed('mux', generation)
     } catch (error) {
@@ -376,11 +381,8 @@ export class TuiGateway {
 
   private async pumpHost(signal: AbortSignal, generation: ConnectionGeneration): Promise<void> {
     try {
-      for await (const envelope of this.api.events.host(
-        { rpcId: RpcId('tui-host'), payload: {} },
-        signal,
-      )) {
-        this.emitHost(envelope.payload, generation)
+      for await (const frame of this.bridge.hostFrames(signal)) {
+        this.emitHost(frame, generation)
       }
       if (!signal.aborted) this.notifyStreamClosed('host', generation)
     } catch (error) {
@@ -388,6 +390,33 @@ export class TuiGateway {
       this.notifyStreamError('host', error, generation)
     } finally {
       this.clearPump('host', generation, signal)
+    }
+  }
+
+  private startFollower(sessionId: SessionId): void {
+    const key = String(sessionId)
+    if (this.followerAborts.has(key)) return
+    const controller = new AbortController()
+    this.followerAborts.set(key, controller)
+    const generation = this.generation
+    void this.pumpFollower(sessionId, controller.signal, generation).then(() => undefined, () => undefined)
+  }
+
+  private async pumpFollower(
+    sessionId: SessionId,
+    signal: AbortSignal,
+    generation: ConnectionGeneration,
+  ): Promise<void> {
+    const key = String(sessionId)
+    try {
+      for await (const envelope of this.bridge.followSession(sessionId, signal)) {
+        this.emitMux(envelope.frame, envelope.requestId, generation)
+      }
+      if (!signal.aborted) this.notifyStreamClosed('mux', generation)
+    } catch (error: unknown) {
+      if (!signal.aborted) this.notifyStreamError('mux', error, generation)
+    } finally {
+      if (this.followerAborts.get(key)?.signal === signal) this.followerAborts.delete(key)
     }
   }
 
@@ -475,6 +504,8 @@ export class TuiGateway {
   private resetConnection(): void {
     this.muxAbort?.abort()
     this.hostAbort?.abort()
+    for (const controller of this.followerAborts.values()) controller.abort()
+    this.followerAborts.clear()
     this.muxAbort = undefined
     this.hostAbort = undefined
     this.requestAbort.abort()
@@ -484,6 +515,7 @@ export class TuiGateway {
     this.controlPlaneSubscribed = false
     this.buffering.clear()
     this.respondedRequests.clear()
+    this.bridge.resetConnection()
   }
 }
 

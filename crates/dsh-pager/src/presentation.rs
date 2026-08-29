@@ -658,10 +658,10 @@ impl DshRenderBlock {
                 if view.is_none() && !arguments.is_empty() {
                     parts.push(arguments.clone());
                 }
-                if view.is_none() {
-                    if let Some(edit) = edit {
-                        parts.push(format!("-{}\n+{}", edit.old_text, edit.new_text));
-                    }
+                if view.is_none()
+                    && let Some(edit) = edit
+                {
+                    parts.push(format!("-{}\n+{}", edit.old_text, edit.new_text));
                 }
                 if let Some(result) = result {
                     let output = result.display_text();
@@ -810,10 +810,10 @@ fn edit_detail_from_arguments(arguments: &str, view: Option<&Value>) -> Option<D
 
 fn tool_view_payload<'a>(wrapper: Option<&'a Value>, expected: &str) -> Option<&'a Value> {
     let wrapper = wrapper?;
-    if let Some(target) = wrapper.get("for").and_then(Value::as_str) {
-        if target != expected {
-            return None;
-        }
+    if let Some(target) = wrapper.get("for").and_then(Value::as_str)
+        && target != expected
+    {
+        return None;
     }
     Some(wrapper.get("view").unwrap_or(wrapper))
 }
@@ -1914,10 +1914,10 @@ impl DshPresentationAdapter {
     }
 
     fn adapt_command(&mut self, seq: i64, data: &Value, updates: &mut Vec<DshRenderUpdate>) {
-        if let Some(text) = data.get("text").and_then(Value::as_str) {
-            if !text.is_empty() {
-                updates.push(upsert_event(seq, DshRenderKind::Status, text.into()));
-            }
+        if let Some(text) = data.get("text").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            updates.push(upsert_event(seq, DshRenderKind::Status, text.into()));
         }
     }
 

@@ -37,6 +37,8 @@ export {
 export type { ApiProxyMethod } from './methods.js'
 export type {
   ConnectionGeneration,
+  ApiError,
+  ApiResult,
   HostFrame,
   JsonRpcErrorObject,
   JsonRpcFailure,
@@ -50,6 +52,10 @@ export type {
   MuxFrame,
   ResumeClass,
   RpcMethodMap,
+  JobView,
+  QueuedInboxItem,
+  ToolEventView,
+  WorkspaceView,
   TuiAttachParams,
   TuiAttachResult,
   TuiAttachRole,

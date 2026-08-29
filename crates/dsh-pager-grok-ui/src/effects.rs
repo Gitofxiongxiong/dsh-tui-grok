@@ -703,11 +703,12 @@ impl DshEffectSink<'_, '_> {
                 if self.ledger.contains(&operation) {
                     return Ok(self.ledger.duplicate_receipt(operation));
                 }
-                let result = dsh_pager::submit_prompt_for_session(
+                let result = dsh_pager::loader::submit_prompt_for_session_with_request_id(
                     self.transport,
                     operation.session_id.as_str(),
                     text,
                     mode,
+                    operation.request_id.to_string(),
                 );
                 (operation, result.map(|value| value.accepted))
             }
@@ -1265,6 +1266,7 @@ fn encode_async_request(
             "session.prompt",
             json!({
                 "sessionId": operation.session_id,
+                "requestId": operation.request_id,
                 "mode": mode,
                 "content": [{"type": "text", "text": text}],
             }),
@@ -2491,11 +2493,16 @@ mod tests {
             },
             &context,
         );
-        let UiEffect::SubmitPrompt { operation, .. } = effect else {
+        let UiEffect::SubmitPrompt { ref operation, .. } = effect else {
             panic!()
         };
         assert_eq!(operation.request_id.as_str(), "op-1");
         assert_eq!(operation.dedupe_key, "submit:op-1");
+        let (method, params) = encode_async_request(&effect, operation)
+            .expect("encode prompt")
+            .expect("prompt supported");
+        assert_eq!(method, "session.prompt");
+        assert_eq!(params["requestId"], "op-1");
     }
 
     #[test]

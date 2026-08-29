@@ -14,6 +14,7 @@ dsh_tui_repo_root() {
 }
 
 dsh_tui_default_profile="dsh-pager-grok-dev"
+dsh_tui_required_harness_version="0.1.2-alpha.1"
 
 # Filled by dsh_tui_prepare_pager_backend for launchers.
 dsh_tui_node_program=""
@@ -26,22 +27,53 @@ dsh_tui_resolve_harness_root() {
   local candidate
 
   if [[ -n "${DSH_HARNESS_ROOT:-}" ]]; then
-    printf '%s\n' "$DSH_HARNESS_ROOT"
-    return 0
+    dsh_tui_require_harness_checkout "$DSH_HARNESS_ROOT"
+    return
   fi
 
   for candidate in \
+    "$repo_root/../deepseek-harness-latest" \
     "$repo_root/../deepseek-harness" \
     "/home/leo/code/deepseek-harness" \
     "/home/leo/aidreamschool/deepseek-harness"; do
-    if [[ -f "$candidate/apps/cli/lib/bin.js" && -r "$candidate/apps/cli/lib/bin.js" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+    [[ -d "$candidate" ]] || continue
+    dsh_tui_require_harness_checkout "$candidate"
+    return
   done
 
-  printf 'DeepSeek Harness checkout was not found. Set DSH_HARNESS_ROOT.\n' >&2
+  printf 'DeepSeek Harness %s checkout was not found. Set DSH_HARNESS_ROOT.\n' \
+    "$dsh_tui_required_harness_version" >&2
   return 2
+}
+
+dsh_tui_harness_version() {
+  local harness_root="$1"
+  local manifest="$harness_root/apps/cli/package.json"
+  local node_program
+  node_program="$(dsh_tui_resolve_node)" || return
+  if [[ ! -r "$manifest" ]]; then
+    printf 'DeepSeek Harness CLI manifest is missing or unreadable: %s\n' "$manifest" >&2
+    return 2
+  fi
+  "$node_program" - "$manifest" <<'NODE'
+const fs = require('node:fs')
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+if (typeof manifest.version !== 'string') process.exit(2)
+process.stdout.write(`${manifest.version}\n`)
+NODE
+}
+
+dsh_tui_require_harness_checkout() {
+  local harness_root="$1"
+  local actual_version
+  actual_version="$(dsh_tui_harness_version "$harness_root")" || return
+  if [[ "$actual_version" != "$dsh_tui_required_harness_version" ]]; then
+    printf 'Unsupported DeepSeek Harness version at %s: expected %s, found %s.\n' \
+      "$harness_root" "$dsh_tui_required_harness_version" "$actual_version" >&2
+    return 2
+  fi
+  dsh_tui_require_harness_entry "$harness_root" >/dev/null || return
+  printf '%s\n' "$harness_root"
 }
 
 dsh_tui_require_harness_entry() {
@@ -149,7 +181,11 @@ const expectedDependencies = [
   '@dsh-pager-grok/tui-protocol',
   '@dsh-pager-grok/tui-server',
   '@dsh-pager-grok/tui-embedded',
-  '@dsh-pager-grok/tui-session-projection-recovery',
+  '@deepseek-ai/dsh-agent-presets',
+  '@deepseek-ai/dsh-api-session-controller',
+  '@deepseek-ai/dsh-api-settings-controller',
+  '@deepseek-ai/dsh-api-workspace-controller',
+  '@deepseek-ai/dsh-tool-subagent',
 ]
 const ready = bundles.includes('@dsh-pager-grok/tui-embedded')
   && expectedDependencies.every((name) => Object.hasOwn(dependencies, name))
@@ -160,21 +196,26 @@ NODE
 dsh_tui_profile_manifest_links_current_repo() {
   local manifest="$1"
   local repo_root="$2"
+  local harness_root="$3"
   local node_program
   node_program="$(dsh_tui_resolve_node)"
   [[ -f "$manifest" ]] || return 1
 
-  "$node_program" - "$manifest" "$repo_root" <<'NODE'
+  "$node_program" - "$manifest" "$repo_root" "$harness_root" <<'NODE'
 const fs = require('node:fs')
 
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const repoRoot = process.argv[3]
+const harnessRoot = process.argv[4]
 const dependencies = manifest?.dependencies ?? {}
 const expected = {
   '@dsh-pager-grok/tui-protocol': `link:${repoRoot}/packages/dsh-tui-protocol`,
   '@dsh-pager-grok/tui-server': `link:${repoRoot}/packages/dsh-tui-server`,
   '@dsh-pager-grok/tui-embedded': `link:${repoRoot}/packages/dsh-tui-embedded`,
-  '@dsh-pager-grok/tui-session-projection-recovery': `link:${repoRoot}/packages/dsh-tui-session-projection-recovery`,
+  '@deepseek-ai/dsh-api-session-controller': `link:${harnessRoot}/packages/api/session-controller`,
+  '@deepseek-ai/dsh-api-settings-controller': `link:${harnessRoot}/packages/api/settings-controller`,
+  '@deepseek-ai/dsh-api-workspace-controller': `link:${harnessRoot}/packages/api/workspace-controller`,
+  '@deepseek-ai/dsh-tool-subagent': `link:${harnessRoot}/packages/subagent/tool-subagent`,
 }
 const current = Object.entries(expected).every(([name, spec]) => dependencies[name] === spec)
 process.exit(current ? 0 : 1)
@@ -219,8 +260,9 @@ dsh_tui_ensure_typescript_build() {
 
 dsh_tui_install_local_profile() {
   local repo_root="$1"
-  local harness_entry="$2"
-  local profile="$3"
+  local harness_root="$2"
+  local harness_entry="$3"
+  local profile="$4"
   local profile_dir
   local manifest
   local node_program
@@ -229,7 +271,7 @@ dsh_tui_install_local_profile() {
   node_program="$(dsh_tui_resolve_node)" || return
 
   if dsh_tui_profile_manifest_is_ready "$manifest" \
-    && dsh_tui_profile_manifest_links_current_repo "$manifest" "$repo_root"; then
+    && dsh_tui_profile_manifest_links_current_repo "$manifest" "$repo_root" "$harness_root"; then
     printf 'DSH profile %s is already linked to this checkout.\n' "$profile" >&2
     return 0
   fi
@@ -244,10 +286,28 @@ dsh_tui_install_local_profile() {
 
   printf 'Preparing DSH profile %s under %s...\n' "$profile" "$(dsh_tui_dsh_home)" >&2
   "$node_program" "$harness_entry" plugin --profile "$profile" add \
+    "$harness_root/packages/core/agent" \
+    "$harness_root/packages/preset/agent-presets" \
+    "$harness_root/packages/api/session-controller" \
+    "$harness_root/packages/api/settings-controller" \
+    "$harness_root/packages/api/workspace-controller" \
+    "$harness_root/packages/util/brand" \
+    "$harness_root/packages/code-runtime/code-runtime-worker-thread" \
+    "$harness_root/packages/interaction/commands" \
+    "$harness_root/packages/extensions/cordis-host-runner" \
+    "$harness_root/packages/context/file-reference" \
+    "$harness_root/packages/context/file-reference-local" \
+    "$harness_root/packages/goal/goal" \
+    "$harness_root/packages/host/directory-picker-browse" \
+    "$harness_root/packages/runtime-diagnostics/invariants" \
+    "$harness_root/packages/llm/llm" \
+    "$harness_root/packages/core/session" \
+    "$harness_root/packages/subagent/subagent" \
+    "$harness_root/packages/subagent/tool-subagent" \
+    "$harness_root/packages/workspace/workspace" \
     "$repo_root/packages/dsh-tui-protocol" \
     "$repo_root/packages/dsh-tui-server" \
-    "$repo_root/packages/dsh-tui-embedded" \
-    "$repo_root/packages/dsh-tui-session-projection-recovery"
+    "$repo_root/packages/dsh-tui-embedded"
 
   dsh_tui_require_profile "$profile" "$repo_root"
   printf 'DSH profile %s is ready.\n' "$profile" >&2

@@ -26,6 +26,7 @@ const PAGE_MESSAGES: u64 = 50;
 const MAX_INITIAL_REPAIRS: usize = 2;
 const MAX_ATTACHMENT_PREVIEW_DATA_BYTES: usize = 1_048_576;
 static DISPATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// How the first session is chosen after hello.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +497,7 @@ pub fn prompt_subagent(
         serde_json::to_value(SubagentPromptParams {
             parent_session_id: address.parent_session_id.clone(),
             child_session_id: address.child_session_id.clone(),
+            request_id: next_request_id("subagent-prompt"),
             mode: address.mode,
             content: vec![PromptContentPart::Text { text }],
             client_time_zone: None,
@@ -545,11 +547,34 @@ pub fn submit_prompt_for_session(
     text: String,
     mode: PromptMode,
 ) -> PagerResult<SessionPromptResult> {
+    submit_prompt_for_session_with_request_id(
+        transport,
+        session_id,
+        text,
+        mode,
+        next_request_id("session-prompt"),
+    )
+}
+
+/// Submit a prompt with the caller-owned operation identity. UI retries reuse
+/// this identity so Harness can deduplicate admission without the bridge
+/// inventing a second token.
+pub fn submit_prompt_for_session_with_request_id(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    text: String,
+    mode: PromptMode,
+    request_id: String,
+) -> PagerResult<SessionPromptResult> {
+    if request_id.trim().is_empty() {
+        return Err(PagerError::new("prompt request id must not be empty"));
+    }
     api_call(
         transport,
         "session.prompt",
         serde_json::to_value(SessionPromptParams {
             session_id: session_id.to_string(),
+            request_id,
             mode,
             content: vec![PromptContentPart::Text { text }],
         })?,
@@ -604,7 +629,13 @@ pub fn dispatch_session_with_id(
         json!({ "cwd": cwd, "sessionId": session_id }),
     )?;
     let id = created.session_id.clone();
-    let prompt = match submit_prompt_for_session(transport, &id, text, mode) {
+    let prompt = match submit_prompt_for_session_with_request_id(
+        transport,
+        &id,
+        text,
+        mode,
+        format!("dispatch-initial:{id}"),
+    ) {
         Ok(prompt) => prompt,
         Err(error) => {
             return Err(PagerError::new(format!(
@@ -616,6 +647,15 @@ pub fn dispatch_session_with_id(
         session_id: id,
         prompt,
     })
+}
+
+fn next_request_id(prefix: &str) -> String {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("tui-{prefix}-{stamp:x}-{sequence:x}")
 }
 
 /// Answer the currently displayed server-owned approval or question.
@@ -940,13 +980,14 @@ fn api_call<T: DeserializeOwned>(
     let raw = transport.call_value(method, params)?;
     let control_value = raw.clone();
     let envelope: ApiResult<T> = serde_json::from_value(raw)?;
-    if envelope.ok && method == "workspace.list" {
-        if let Some(value) = control_value.get("value") {
-            transport
-                .control_plane_mut()
-                .store
-                .seed_workspace_list(value)?;
-        }
+    if envelope.ok
+        && method == "workspace.list"
+        && let Some(value) = control_value.get("value")
+    {
+        transport
+            .control_plane_mut()
+            .store
+            .seed_workspace_list(value)?;
     }
     envelope.into_result().map_err(PagerError::from)
 }

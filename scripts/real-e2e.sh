@@ -42,7 +42,15 @@ else
   dsh_tui_prepare_pager_backend "$repo_root" "$tui_profile"
   harness_root="$dsh_tui_harness_root"
   backend_desc="$dsh_tui_node_program $dsh_tui_harness_entry --profile $tui_profile"
-  pty_backend_argv=("${dsh_tui_pager_backend_argv[@]}")
+  # argparse treats a following `--profile` token as another option even when
+  # it is intended as the value of `--backend-arg`; use the equals form for
+  # every backend argument so option-shaped child argv remains unambiguous.
+  pty_backend_argv=(
+    --backend "$dsh_tui_node_program"
+    "--backend-arg=$dsh_tui_harness_entry"
+    "--backend-arg=--profile"
+    "--backend-arg=$tui_profile"
+  )
 fi
 
 cd "$repo_root"
@@ -80,7 +88,30 @@ else
   run_pager --load-only "${pager_session_args[@]}" "${dsh_tui_pager_backend_argv[@]}"
 fi
 
-python3 scripts/pty-smoke.py \
+# The PTY smoke exercises the credential modal with a deterministic placeholder.
+# Never let that fixture persist into the caller's profile: a second E2E run
+# must see the same clean credential state as the first one. Copy only the
+# selected profile wiring into an ephemeral DSH_HOME; sessions, credentials and
+# storage are deliberately fresh.
+pty_home_parent="${TMPDIR:-/tmp}"
+pty_dsh_home="$(mktemp -d "$pty_home_parent/dsh-pager-real-e2e.XXXXXX")"
+cleanup_pty_dsh_home() {
+  if [[ -n "${pty_dsh_home:-}" \
+    && -d "$pty_dsh_home" \
+    && "$pty_dsh_home" == "$pty_home_parent"/dsh-pager-real-e2e.* ]]; then
+    rm -rf -- "$pty_dsh_home"
+  fi
+}
+trap cleanup_pty_dsh_home EXIT INT TERM
+
+if (( use_env_backend == 0 )); then
+  source_profile_dir="$(cd "$(dsh_tui_profile_dir "$tui_profile")" && pwd -P)"
+  isolated_profile_dir="$pty_dsh_home/profiles/$tui_profile"
+  mkdir -p "$isolated_profile_dir"
+  cp -a "$source_profile_dir/." "$isolated_profile_dir/"
+fi
+
+DSH_HOME="$pty_dsh_home" python3 scripts/pty-smoke.py \
   --binary "$binary" \
   --pager-arg=--new \
   "${pty_backend_argv[@]}" \

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { HostFrame, MuxFrame, WorkspaceId } from '@deepseek-ai/dsh-host-apiproxy/api'
+import { SessionId, type HostFrame, type MuxFrame } from '@dsh-pager-grok/tui-protocol'
 import { ControlPlaneRouter, ControlPlaneStore } from '../src/control-plane.ts'
+
+type WorkspaceId = string
 
 const a = SessionId('session-a')
 const b = SessionId('session-b')

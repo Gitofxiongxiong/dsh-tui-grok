@@ -9,6 +9,10 @@ description = "Streaming markdown renderer for terminal UIs"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
+[lints.clippy]
+question_mark = "allow"
+unnecessary_sort_by = "allow"
+
 [dependencies]
 anstyle = { workspace = true }
 anstyle-lossy = { workspace = true }

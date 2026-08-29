@@ -11,6 +11,7 @@ mod effort_levels;
 #[path = "../vendor/grok/xai-grok-pager/src/slash/matcher.rs"]
 mod matcher;
 #[path = "../vendor/grok/xai-grok-pager/src/slash/commands/model.rs"]
+#[allow(clippy::if_same_then_else)]
 mod model;
 #[path = "../vendor/grok/xai-grok-pager/src/slash/commands/resume.rs"]
 mod resume;

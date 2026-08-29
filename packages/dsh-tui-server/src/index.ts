@@ -1,5 +1,5 @@
 /**
- * Stdio JSON-RPC plugin serving the native TUI protocol over `ctx.apiProxy`.
+ * Stdio JSON-RPC plugin serving the native TUI protocol over Harness domain controllers.
  * Stdout is reserved for protocol frames. Named plugin exports only — no
  * default export — so Loader `unwrapExports` keeps `name`, `inject`, `Config`,
  * and `apply`.
@@ -11,10 +11,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Readable, Writable } from 'node:stream'
 import Schema from '@deepseek-ai/schemastery'
 import { serve } from './serve.js'
-import { createApiRemoteAgentResolver } from '@deepseek-ai/dsh-api-remotes'
-import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
+import { TuiHarnessBridge, type TuiHarnessContext } from './bridge.js'
 
 export { TuiGateway, TUI_SERVER_VERSION } from './gateway.js'
+export { TuiHarnessBridge } from './bridge.js'
+export type { TuiHarnessContext } from './bridge.js'
 export {
   ControlPlaneRouter,
   ControlPlaneStore,
@@ -37,10 +38,22 @@ export { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
 export { serve } from './serve.js'
 
 export const name = 'tui-server'
-// createApiRemoteAgentResolver reads both services directly. Cordis service
-// access is not transitively authorized through apiProxy, so declare the
-// resolver's own dependencies on this plugin as well.
-export const inject = ['apiProxy', 'agents', 'sessions', 'commands']
+export const inject = [
+  'sessionController',
+  'settingsController',
+  'credentialsController',
+  'workspaceController',
+  'directoryPickerController',
+  'agents',
+  'commands',
+  'llm',
+  'subagents',
+  'agentPresets',
+  'goals',
+  'sessionFileReferences',
+  'sessionSkillCatalog',
+  'tools',
+]
 
 /** Runtime stream overrides used by tests. */
 export interface TuiServerConfig {
@@ -56,7 +69,7 @@ export const Config: Schema<TuiServerConfig> = Schema.object({})
 
 /**
  * Serve TUI requests over the configured streams.
- * @param ctx - Cordis context providing `apiProxy`.
+ * @param ctx - Cordis context providing the Harness 0.1.2 controllers.
  * @param config - optional stream overrides.
  */
 export function apply(ctx: Context, config: TuiServerConfig): void {
@@ -65,14 +78,9 @@ export function apply(ctx: Context, config: TuiServerConfig): void {
     const input = config.input ?? process.stdin
     /* v8 ignore next -- production stdio wiring; tests inject streams */
     const output = config.output ?? process.stdout
-    const fileReferences = ctx.get('fileReferences')
-    const resolveAgent = createApiRemoteAgentResolver(ctx, {})
-    const commands: Pick<CommandRuntime, 'list' | 'execute'> = ctx.commands
-    return serve(ctx.apiProxy, input, output, {
+    const bridge = new TuiHarnessBridge(ctx as unknown as TuiHarnessContext)
+    return serve(bridge, input, output, {
       ...config.maxQueuedFrames === undefined ? {} : { maxQueuedFrames: config.maxQueuedFrames },
-      ...fileReferences === undefined ? {} : { fileReferences },
-      resolveAgent,
-      commands,
     })
   }, 'tui.serve')
 }
