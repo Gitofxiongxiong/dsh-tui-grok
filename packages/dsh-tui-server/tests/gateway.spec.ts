@@ -375,6 +375,31 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
+  it('allows a corrected interaction payload after the host rejects the first attempt', async () => {
+    const api = fakeApi()
+    let attempts = 0
+    api.respond = async () => {
+      attempts += 1
+      return attempts === 1
+        ? { accepted: false, reason: 'bad-response' }
+        : { accepted: true }
+    }
+    const gateway = new TuiGateway(api, new Notifications())
+    const { generation } = await hello(gateway)
+    const base = { sessionId, generation, requestId: 'rpc-corrected' }
+
+    await expect(gateway.handleRequest('tui.respond', {
+      ...base,
+      interaction: { type: 'question', answers: { answers: [{ id: 'q1', selected: ['one'] }] } },
+    }, '2')).resolves.toEqual({ accepted: false, reason: 'bad-response' })
+    await expect(gateway.handleRequest('tui.respond', {
+      ...base,
+      interaction: { type: 'question', answers: { answers: [{ id: 'q1', selected: ['two'] }] } },
+    }, '3')).resolves.toEqual({ accepted: true })
+    expect(attempts).toBe(2)
+    gateway.dispose()
+  })
+
   it('swallows mux/host pump failures that are not abort', async () => {
     const api = fakeApi()
     api.events.mux = async function* () {

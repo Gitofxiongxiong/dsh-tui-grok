@@ -314,6 +314,12 @@ export class TuiGateway {
       this.respondedRequests.delete(requestKey)
       throw error
     }
+    // ApiProxy reports a schema/identity rejection as a fulfilled receipt.
+    // Such a response did not resolve the Host interaction, so keeping its
+    // fingerprint would incorrectly turn a corrected answer into
+    // `already-resolved`. The map still deduplicates exact concurrent calls;
+    // only Host-accepted results become completed tombstones.
+    if (!respondAccepted(result)) this.respondedRequests.delete(requestKey)
     while (this.respondedRequests.size > 1024) {
       const first = this.respondedRequests.keys().next().value
       if (first === undefined) break
@@ -498,6 +504,13 @@ function apiResultSucceeded(value: unknown): boolean {
     && typeof value === 'object'
     && !Array.isArray(value)
     && (value as { ok?: unknown }).ok === true
+}
+
+function respondAccepted(value: unknown): boolean {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as { accepted?: unknown }).accepted === true
 }
 
 function addRequestId(frame: MuxFrame, requestId: string, generation?: number): TuiMuxFrame & { generation?: number } {

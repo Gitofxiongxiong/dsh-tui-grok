@@ -18,6 +18,7 @@ use crate::{
 /// Project a DSH question onto the Grok question card.
 pub fn question_state(
     interaction: &DshInteraction,
+    question_index: usize,
     selected: usize,
     pending: bool,
     args_expanded: bool,
@@ -25,14 +26,16 @@ pub fn question_state(
     let DshInteraction::Question { questions, .. } = interaction else {
         return None;
     };
-    let question = questions.first()?;
+    let question_count = questions.len();
+    let question_index = question_index.min(question_count.saturating_sub(1));
+    let question = questions.get(question_index)?;
     let title = question
         .get("question")
         .or_else(|| question.get("text"))
         .and_then(Value::as_str)
         .unwrap_or("Please provide an answer")
         .to_string();
-    let header = question
+    let mut header = question
         .get("header")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -46,6 +49,13 @@ pub fn question_state(
                     _ => None,
                 })
         });
+    if question_count > 1 {
+        let progress = format!("{}/{}", question_index + 1, question_count);
+        header = Some(match header {
+            Some(header) => format!("{header} · {progress}"),
+            None => format!("Question {progress}"),
+        });
+    }
     let detail = question
         .get("detail")
         .and_then(Value::as_str)
@@ -82,6 +92,41 @@ pub fn question_state(
     };
     state.clamp_selection();
     Some(state)
+}
+
+/// Local answer draft for one Host-owned question in a request batch.
+///
+/// `answered` distinguishes the initially highlighted radio row from an
+/// explicit user choice. A multi-question request is not sent until every
+/// draft has an explicit answer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuestionAnswerDraft {
+    pub selected_option: usize,
+    pub custom: String,
+    pub answered: bool,
+}
+
+impl QuestionAnswerDraft {
+    pub fn selected(selected_option: usize) -> Self {
+        Self {
+            selected_option,
+            custom: String::new(),
+            answered: true,
+        }
+    }
+
+    pub fn custom(value: impl Into<String>) -> Self {
+        Self {
+            selected_option: 0,
+            custom: value.into(),
+            answered: true,
+        }
+    }
+
+    pub fn with_custom(mut self, value: impl Into<String>) -> Self {
+        self.custom = value.into();
+        self
+    }
 }
 
 /// Project a DSH approval plus its already-streamed tool call into the
@@ -164,66 +209,74 @@ pub const fn approval_outcome(choice: PermissionChoice) -> &'static str {
     }
 }
 
-/// Build the protocol response for the currently displayed interaction.
+/// Build one complete protocol response for the currently displayed request.
 ///
 /// DSH `AskUserQuestionAnswerItem.selected` is option **labels**. Typed text
 /// that is not one of those labels is mouse/CSI noise or free-text; it must
 /// not replace the numbered choice, and single-select cannot send `custom`
-/// alongside `selected`.
+/// alongside `selected`. Host validation requires exactly one answer for every
+/// question in the request, so an incomplete draft batch is never emitted.
 pub fn response_for(
     interaction: &DshInteraction,
-    selected_option: usize,
-    answer_text: &str,
+    drafts: &[QuestionAnswerDraft],
 ) -> Option<dsh_pager_protocol::TuiInteractionResponse> {
     match interaction {
         DshInteraction::Approval { .. } => None,
         DshInteraction::Question { questions, .. } => {
-            let question = questions.first()?;
-            let id = question
-                .get("id")
-                .or_else(|| question.get("questionId"))
-                .and_then(Value::as_str)
-                .unwrap_or("q1");
-            let options = question
-                .get("options")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let labels = options
-                .iter()
-                .map(option_label)
-                .filter(|label| !label.is_empty())
-                .collect::<Vec<_>>();
-            let typed = answer_text.trim();
-            if labels.is_empty() {
-                if typed.is_empty() {
-                    return None;
-                }
-                return Some(dsh_pager_protocol::TuiInteractionResponse::Question {
-                    answers: json!({
-                        "answers": [{
-                            "id": id,
-                            "selected": [],
-                            "custom": typed
-                        }]
-                    }),
-                });
+            if questions.is_empty() || drafts.len() != questions.len() {
+                return None;
             }
-            let chosen = labels
+            let answers = questions
                 .iter()
-                .find(|label| *label == typed)
-                .cloned()
-                .or_else(|| labels.get(selected_option).cloned())?;
+                .zip(drafts)
+                .enumerate()
+                .map(|(index, (question, draft))| question_answer(question, index, draft))
+                .collect::<Option<Vec<_>>>()?;
             Some(dsh_pager_protocol::TuiInteractionResponse::Question {
-                answers: json!({
-                    "answers": [{
-                        "id": id,
-                        "selected": [chosen]
-                    }]
-                }),
+                answers: json!({ "answers": answers }),
             })
         }
     }
+}
+
+fn question_answer(
+    question: &Value,
+    question_index: usize,
+    draft: &QuestionAnswerDraft,
+) -> Option<Value> {
+    if !draft.answered {
+        return None;
+    }
+    let id = question
+        .get("id")
+        .or_else(|| question.get("questionId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("q{}", question_index + 1));
+    let labels = question
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(option_label)
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        let custom = draft.custom.trim();
+        if custom.is_empty() {
+            return None;
+        }
+        return Some(json!({
+            "id": id,
+            "selected": [],
+            "custom": custom
+        }));
+    }
+    let selected = labels.get(draft.selected_option)?.clone();
+    Some(json!({
+        "id": id,
+        "selected": [selected]
+    }))
 }
 
 fn option_label(value: &Value) -> String {
@@ -262,12 +315,58 @@ mod tests {
                 "options": [{"id": "yes", "label": "Yes"}]
             })],
         };
-        let response = response_for(&interaction, 0, "").unwrap();
+        let response = response_for(&interaction, &[QuestionAnswerDraft::selected(0)]).unwrap();
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["answers"]["answers"][0]["id"], "q1");
         assert_eq!(value["answers"]["answers"][0]["selected"][0], "Yes");
         assert!(value["answers"]["answers"][0].get("text").is_none());
         assert!(value["answers"]["answers"][0].get("custom").is_none());
+    }
+
+    #[test]
+    fn multi_question_response_requires_and_preserves_every_answer() {
+        let interaction = DshInteraction::Question {
+            request_id: "rpc-multi".into(),
+            questions: vec![
+                json!({
+                    "id": "target",
+                    "question": "What should I do?",
+                    "options": [{"label": "Build"}, {"label": "Deploy"}]
+                }),
+                json!({
+                    "id": "auth",
+                    "question": "How should I authenticate?",
+                    "options": [{"label": "Password"}, {"label": "SSH key"}]
+                }),
+                json!({
+                    "id": "note",
+                    "question": "Anything else?"
+                }),
+            ],
+        };
+        let incomplete = vec![
+            QuestionAnswerDraft::selected(1),
+            QuestionAnswerDraft::selected(0),
+        ];
+        assert!(response_for(&interaction, &incomplete).is_none());
+
+        let drafts = vec![
+            QuestionAnswerDraft::selected(1),
+            QuestionAnswerDraft::selected(0),
+            QuestionAnswerDraft::custom("run clippy too"),
+        ];
+        let response = response_for(&interaction, &drafts).expect("complete batch");
+        let value = serde_json::to_value(response).expect("response json");
+        let answers = value["answers"]["answers"]
+            .as_array()
+            .expect("answer batch");
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0]["id"], "target");
+        assert_eq!(answers[0]["selected"][0], "Deploy");
+        assert_eq!(answers[1]["id"], "auth");
+        assert_eq!(answers[1]["selected"][0], "Password");
+        assert_eq!(answers[2]["id"], "note");
+        assert_eq!(answers[2]["custom"], "run clippy too");
     }
 
     #[test]
@@ -285,7 +384,8 @@ mod tests {
             })],
         };
         for typed in ["", "[<:;M", "  [<:;M"] {
-            let response = response_for(&interaction, 0, typed).expect(typed);
+            let draft = QuestionAnswerDraft::selected(0).with_custom(typed);
+            let response = response_for(&interaction, &[draft]).expect(typed);
             let value = serde_json::to_value(response).unwrap();
             assert_eq!(
                 value["answers"]["answers"][0]["id"], "plan-review",
@@ -300,13 +400,13 @@ mod tests {
                 "{typed}"
             );
         }
-        let keep = response_for(&interaction, 1, "").unwrap();
+        let keep = response_for(&interaction, &[QuestionAnswerDraft::selected(1)]).unwrap();
         let value = serde_json::to_value(keep).unwrap();
         assert_eq!(
             value["answers"]["answers"][0]["selected"][0],
             "Keep planning"
         );
-        assert!(response_for(&interaction, 9, "[<:;M").is_none());
+        assert!(response_for(&interaction, &[QuestionAnswerDraft::selected(9)]).is_none());
     }
 
     fn plan_review_interaction() -> DshInteraction {
@@ -327,7 +427,7 @@ mod tests {
 
     #[test]
     fn question_state_projects_plan_review_onto_the_grok_card() {
-        let state = question_state(&plan_review_interaction(), 9, false, false).unwrap();
+        let state = question_state(&plan_review_interaction(), 0, 9, false, false).unwrap();
         assert_eq!(state.header.as_deref(), Some("Plan review"));
         assert_eq!(state.title, "Approve this plan and leave plan mode?");
         assert!(state.detail.iter().any(|line| line.contains("# Plan")));
