@@ -165,6 +165,56 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
+  it('rejects a mismatched protocol version and invalid control payloads', async () => {
+    const gateway = new TuiGateway(asBridge(), new Notifications())
+    await expect(gateway.handleRequest('tui.hello', {
+      protocolVersion: TUI_PROTOCOL_VERSION + 1,
+      clientType: 'test',
+    }, '1')).rejects.toMatchObject({ kind: 'protocol-version' })
+    const { generation } = await hello(gateway)
+    await expect(gateway.handleRequest('tui.attach', { generation }, '2'))
+      .rejects.toBeInstanceOf(TuiRpcError)
+    await expect(gateway.handleRequest('tui.subscribe', {
+      generation, scope: 'session',
+    }, '3')).rejects.toBeInstanceOf(TuiRpcError)
+    await expect(gateway.handleRequest('tui.respond', {
+      generation, sessionId,
+    }, '4')).rejects.toBeInstanceOf(TuiRpcError)
+    await expect(gateway.handleRequest('events.mux', {}, '5'))
+      .rejects.toBeInstanceOf(TuiMethodNotFoundError)
+    gateway.dispose()
+  })
+
+  it('cancels an executing bridge request when the connection is disposed', async () => {
+    const fake = new FakeBridge()
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    fake.callHandler = async (_method, _params, _operationId, signal) => {
+      markStarted()
+      try {
+        await hang(signal)
+        throw new Error('unreachable')
+      } catch {
+        return {
+          ok: false,
+          error: { code: 'cancelled', message: 'operation was cancelled', details: {} },
+        }
+      }
+    }
+    const gateway = new TuiGateway(asBridge(fake), new Notifications())
+    await hello(gateway)
+    const pending = gateway.handleRequest('commands/execute', {
+      agentId: sessionId,
+      line: '/compact',
+    }, 'command-cancel')
+    await started
+    gateway.dispose()
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'cancelled' },
+    })
+  })
+
   it('attaches a follower, crosses the history barrier, and filters unrelated frames', async () => {
     const fake = new FakeBridge()
     const notes = new Notifications()
@@ -194,6 +244,7 @@ describe('TuiGateway', () => {
     }
     fake.hostFactory = async function* (signal) {
       yield { type: 'host/session-status', sessionId, running: true }
+      yield { type: 'host/session-status', sessionId: other, running: true }
       await hang(signal)
     }
 
@@ -210,6 +261,10 @@ describe('TuiGateway', () => {
       item.method === 'events.mux' && (item.params as { type?: string }).type === 'stream/error',
     )).toBe(true)
     expect(notes.items.some(item => item.method === 'events.host')).toBe(true)
+    expect(notes.items.some(item =>
+      item.method === 'events.host'
+      && (item.params as { sessionId?: string }).sessionId === String(other),
+    )).toBe(false)
 
     await gateway.handleRequest('session.history', { sessionId }, 'history')
     expect(notes.items.some(item =>
@@ -303,12 +358,54 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
+  it('forwards approval and question responses through the legacy payload shapes', async () => {
+    const fake = new FakeBridge()
+    const received: Array<{ requestId: string; value: unknown }> = []
+    fake.respondHandler = async (requestId, value) => {
+      received.push({ requestId, value })
+      return { accepted: true }
+    }
+    const gateway = new TuiGateway(asBridge(fake), new Notifications())
+    const { generation } = await hello(gateway)
+    await expect(gateway.handleRequest('tui.respond', {
+      sessionId,
+      generation,
+      requestId: 'approval-1',
+      interaction: { type: 'approval', approvalId: 'ap-1', outcome: 'allowed-once' },
+    }, '2')).resolves.toEqual({ accepted: true })
+    await expect(gateway.handleRequest('tui.respond', {
+      sessionId,
+      generation,
+      requestId: 'question-1',
+      interaction: { type: 'question', answers: { answers: [{ id: 'q1', selected: ['one'] }] } },
+    }, '3')).resolves.toEqual({ accepted: true })
+    expect(received).toEqual([
+      {
+        requestId: 'approval-1',
+        value: { sessionId, approvalId: 'ap-1', outcome: 'allowed-once' },
+      },
+      {
+        requestId: 'question-1',
+        value: {
+          sessionId,
+          answer: { answers: [{ id: 'q1', selected: ['one'] }] },
+        },
+      },
+    ])
+    gateway.dispose()
+  })
+
   it('folds an all-session control stream and can resume retained records', async () => {
     const fake = new FakeBridge()
+    const other = SessionId('sess-other')
     fake.muxFactory = async function* (signal) {
       yield {
         frame: { type: 'session/projection', sessionId, key: 'title', seq: 2, value: 'A' },
         requestId: 'projection',
+      }
+      yield {
+        frame: { type: 'session/queue', sessionId: other, items: [] },
+        requestId: 'queue',
       }
       await hang(signal)
     }
@@ -321,6 +418,11 @@ describe('TuiGateway', () => {
     await wait(5)
     expect(baseline.resumeClass).toBe('baseline-required')
     expect(gateway.controlPlane.store.snapshot(String(sessionId))?.projections.title?.value).toBe('A')
+    expect(gateway.controlPlane.store.snapshot(String(other))?.queue).toEqual([])
+    expect(notes.items.some(item =>
+      item.method === 'events.mux'
+      && (item.params as { sessionId?: string }).sessionId === String(other),
+    )).toBe(true)
     const before = notes.items.length
     const resume = await gateway.handleRequest('tui.subscribe', {
       generation, scope: 'session', sessionId, since: 1,
@@ -365,6 +467,19 @@ describe('serve / transport', () => {
     expect(fake.disposed).toBe(true)
   })
 
+  it('writes -32601 without a handler and keeps start/close idempotent', async () => {
+    const inbound = new PassThrough()
+    const outbound = new PassThrough()
+    const transport = new TuiLineTransport(inbound, outbound)
+    transport.start()
+    transport.start()
+    inbound.write(`${JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'missing' })}\n`)
+    const parsed = await readResult(outbound)
+    expect(parsed.ok && 'error' in parsed.message && parsed.message.error.code).toBe(-32601)
+    transport.close()
+    transport.close()
+  })
+
   it('maps handler failures and missing handlers onto JSON-RPC errors', async () => {
     const inbound = new PassThrough()
     const outbound = new PassThrough()
@@ -380,6 +495,19 @@ describe('serve / transport', () => {
     inbound.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'missing' })}\n`)
     const second = await readResult(outbound)
     expect(second.ok && 'error' in second.message && second.message.error.code).toBe(-32601)
+    transport.onRequest(async () => {
+      throw new TuiRpcError('capability-denied', 'denied')
+    })
+    inbound.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'denied' })}\n`)
+    const third = await readResult(outbound)
+    expect(third.ok && 'error' in third.message && third.message.error.data?.kind)
+      .toBe('capability-denied')
+    transport.onRequest(async () => {
+      throw 'plain failure'
+    })
+    inbound.write(`${JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'plain' })}\n`)
+    const fourth = await readResult(outbound)
+    expect(fourth.ok && 'error' in fourth.message && fourth.message.error.code).toBe(-32603)
     transport.close()
   })
 })

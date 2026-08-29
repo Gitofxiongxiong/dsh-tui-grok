@@ -238,6 +238,38 @@ describe('TuiHarnessBridge unary compatibility', () => {
     bridge.dispose()
   })
 
+  it('preserves projection-free cold rows and propagates cold inspect cancellation', async () => {
+    const f = fixture()
+    const coldRow = {
+      sessionId: SessionId('cold-recovery'),
+      updatedAt: 10,
+      running: false,
+      blank: true,
+    }
+    f.context.sessionController.list = async () => ({ items: [coldRow] })
+    f.context.sessionController.inspect = async (_sessionId, signal) => {
+      if (signal === undefined) throw new Error('missing cancellation signal')
+      await hang(signal)
+    }
+    const bridge = new TuiHarnessBridge(f.context)
+    const live = new AbortController()
+    await expect(bridge.call('session.list', {}, 'list-cold', live.signal)).resolves.toEqual({
+      ok: true,
+      value: { items: [coldRow] },
+    })
+
+    const pending = bridge.call('session.history', {
+      sessionId: coldRow.sessionId,
+    }, 'history-cold', live.signal)
+    live.abort(new Error('cancelled by client'))
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'cancelled' },
+    })
+    expect(f.calls.resolveAgent).toEqual([])
+    bridge.dispose()
+  })
+
   it('requires and forwards caller-owned prompt request ids', async () => {
     const f = fixture()
     const bridge = new TuiHarnessBridge(f.context)
@@ -265,6 +297,24 @@ describe('TuiHarnessBridge unary compatibility', () => {
     const signal = new AbortController().signal
     await expect(bridge.call('commands/list', { agentId: SessionId('session-1') }, '1', signal))
       .resolves.toMatchObject({ ok: true, value: [{ name: 'compact' }] })
+    await expect(bridge.call('commands/list', {}, '1-invalid', signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'bad-request' },
+    })
+    await expect(bridge.call('commands/execute', {
+      agentId: SessionId('session-1'), line: '/compact', images: [],
+    }, '1-execute', signal)).resolves.toEqual({
+      ok: true,
+      value: {
+        matched: true,
+        execution: { commandId: 'command-1', result: { kind: 'success', text: 'ok' } },
+      },
+    })
+    f.context.commands.execute = async () => undefined
+    await expect(bridge.call('commands/execute', {
+      agentId: SessionId('session-1'), line: '/missing',
+    }, '1-missing', signal)).resolves.toEqual({
+      ok: true, value: { matched: false, execution: null },
+    })
     await expect(bridge.call('fileReferences.list', {
       sessionId: SessionId('session-1'), query: 'main',
     }, '2', signal)).resolves.toMatchObject({
