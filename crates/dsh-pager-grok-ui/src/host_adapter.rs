@@ -1007,7 +1007,7 @@ impl GrokHostSnapshot {
             session_blank: control_plane
                 .and_then(|store| store.snapshot(session.session_id()))
                 .and_then(|snapshot| snapshot.blank)
-                .unwrap_or(transcript_len == 0),
+                .unwrap_or_else(|| fallback_session_blank(session)),
             agent_preset: control_plane
                 .and_then(|store| store.snapshot(session.session_id()))
                 .and_then(|snapshot| snapshot.agent_preset.clone()),
@@ -1244,6 +1244,19 @@ fn context_usage_snapshot(session: &SessionState) -> ContextUsageSnapshot {
         used_tokens,
         total_tokens,
     }
+}
+
+/// Mirror DSH's authoritative `sessionBlank` fold when the control-plane
+/// summary has not arrived yet. Standalone command/plugin records may render
+/// transcript rows, but only a model-loop `turn/start` begins a conversation.
+/// A paged history is not enough to prove that no older turn exists, so the
+/// fallback fails closed in that case.
+fn fallback_session_blank(session: &SessionState) -> bool {
+    !session.has_more()
+        && !session
+            .history()
+            .iter()
+            .any(|entry| entry.event.event_type == "turn/start")
 }
 
 fn turn_status_snapshot(
@@ -1836,6 +1849,77 @@ mod tests {
                 })),
             })
             .expect("running status");
+    }
+
+    fn history_event(event_type: &str, seq: i64, data: Value) -> HistoryEntry {
+        HistoryEntry {
+            event: SessionEvent {
+                event_type: event_type.into(),
+                seq,
+                time: seq as f64,
+                data,
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        }
+    }
+
+    #[test]
+    fn command_status_rows_do_not_end_blank_but_a_turn_or_paged_gap_does() {
+        let command_events = vec![
+            history_event(
+                "command/run",
+                0,
+                json!({"commandId": "cmd-1", "name": "plan", "source": {"kind": "user"}}),
+            ),
+            history_event(
+                "command/done",
+                1,
+                json!({"commandId": "cmd-1", "kind": "success", "text": "Plan mode on."}),
+            ),
+            history_event("plan/mode", 2, json!({"active": true})),
+        ];
+        let mut command_only = SessionState::new("command-only".into(), 1);
+        command_only
+            .install_initial(SessionHistoryValue {
+                events: command_events.clone(),
+                has_more: false,
+                projections: None,
+            })
+            .expect("command history");
+        let command_snapshot = GrokHostSnapshot::from_session(&command_only);
+        assert!(
+            command_snapshot
+                .transcript
+                .iter()
+                .any(|row| row.kind == DshRenderKind::Status),
+            "the regression requires a visible command status row"
+        );
+        assert!(command_snapshot.session_blank);
+
+        let mut started = SessionState::new("started".into(), 1);
+        let mut started_events = command_events.clone();
+        started_events.push(history_event("turn/start", 3, json!({"turn": 1})));
+        started
+            .install_initial(SessionHistoryValue {
+                events: started_events,
+                has_more: false,
+                projections: None,
+            })
+            .expect("started history");
+        assert!(!GrokHostSnapshot::from_session(&started).session_blank);
+
+        let mut paged = SessionState::new("paged".into(), 1);
+        paged
+            .install_initial(SessionHistoryValue {
+                events: command_events,
+                has_more: true,
+                projections: None,
+            })
+            .expect("paged history");
+        assert!(!GrokHostSnapshot::from_session(&paged).session_blank);
     }
 
     #[test]
