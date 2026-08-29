@@ -48,8 +48,8 @@ use crate::geometry::{
 };
 use crate::host_adapter::{
     AgentSnapshot, ChildTranscriptView, FeatureStatus, FileSearchRow, FileSearchSnapshot,
-    GrokHostSnapshot, MediaSnapshot, child_scrollback_from_history, media_snapshot_from_scrollback,
-    resume_picker_entries, resume_picker_search_hits,
+    GrokHostSnapshot, MediaSnapshot, TurnActivitySnapshot, child_scrollback_from_history,
+    media_snapshot_from_scrollback, resume_picker_entries, resume_picker_search_hits,
 };
 use crate::input::{
     PromptEditor,
@@ -290,10 +290,12 @@ pub fn run_interactive(mut transport: RpcTransport, mut session: SessionState) -
     diag::log(
         "interactive",
         format!(
-            "enter session={} generation={} history={}",
+            "enter session={} generation={} history={} no_color={} term_program={}",
             session.session_id(),
             session.generation(),
-            session.history().len()
+            session.history().len(),
+            std::env::var_os("NO_COLOR").is_some(),
+            std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unset".into()),
         ),
     );
     let mut terminal = TerminalSurface::enter()?;
@@ -636,6 +638,32 @@ struct UiState {
     frame_links: Vec<dsh_grok_inline::LinkSpan>,
     pending_copy: Option<String>,
     scheduler_stats: SchedulerStats,
+    /// Last privacy-safe diagnostic fingerprints written under
+    /// `DSH_PAGER_DIAG`. They prevent a 30fps animation from becoming a
+    /// 30fps disk writer while retaining every chrome state transition.
+    last_turn_chrome_diag: Option<String>,
+    last_transcript_chrome_diag: Option<String>,
+}
+
+fn log_state_change(previous: &mut Option<String>, stage: &str, current: String) {
+    if previous.as_deref() == Some(current.as_str()) {
+        return;
+    }
+    diag::log(stage, &current);
+    *previous = Some(current);
+}
+
+fn turn_activity_diag_name(activity: &TurnActivitySnapshot) -> &'static str {
+    match activity {
+        TurnActivitySnapshot::Thinking => "thinking",
+        TurnActivitySnapshot::Responding => "responding",
+        TurnActivitySnapshot::ToolRunning { .. } => "tool-running",
+        TurnActivitySnapshot::Compacting => "compacting",
+        TurnActivitySnapshot::Retrying { .. } => "retrying",
+        TurnActivitySnapshot::WritingToolCall => "writing-tool-call",
+        TurnActivitySnapshot::Waiting => "waiting",
+        TurnActivitySnapshot::WaitingForInput => "waiting-for-input",
+    }
 }
 
 impl UiState {
@@ -1521,6 +1549,23 @@ impl UiState {
             let started_at = *self.rail_wave_started_at.get_or_insert(now);
             animation_tick(now.saturating_duration_since(started_at))
         };
+        if diag::log_path().is_some() {
+            log_state_change(
+                &mut self.last_turn_chrome_diag,
+                "turn-chrome",
+                format!(
+                    "session_running={} visible={} activity={} pending_input={} area={},{},{},{}",
+                    snapshot.running,
+                    snapshot.turn_status.visible,
+                    turn_activity_diag_name(&snapshot.turn_status.activity),
+                    snapshot.turn_status.pending_user_input,
+                    agent_layout.turn_status.x,
+                    agent_layout.turn_status.y,
+                    agent_layout.turn_status.width,
+                    agent_layout.turn_status.height,
+                ),
+            );
+        }
         let turn_status_output = if snapshot.turn_status.visible {
             render_turn_status(
                 frame.buffer_mut(),
@@ -1936,10 +1981,43 @@ impl UiState {
             );
             total_height = self.scrollback_state.total_height();
             scroll_top = self.scrollback_state.scroll_offset();
-            for paint in self
+            let paints = self
                 .scrollback_state
-                .visible_lines(&mut self.scrollback_pane, scrollback)
-            {
+                .visible_lines(&mut self.scrollback_pane, scrollback);
+            if diag::log_path().is_some() {
+                let mut running_entries = 0usize;
+                let mut running_reasoning_entries = 0usize;
+                for entry in scrollback.render_entry_refs() {
+                    if entry.finish != dsh_pager::DshRenderFinish::Running {
+                        continue;
+                    }
+                    running_entries = running_entries.saturating_add(1);
+                    if entry
+                        .content
+                        .blocks
+                        .iter()
+                        .any(|block| matches!(block, dsh_pager::DshRenderBlock::Reasoning { .. }))
+                    {
+                        running_reasoning_entries = running_reasoning_entries.saturating_add(1);
+                    }
+                }
+                let animated_visible_lines = paints
+                    .iter()
+                    .filter(|paint| paint.accent.is_some_and(|accent| accent.animated))
+                    .count();
+                log_state_change(
+                    &mut self.last_transcript_chrome_diag,
+                    "transcript-chrome",
+                    format!(
+                        "running_entries={running_entries} running_reasoning_entries={running_reasoning_entries} animated_visible_lines={animated_visible_lines} pane_animating={} visible_lines={} follow={} viewport_height={}",
+                        self.scrollback_pane.is_animating(),
+                        paints.len(),
+                        self.scrollback_state.is_following(),
+                        self.scrollback_state.viewport_height(),
+                    ),
+                );
+            }
+            for paint in paints {
                 let text = paint.copy_text.clone();
                 if let Some(timestamp) = self.scrollback_pane.paint_buffer_line(
                     frame.buffer_mut(),

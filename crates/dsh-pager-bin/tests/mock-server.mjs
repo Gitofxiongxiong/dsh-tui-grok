@@ -3,6 +3,7 @@
  * Protocol-accurate stdio mock for hello, PR4 load barrier, and PR5 paging.
  */
 import { createInterface } from 'node:readline'
+import { appendFileSync } from 'node:fs'
 
 const sessionId = 'session-mock'
 let sessionTitle = 'Mock session'
@@ -12,6 +13,13 @@ let currentPermission = 'workspace-write'
 let controlsSeq = 20
 let scrollStreamTimer = null
 let scrollStreamSeq = 3
+let chromeStreamTimer = null
+const mockDiagPath = process.env.DSH_MOCK_DIAG?.trim()
+
+function traceMock(stage, fields = '') {
+  if (!mockDiagPath) return
+  appendFileSync(mockDiagPath, `${Date.now()} ${stage}${fields ? ` ${fields}` : ''}\n`)
+}
 
 function controlProjections() {
   return {
@@ -46,10 +54,24 @@ function emitControlProjections() {
 }
 
 function emitSessionEvent(event) {
+  const chunkType = event.data?.chunk?.type
+  traceMock(
+    'session-event',
+    `seq=${String(event.seq)} type=${event.type}${chunkType ? ` chunk=${chunkType}` : ''}`,
+  )
   write({
     jsonrpc: '2.0',
     method: 'events.mux',
     params: { type: 'session/event', sessionId, event },
+  })
+}
+
+function emitHostStatus(running) {
+  traceMock('host-status', `running=${String(running)}`)
+  write({
+    jsonrpc: '2.0',
+    method: 'events.host',
+    params: { type: 'host/session-status', sessionId, running },
   })
 }
 
@@ -127,6 +149,106 @@ function startScrollStream() {
       params: { type: 'host/session-status', sessionId, running: false },
     })
   }, 30)
+}
+
+/**
+ * A deliberately slow, protocol-shaped reasoning -> response stream for the
+ * browser terminal chrome gate. It exposes both running phases long enough
+ * for Playwright to capture multiple xterm.js frames, then closes through the
+ * same step/turn/status lifecycle as the real Harness. No fixture text is
+ * written to the optional diagnostic log.
+ */
+function startChromeStream() {
+  if (chromeStreamTimer !== null) return
+  let tick = 0
+  let phase = 'reasoning'
+
+  scrollStreamSeq += 1
+  emitSessionEvent({ seq: scrollStreamSeq, time: Date.now(), type: 'turn/start', data: { turn: 3 } })
+  scrollStreamSeq += 1
+  emitSessionEvent({
+    seq: scrollStreamSeq,
+    time: Date.now(),
+    type: 'user/message',
+    surfaceOp: 'append',
+    data: {
+      id: 'user-chrome-smoke',
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'chrome stream smoke' }],
+    },
+  })
+  emitHostStatus(true)
+  scrollStreamSeq += 1
+  emitSessionEvent({
+    seq: scrollStreamSeq,
+    time: Date.now(),
+    type: 'assistant/chunk',
+    data: {
+      turn: 3,
+      step: 0,
+      chunk: { type: 'block-start', index: 0, blockType: 'reasoning' },
+    },
+  })
+
+  chromeStreamTimer = setInterval(() => {
+    tick += 1
+    if (tick === 18) {
+      phase = 'responding'
+      scrollStreamSeq += 1
+      emitSessionEvent({
+        seq: scrollStreamSeq,
+        time: Date.now(),
+        type: 'assistant/chunk',
+        data: {
+          turn: 3,
+          step: 0,
+          chunk: { type: 'block-start', index: 1, blockType: 'text' },
+        },
+      })
+    }
+
+    scrollStreamSeq += 1
+    emitSessionEvent({
+      seq: scrollStreamSeq,
+      time: Date.now(),
+      type: 'assistant/chunk',
+      data: {
+        turn: 3,
+        step: 0,
+        chunk: phase === 'reasoning'
+          ? {
+              type: 'reasoning-delta',
+              index: 0,
+              text: `reasoning diagnostic row ${String(tick).padStart(2, '0')}\n`,
+            }
+          : {
+              type: 'text-delta',
+              index: 1,
+              text: `response diagnostic row ${String(tick).padStart(2, '0')}\n`,
+            },
+      },
+    })
+
+    if (tick < 42) return
+    clearInterval(chromeStreamTimer)
+    chromeStreamTimer = null
+    scrollStreamSeq += 1
+    emitSessionEvent({
+      seq: scrollStreamSeq,
+      time: Date.now(),
+      type: 'step/end',
+      data: { turn: 3, step: 0 },
+    })
+    scrollStreamSeq += 1
+    emitSessionEvent({
+      seq: scrollStreamSeq,
+      time: Date.now(),
+      type: 'turn/end',
+      data: { turn: 3, reason: { kind: 'completed' } },
+    })
+    emitHostStatus(false)
+  }, 120)
 }
 const events = [
   { seq: 0, time: 1, type: 'turn/start', data: { turn: 1 } },
@@ -567,6 +689,11 @@ rl.on('line', (line) => {
     }
     if (promptText === 'stream scroll smoke') {
       startScrollStream()
+      success(message.id, { accepted: true })
+      return
+    }
+    if (promptText === 'chrome stream smoke') {
+      startChromeStream()
       success(message.id, { accepted: true })
       return
     }
