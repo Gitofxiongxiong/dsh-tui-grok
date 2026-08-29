@@ -237,19 +237,28 @@ git fetch origin --prune
 | 创建/更新 PR | 运行 | 不运行 | 不运行 | 无 |
 | push <code>main</code> | 运行 | 不运行 | 不运行 | 无 |
 | push 普通开发分支 | 默认不运行 | 不运行 | 不运行 | 无 |
-| push <code>ci/trust-smoke</code> | 默认不运行 | 不运行 | 运行 trust smoke | 发布 <code>tui-protocol</code> 预发布包 |
-| push <code>v*</code> Tag | 不运行 | 构建并上传原生 tarball artifact | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
+| push <code>ci/trust-smoke</code> | 默认不运行 | 不运行 | 不运行 | 无 |
+| push <code>v*</code> Tag | 不运行 | 构建并上传原生 tarball artifact | 不运行 | 无 npm publish |
 | 手动运行 <code>release-native</code> | 不变 | 构建 artifact | 不运行 | 无 npm publish |
-| 手动运行 <code>publish</code> | 不变 | 不运行 | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
+| 手动运行 <code>publish-smoke</code> 并输入确认值 | 不变 | 不运行 | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
 
 必须特别注意：
 
 - <code>release.yml</code> 当前只打包 artifact，**不执行 npm publish**。
-- <code>publish.yml</code> 当前是 Trusted Publishing 烟测，会发布
-  <code>@dsh-pager-grok/tui-protocol@0.1.1-trust.&lt;run_id&gt;</code> 并使用
-  <code>trust-test</code> dist-tag；它不是 native → runtime → CLI 的正式发布链。
-- 因此，在 <code>publish.yml</code> 改造为正式发布门禁前，**push v* Tag 会产生
-  公网预发布包副作用**。不得把当前 Tag workflow 误称为完整正式发版。
+- <code>publish.yml</code> 只保留手动 <code>workflow_dispatch</code>；必须输入
+  <code>publish-trust-test</code> 才会继续。它会发布
+  <code>@dsh-pager-grok/tui-protocol@0.1.1-trust.&lt;run_id&gt;.&lt;run_attempt&gt;</code>
+  并使用 <code>trust-test</code> dist-tag。
+- <code>main</code>、开发分支和 <code>v*</code> Tag 的 push 都不会触发
+  <code>publish.yml</code>。该手动烟测仍不是 native → runtime → CLI 的
+  正式发布链。
+
+手动烟测可从 GitHub Actions 页面运行，或使用：
+
+~~~bash
+gh workflow run publish.yml -f confirm=publish-trust-test
+gh run list --workflow publish.yml --limit 5
+~~~
 
 ## 7. 正式发布规范
 
@@ -334,7 +343,8 @@ git push origin refs/tags/vX.Y.Z
 - Tag 必须指向已合并且 CI 通过的 <code>main</code> commit；
 - Tag 名必须与 package/Cargo 版本一致；
 - 只 push 本次单个 Tag，不使用 <code>git push --tags</code>；
-- 执行前必须再次确认当前 <code>publish.yml</code> 的外部副作用。
+- 当前 Tag 只触发 <code>release.yml</code> 构建 artifact，不触发 npm publish；
+  后续正式发布 workflow 改变该契约时，必须在同一 PR 更新本文。
 
 ### 7.5 发布顺序
 
@@ -354,9 +364,9 @@ git push origin refs/tags/vX.Y.Z
 gh release create vX.Y.Z --verify-tag --generate-notes
 ~~~
 
-直到 <code>publish.yml</code> 实现上述完整链路、版本一致校验和 environment 批准门禁
-之前，当前 workflow 只能称为“原生 artifact + Trusted Publishing 烟测”，不能称为
-正式发布。
+直到新的正式发布 workflow 实现上述完整链路、版本一致校验和
+environment 批准门禁之前，当前 workflow 只能称为“Tag 原生 artifact +
+手动 Trusted Publishing 烟测”，不能称为正式发布。
 
 ### 7.6 发布后检查
 

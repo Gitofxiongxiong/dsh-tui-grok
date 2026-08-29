@@ -1,12 +1,19 @@
-# Trusted Publishing target for npm OIDC.
-# Bind every @dsh-pager-grok/* package on npmjs.com to this filename.
-name: publish
+# Manual Trusted Publishing smoke target for npm OIDC.
+# Bind @dsh-pager-grok/tui-protocol on npmjs.com to this filename.
+# This workflow publishes a public prerelease; it must never run on push.
+name: publish-smoke
 
 on:
-  push:
-    tags: ["v*"]
-    branches: [ci/trust-smoke]
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type publish-trust-test to publish a public npm prerelease"
+        required: true
+        type: string
+
+concurrency:
+  group: npm-trust-smoke
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -20,6 +27,14 @@ jobs:
       id-token: write
       contents: read
     steps:
+      - name: confirm public prerelease
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "${CONFIRM}" != "publish-trust-test" ]; then
+            echo "::error::confirmation must equal publish-trust-test"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -37,12 +52,14 @@ jobs:
           npm -v
       - name: publish prerelease via OIDC
         working-directory: packages/dsh-tui-protocol
+        env:
+          TRUST_VERSION: 0.1.1-trust.${{ github.run_id }}.${{ github.run_attempt }}
         run: |
           set -euo pipefail
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
           test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
           npm -v
           npm pkg delete private
-          npm version "0.1.1-trust.${GITHUB_RUN_ID}" --no-git-tag-version
+          npm version "${TRUST_VERSION}" --no-git-tag-version
           npm publish --access public --tag trust-test
-          echo "published @dsh-pager-grok/tui-protocol@0.1.1-trust.${GITHUB_RUN_ID} tag=trust-test"
+          echo "published @dsh-pager-grok/tui-protocol@${TRUST_VERSION} tag=trust-test"
