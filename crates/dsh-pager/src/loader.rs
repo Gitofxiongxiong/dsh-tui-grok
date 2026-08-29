@@ -1,13 +1,13 @@
 use dsh_pager_protocol::{
     AcceptedResult, AgentPresetListValue, AgentPresetSelectValue, ApiResult, CommandDescriptor,
-    FileReferencesListValue, PromptContentPart, PromptMode, QueueAction, SessionCancelParams,
-    SessionCreateValue, SessionForkParams, SessionForkResult, SessionHistoryValue,
-    SessionListValue, SessionModelsValue, SessionPromptParams, SessionPromptResult,
-    SessionRenameParams, SessionRenameResult, SessionSearchValue, SessionSelectModelValue,
-    SessionUpdateQueueParams, SubagentAddress, SubagentHistoryValue, SubagentInterruptParams,
-    SubagentInterruptResult, SubagentListValue, SubagentMode, SubagentPromptParams,
-    SubagentPromptResult, TuiAttachParams, TuiAttachResult, TuiDetachParams, TuiHelloResult,
-    TuiInteractionResponse, TuiRespondParams, TuiRespondResult, TuiSubscribeParams,
+    CommandExecuteValue, FileReferencesListValue, PromptContentPart, PromptMode, QueueAction,
+    SessionCancelParams, SessionCreateValue, SessionForkParams, SessionForkResult,
+    SessionHistoryValue, SessionListValue, SessionModelsValue, SessionPromptParams,
+    SessionPromptResult, SessionRenameParams, SessionRenameResult, SessionSearchValue,
+    SessionSelectModelValue, SessionUpdateQueueParams, SubagentAddress, SubagentHistoryValue,
+    SubagentInterruptParams, SubagentInterruptResult, SubagentListValue, SubagentMode,
+    SubagentPromptParams, SubagentPromptResult, TuiAttachParams, TuiAttachResult, TuiDetachParams,
+    TuiHelloResult, TuiInteractionResponse, TuiRespondParams, TuiRespondResult, TuiSubscribeParams,
     TuiSubscribeResult, TuiSubscribeScope, WorkspaceArchiveSessionParams,
     WorkspaceArchiveSessionValue, WorkspaceInsertBeforeParams, WorkspaceInsertSessionBeforeParams,
     WorkspaceInsertSessionBeforeValue, WorkspaceOrderValue,
@@ -821,6 +821,23 @@ pub fn list_commands(
     session_id: &str,
 ) -> PagerResult<Vec<CommandDescriptor>> {
     api_call(transport, "commands/list", json!({ "agentId": session_id }))
+}
+
+/// Execute one official DSH slash command without submitting it to the model.
+pub fn execute_command(
+    transport: &mut RpcTransport,
+    session_id: &str,
+    line: &str,
+) -> PagerResult<CommandExecuteValue> {
+    api_call(
+        transport,
+        "commands/execute",
+        json!({
+            "agentId": session_id,
+            "line": line,
+            "images": [],
+        }),
+    )
 }
 
 /// Recompose a blank session onto another roster preset.

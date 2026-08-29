@@ -13,6 +13,8 @@ type TuiRpcMethodMap = RpcMethodMap & {
   'fileReferences.list': unknown
   /** DSH CommandRuntime Remote endpoint, adapted onto the native stdio carrier. */
   'commands/list': unknown
+  /** DSH CommandRuntime execution endpoint; never falls through to session.prompt. */
+  'commands/execute': unknown
 }
 
 /**
@@ -43,6 +45,7 @@ export const API_PROXY_METHOD_SET = {
   'host.openPath': true,
   'fileReferences.list': true,
   'commands/list': true,
+  'commands/execute': true,
   'workspace.list': true,
   'workspace.create': true,
   'workspace.rename': true,

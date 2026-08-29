@@ -19,8 +19,8 @@ import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
 export interface TuiDispatchExtensions {
   fileReferences?: FileReferenceService
   resolveAgent?: (sessionId: SessionId) => Promise<{ agent: Agent } | { error: { code: string; message: string; details?: unknown } }>
-  /** Official DSH per-agent command directory; the TUI never owns command semantics. */
-  commands?: Pick<CommandRuntime, 'list'>
+  /** Official DSH per-agent command runtime; the TUI never owns command semantics. */
+  commands?: Pick<CommandRuntime, 'list' | 'execute'>
 }
 
 /**
@@ -37,12 +37,16 @@ export async function dispatchUnary(
   params: unknown,
   rpcId: string,
   extensions: TuiDispatchExtensions = {},
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<unknown> {
   if (method === 'fileReferences.list') {
     return await dispatchFileReferences(params, rpcId, extensions)
   }
   if (method === 'commands/list') {
     return await dispatchCommandsList(params, extensions)
+  }
+  if (method === 'commands/execute') {
+    return await dispatchCommandsExecute(params, extensions, signal)
   }
   const handler = toFetchHandler(api)
   const response = await handler.fetch(new Request(`https://tui.local/api/${method}`, {
@@ -61,6 +65,64 @@ export async function dispatchUnary(
   }
   const json = await response.json() as ServerResponse
   return json.result
+}
+
+async function dispatchCommandsExecute(
+  params: unknown,
+  extensions: TuiDispatchExtensions,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (extensions.commands === undefined || extensions.resolveAgent === undefined) {
+    return {
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'command execution is unsupported by this external TUI composition',
+        details: {},
+      },
+    }
+  }
+  if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+    return { ok: false, error: { code: 'invalid-request', message: 'invalid command execute params', details: {} } }
+  }
+  const value = params as { agentId?: unknown; line?: unknown; images?: unknown }
+  if (typeof value.agentId !== 'string' || value.agentId.length === 0) {
+    return { ok: false, error: { code: 'invalid-request', message: 'agentId is required', details: {} } }
+  }
+  if (typeof value.line !== 'string' || value.line.length === 0) {
+    return { ok: false, error: { code: 'invalid-request', message: 'command line is required', details: {} } }
+  }
+  if (value.images !== undefined && (!Array.isArray(value.images) || value.images.length > 0)) {
+    return {
+      ok: false,
+      error: {
+        code: 'invalid-request',
+        message: 'native TUI command image attachments are not supported',
+        details: {},
+      },
+    }
+  }
+  const resolved = await extensions.resolveAgent(brandSessionId(value.agentId))
+  if ('error' in resolved) return { ok: false, error: resolved.error }
+  try {
+    const execution = await extensions.commands.execute(resolved.agent, value.line, [], signal)
+    return {
+      ok: true,
+      value: {
+        matched: execution !== undefined,
+        execution: execution ?? null,
+      },
+    }
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      error: {
+        code: signal.aborted ? 'cancelled' : 'internal',
+        message: `command execution failed: ${error instanceof Error ? error.message : String(error)}`,
+        details: {},
+      },
+    }
+  }
 }
 
 async function dispatchCommandsList(

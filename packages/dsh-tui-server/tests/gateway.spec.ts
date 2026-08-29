@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { FileReferenceService } from '@deepseek-ai/dsh-file-reference'
 import type { ApiProxy, MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -140,6 +141,16 @@ describe('TuiGateway', () => {
             { name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', images: true } },
           ]
         },
+        execute: async (received, line, images, signal) => {
+          expect(received).toBe(agent)
+          expect(images).toEqual([])
+          expect(signal.aborted).toBe(false)
+          if (line === '/missing') return undefined
+          return {
+            commandId: CommandId('cmd-test-1'),
+            result: { kind: 'success', text: `ran ${line}` },
+          }
+        },
       },
     })
     await hello(gateway)
@@ -153,7 +164,62 @@ describe('TuiGateway', () => {
       })
     await expect(gateway.handleRequest('commands/list', {}, 'commands-invalid'))
       .resolves.toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    await expect(gateway.handleRequest('commands/execute', {
+      agentId: sessionId,
+      line: '/permission danger-full-access',
+      images: [],
+    }, 'command-execute')).resolves.toEqual({
+      ok: true,
+      value: {
+        matched: true,
+        execution: {
+          commandId: 'cmd-test-1',
+          result: { kind: 'success', text: 'ran /permission danger-full-access' },
+        },
+      },
+    })
+    await expect(gateway.handleRequest('commands/execute', {
+      agentId: sessionId,
+      line: '/missing',
+    }, 'command-missing')).resolves.toEqual({
+      ok: true,
+      value: { matched: false, execution: null },
+    })
+    await expect(gateway.handleRequest('commands/execute', {
+      agentId: sessionId,
+      line: '/plan',
+      images: [{}],
+    }, 'command-images')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'invalid-request' },
+    })
     gateway.dispose()
+  })
+
+  it('cancels an executing command when the TUI connection is disposed', async () => {
+    let started!: () => void
+    const running = new Promise<void>(resolve => { started = resolve })
+    const gateway = new TuiGateway(fakeApi(), new Notifications(), {
+      resolveAgent: async () => ({ agent: {} as Agent }),
+      commands: {
+        list: () => [],
+        execute: async (_agent, _line, _images, signal) => {
+          started()
+          await hang(signal)
+        },
+      },
+    })
+    await hello(gateway)
+    const pending = gateway.handleRequest('commands/execute', {
+      agentId: sessionId,
+      line: '/compact',
+    }, 'command-cancel')
+    await running
+    gateway.dispose()
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'cancelled' },
+    })
   })
 
   it('rejects a mismatched protocol version', async () => {
@@ -596,6 +662,9 @@ describe('plugin apply', () => {
       }
       list(): readonly [] {
         return []
+      }
+      execute(): undefined {
+        return undefined
       }
     }
     await ctx.plugin(FakeAgents)

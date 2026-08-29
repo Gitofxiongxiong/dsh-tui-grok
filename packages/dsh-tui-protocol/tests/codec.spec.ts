@@ -216,6 +216,7 @@ describe('classifyMethod', () => {
     expect(isApiProxyMethod('llm.models')).toBe(true)
     expect(isApiProxyMethod('fileReferences.list')).toBe(true)
     expect(isApiProxyMethod('commands/list')).toBe(true)
+    expect(isApiProxyMethod('commands/execute')).toBe(true)
     expect(isApiProxyMethod('tui.hello')).toBe(false)
     expect(Object.keys(API_PROXY_METHOD_SET).length).toBeGreaterThan(20)
   })

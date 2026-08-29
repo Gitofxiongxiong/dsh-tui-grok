@@ -18,7 +18,7 @@ export interface TuiServeOptions extends TuiLineTransportOptions {
   /** Public Harness session-to-agent resolver used by file-reference lookup. */
   resolveAgent?: TuiDispatchExtensions['resolveAgent']
   /** Official DSH per-agent command directory. */
-  commands?: Pick<CommandRuntime, 'list'>
+  commands?: Pick<CommandRuntime, 'list' | 'execute'>
 }
 
 /**

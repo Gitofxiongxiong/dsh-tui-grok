@@ -21,7 +21,9 @@ use dsh_pager::{
     RpcTransport, SessionState, SessionUpdate, create_blank_session, load_session_id,
     peek_session_tail, repair_tail,
 };
-use dsh_pager_protocol::{CommandDescriptor, PromptMode, QueueAction, TuiInteractionResponse};
+use dsh_pager_protocol::{
+    CommandDescriptor, CommandResultKind, PromptMode, QueueAction, TuiInteractionResponse,
+};
 use dsh_pager_render::{TerminalCapabilities, TerminalSurface};
 use ratatui::{
     Frame,
@@ -272,6 +274,12 @@ struct PendingQueueMutation {
 struct PendingPermissionSwitch {
     operation: OperationKey,
     target: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingHostCommand {
+    operation: OperationKey,
+    line: String,
 }
 
 #[derive(Debug, Clone)]
@@ -642,6 +650,7 @@ struct UiState {
     prompt: PromptEditor,
     prompt_renderer: GrokPromptRenderer,
     pending_permission: Option<PendingPermissionSwitch>,
+    pending_host_command: Option<PendingHostCommand>,
     queue_selected_id: Option<String>,
     queue_editing: bool,
     queue_editor: PromptEditor,
@@ -849,6 +858,7 @@ impl UiState {
         let subject = match &completion.effect {
             UiEffect::CancelSession { .. } => "Cancel session",
             UiEffect::SubmitPrompt { .. } => "Prompt",
+            UiEffect::ExecuteCommand { .. } => "Command",
             UiEffect::ListSessions { .. } => "Session list",
             UiEffect::SearchSessions { .. } => "Session search",
             UiEffect::QueueMutation { .. } => "Queue update",
@@ -985,9 +995,7 @@ impl UiState {
                 pending.request_id == completion.receipt.operation.request_id
             });
             if matches_first {
-                if completion.receipt.status == UiEffectStatus::Accepted
-                    && !completion.command_handled
-                {
+                if completion.receipt.status == UiEffectStatus::Accepted {
                     // Bridge the small window before the control-plane
                     // projection publishes `blank=false`.
                     self.preset_locked_locally = true;
@@ -1002,30 +1010,78 @@ impl UiState {
                     self.prompt.reset();
                     self.slash.reset();
                 }
-                if prompt_unchanged || completion.command_handled {
-                    self.status = completion
-                        .command_result_text
-                        .clone()
-                        .or_else(|| Some(prompt_admission_message(&completion.receipt.status)));
+                if prompt_unchanged {
+                    self.status = Some(prompt_admission_message(&completion.receipt.status));
                 }
             }
+        }
+        if let UiEffect::ExecuteCommand { line, .. } = &completion.effect {
+            let matches_pending = self.pending_host_command.as_ref().is_some_and(|pending| {
+                pending.operation.request_id == completion.receipt.operation.request_id
+            });
+            if !matches_pending {
+                self.status = Some("Ignored stale Command completion".into());
+                return;
+            }
+            self.pending_host_command = None;
+            if completion.receipt.status == UiEffectStatus::Accepted {
+                if self.prompt.text() == line {
+                    self.record_prompt_history(line);
+                    self.prompt.reset();
+                    self.slash.reset();
+                }
+                self.status = Some(
+                    completion
+                        .command_execution
+                        .as_ref()
+                        .and_then(|execution| execution.result.text.clone())
+                        .unwrap_or_else(|| format!("Command completed: {line}")),
+                );
+            } else {
+                self.commands_for_session = None;
+                self.status = Some(if completion.receipt.status == UiEffectStatus::Rejected {
+                    format!("Unknown or unavailable slash command: {line}")
+                } else {
+                    receipt_status_message(&completion.receipt, subject)
+                });
+            }
+            return;
         }
         if let UiEffect::SetPermissionPreset { preset, .. } = &completion.effect {
             let matches_pending = self.pending_permission.as_ref().is_some_and(|pending| {
                 pending.operation.request_id == completion.receipt.operation.request_id
             });
             if matches_pending {
-                if matches!(
-                    completion.receipt.status,
-                    UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
-                ) {
-                    self.status = Some(format!(
-                        "Permission → {preset}; waiting for host projection"
-                    ));
-                } else {
-                    self.pending_permission = None;
+                match completion.receipt.status {
+                    UiEffectStatus::Accepted => match completion.command_execution.as_ref() {
+                        Some(execution) if execution.result.kind == CommandResultKind::Success => {
+                            self.status = Some(format!(
+                                "Permission → {preset}; waiting for host projection"
+                            ));
+                        }
+                        Some(execution) => {
+                            self.pending_permission = None;
+                            self.status = Some(
+                                execution
+                                    .result
+                                    .text
+                                    .clone()
+                                    .unwrap_or_else(|| "Permission command failed".into()),
+                            );
+                        }
+                        None => {
+                            self.pending_permission = None;
+                            self.status = Some("Permission command returned no result".into());
+                        }
+                    },
+                    _ => {
+                        self.pending_permission = None;
+                        self.commands_for_session = None;
+                        self.status = Some(receipt_status_message(&completion.receipt, subject));
+                    }
                 }
             }
+            return;
         }
         if let UiEffect::ListAgentPresets { revision, .. } = &completion.effect {
             if completion.receipt.status == UiEffectStatus::Accepted {
@@ -2128,6 +2184,8 @@ impl UiState {
         self.pending_agent_preset = preset;
         self.pending_agent_preset_switch = None;
         self.pending_first_prompt = None;
+        self.pending_host_command = None;
+        self.pending_permission = None;
         self.preset_locked_locally = false;
     }
 
@@ -2138,6 +2196,8 @@ impl UiState {
             self.pending_agent_preset = snapshot.agent_preset.clone();
             self.pending_agent_preset_switch = None;
             self.pending_first_prompt = None;
+            self.pending_host_command = None;
+            self.pending_permission = None;
             self.preset_locked_locally = false;
             self.preset_picker.close();
         }
@@ -2157,6 +2217,8 @@ impl UiState {
             && !self.preset_locked_locally
             && self.pending_agent_preset_switch.is_none()
             && self.pending_first_prompt.is_none()
+            && self.pending_host_command.is_none()
+            && self.pending_permission.is_none()
     }
 
     fn preset_fixed_message(&self) -> String {
@@ -2164,6 +2226,10 @@ impl UiState {
             "Agent preset is switching; wait for the Host before sending".into()
         } else if self.pending_first_prompt.is_some() {
             "First prompt is pending; preset selection waits for the Host result".into()
+        } else if self.pending_host_command.is_some() {
+            "A slash command is pending; preset selection waits for the Host result".into()
+        } else if self.pending_permission.is_some() {
+            "Permission is switching; preset selection waits for the Host result".into()
         } else {
             "Agent preset is fixed for this conversation; use /new to choose another".into()
         }
@@ -2793,9 +2859,7 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::SubmitPrompt => {
-                if !self.dispatch_local_slash_command(transport, session) {
-                    self.submit_prompt(transport, session)?;
-                }
+                self.dispatch_prompt_submission(transport, session)?;
                 Ok(false)
             }
             ShellAction::PromptKey(key) => {
@@ -3583,6 +3647,81 @@ impl UiState {
         }
     }
 
+    fn dispatch_prompt_submission(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        if self.dispatch_local_slash_command(transport, session) {
+            return Ok(());
+        }
+        let line = self.prompt.text().to_string();
+        if !line.starts_with('/') {
+            return self.submit_prompt(transport, session);
+        }
+        if crate::slash::is_host_command(&line, &self.command_catalog) {
+            return self.submit_host_command(transport, session, line);
+        }
+
+        let command = crate::slash::parse_invocation(&line)
+            .map(|invocation| format!("/{}", invocation.token))
+            .unwrap_or_else(|| line.clone());
+        self.status = Some(format!(
+            "Unknown or unavailable slash command: {command}; refreshing command list"
+        ));
+        self.request_commands(transport, session);
+        Ok(())
+    }
+
+    fn submit_host_command(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &SessionState,
+        line: String,
+    ) -> PagerResult<()> {
+        if self.pending_agent_preset_switch.is_some() {
+            self.status =
+                Some("Agent preset is switching; wait for the Host before sending".into());
+            return Ok(());
+        }
+        if self.pending_first_prompt.is_some() {
+            self.status = Some("First prompt is still waiting for Host admission".into());
+            return Ok(());
+        }
+        if let Some(pending) = self.pending_host_command.as_ref() {
+            self.status = Some(format!(
+                "Command is still running: {} ({})",
+                pending.line, pending.operation.request_id
+            ));
+            return Ok(());
+        }
+        if let Some(pending) = self.pending_permission.as_ref() {
+            self.status = Some(format!(
+                "Permission switch to {} is still running ({})",
+                pending.target, pending.operation.request_id
+            ));
+            return Ok(());
+        }
+        let receipt = self.submit_effect(
+            transport,
+            UiIntent::ExecuteCommand { line: line.clone() },
+            &UiContext::from_session(session),
+        )?;
+        if matches!(
+            receipt.status,
+            UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+        ) {
+            self.pending_host_command = Some(PendingHostCommand {
+                operation: receipt.operation,
+                line: line.clone(),
+            });
+            self.status = Some(format!("Running command: {line}"));
+        } else {
+            self.status = Some(receipt_status_message(&receipt, "Command"));
+        }
+        Ok(())
+    }
+
     fn set_timestamps_enabled(&mut self, enabled: bool) {
         self.timestamps_enabled = Some(enabled);
         self.prompt.reset();
@@ -3904,6 +4043,20 @@ impl UiState {
             self.status = Some("First prompt is still waiting for Host admission".into());
             return Ok(());
         }
+        if let Some(pending) = self.pending_host_command.as_ref() {
+            self.status = Some(format!(
+                "Command is still running: {} ({})",
+                pending.line, pending.operation.request_id
+            ));
+            return Ok(());
+        }
+        if let Some(pending) = self.pending_permission.as_ref() {
+            self.status = Some(format!(
+                "Permission switch to {} is still running ({})",
+                pending.target, pending.operation.request_id
+            ));
+            return Ok(());
+        }
         let text = self.prompt.text().to_string();
         if text.trim().is_empty() {
             self.status = Some("Prompt is empty".into());
@@ -4006,9 +4159,7 @@ impl UiState {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if self.slash.typed_complete_selected(self.prompt.text()) {
                     self.slash.close();
-                    if !self.dispatch_local_slash_command(transport, session) {
-                        self.submit_prompt(transport, session)?;
-                    }
+                    self.dispatch_prompt_submission(transport, session)?;
                     return Ok(true);
                 }
                 let chains = self.slash.selected_chains();
@@ -4020,9 +4171,7 @@ impl UiState {
                         return Ok(true);
                     }
                     self.slash.close();
-                    if !self.dispatch_local_slash_command(transport, session) {
-                        self.submit_prompt(transport, session)?;
-                    }
+                    self.dispatch_prompt_submission(transport, session)?;
                 }
                 return Ok(true);
             }
@@ -4940,6 +5089,13 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &SessionState,
     ) -> PagerResult<()> {
+        if let Some(pending) = self.pending_host_command.as_ref() {
+            self.status = Some(format!(
+                "Command is still running: {} ({})",
+                pending.line, pending.operation.request_id
+            ));
+            return Ok(());
+        }
         if let Some(pending) = self.pending_permission.as_ref() {
             self.status = Some(format!(
                 "Permission switch to {} is already pending ({})",
@@ -5403,8 +5559,8 @@ mod tests {
     use super::render_transcript_selection_box;
     use super::steer_capability_available;
     use super::{
-        MediaPreviewBuffer, NOTIFICATION_BUDGET, TranscriptViewportState, UiState,
-        agent_overlay_close_click, agent_overlay_key_closes, render_agent_tasks_content,
+        MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand, TranscriptViewportState,
+        UiState, agent_overlay_close_click, agent_overlay_key_closes, render_agent_tasks_content,
         render_image_preview_content,
     };
     use crate::app::Overlay;
@@ -5622,23 +5778,27 @@ mod tests {
     #[test]
     fn accepted_real_prompt_locks_preset_but_official_command_does_not() {
         let session = SessionState::new("blank-session".into(), 7);
-        let completion = |request_id: &str, command_handled: bool| {
-            let operation = crate::effects::OperationKey {
-                session_id: dsh_pager::DshSessionId::new("blank-session"),
-                generation: dsh_pager::DshGeneration::new(7),
-                request_id: dsh_pager::DshRequestId::new(request_id),
-                action: "submit".into(),
-                dedupe_key: format!("submit:{request_id}"),
-            };
-            let value = crate::effects::UiEffectCompletion {
+        let turn_operation = crate::effects::OperationKey {
+            session_id: dsh_pager::DshSessionId::new("blank-session"),
+            generation: dsh_pager::DshGeneration::new(7),
+            request_id: dsh_pager::DshRequestId::new("turn"),
+            action: "submit".into(),
+            dedupe_key: "submit:turn".into(),
+        };
+        let mut turn_ui = UiState {
+            pending_first_prompt: Some(turn_operation.clone()),
+            ..UiState::default()
+        };
+        turn_ui.apply_effect_completion(
+            crate::effects::UiEffectCompletion {
                 effect: crate::effects::UiEffect::SubmitPrompt {
-                    operation: operation.clone(),
+                    operation: turn_operation.clone(),
                     text: "hello".into(),
                     mode: dsh_pager_protocol::PromptMode::Steer,
                 },
                 receipt: crate::effects::UiEffectReceipt {
                     status: UiEffectStatus::Accepted,
-                    operation: operation.clone(),
+                    operation: turn_operation,
                     diagnostic: None,
                     retryable: Some(false),
                 },
@@ -5647,33 +5807,68 @@ mod tests {
                 file_references: None,
                 attachment_preview: None,
                 commands: None,
-                command_handled,
-                command_result_text: None,
+                command_execution: None,
                 agent_preset_list: None,
                 selected_agent_preset: None,
                 session_models: None,
                 selected_model: None,
-            };
-            (operation, value)
-        };
-
-        let (operation, value) = completion("turn", false);
-        let mut turn_ui = UiState {
-            pending_first_prompt: Some(operation),
-            ..UiState::default()
-        };
-        turn_ui.apply_effect_completion(value, &session);
+            },
+            &session,
+        );
         assert!(turn_ui.preset_locked_locally);
         assert!(turn_ui.pending_first_prompt.is_none());
 
-        let (operation, value) = completion("command", true);
+        let command_operation = crate::effects::OperationKey {
+            session_id: dsh_pager::DshSessionId::new("blank-session"),
+            generation: dsh_pager::DshGeneration::new(7),
+            request_id: dsh_pager::DshRequestId::new("command"),
+            action: "execute-command".into(),
+            dedupe_key: "execute-command:command".into(),
+        };
         let mut command_ui = UiState {
-            pending_first_prompt: Some(operation),
+            pending_host_command: Some(PendingHostCommand {
+                operation: command_operation.clone(),
+                line: "/plan".into(),
+            }),
             ..UiState::default()
         };
-        command_ui.apply_effect_completion(value, &session);
+        let _ = command_ui.prompt.replace_text("/plan");
+        command_ui.apply_effect_completion(
+            crate::effects::UiEffectCompletion {
+                effect: crate::effects::UiEffect::ExecuteCommand {
+                    operation: command_operation.clone(),
+                    line: "/plan".into(),
+                },
+                receipt: crate::effects::UiEffectReceipt {
+                    status: UiEffectStatus::Accepted,
+                    operation: command_operation,
+                    diagnostic: None,
+                    retryable: Some(false),
+                },
+                session_list: None,
+                session_search: None,
+                file_references: None,
+                attachment_preview: None,
+                commands: None,
+                command_execution: Some(dsh_pager_protocol::CommandExecution {
+                    command_id: "plan".into(),
+                    result: dsh_pager_protocol::CommandResultValue {
+                        kind: dsh_pager_protocol::CommandResultKind::Success,
+                        text: Some("Plan mode enabled".into()),
+                        source_event_seq: None,
+                    },
+                }),
+                agent_preset_list: None,
+                selected_agent_preset: None,
+                session_models: None,
+                selected_model: None,
+            },
+            &session,
+        );
         assert!(!command_ui.preset_locked_locally);
-        assert!(command_ui.pending_first_prompt.is_none());
+        assert!(command_ui.pending_host_command.is_none());
+        assert_eq!(command_ui.prompt.text(), "");
+        assert_eq!(command_ui.status.as_deref(), Some("Plan mode enabled"));
     }
 
     #[test]
@@ -5732,8 +5927,7 @@ mod tests {
                 file_references: None,
                 attachment_preview: None,
                 commands: None,
-                command_handled: false,
-                command_result_text: None,
+                command_execution: None,
                 agent_preset_list: None,
                 selected_agent_preset: None,
                 session_models: None,

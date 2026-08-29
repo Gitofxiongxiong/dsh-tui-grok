@@ -67,7 +67,7 @@ export function apply(ctx: Context, config: TuiServerConfig): void {
     const output = config.output ?? process.stdout
     const fileReferences = ctx.get('fileReferences')
     const resolveAgent = createApiRemoteAgentResolver(ctx, {})
-    const commands: Pick<CommandRuntime, 'list'> = ctx.commands
+    const commands: Pick<CommandRuntime, 'list' | 'execute'> = ctx.commands
     return serve(ctx.apiProxy, input, output, {
       ...config.maxQueuedFrames === undefined ? {} : { maxQueuedFrames: config.maxQueuedFrames },
       ...fileReferences === undefined ? {} : { fileReferences },

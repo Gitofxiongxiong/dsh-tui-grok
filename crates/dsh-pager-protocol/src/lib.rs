@@ -192,6 +192,9 @@ pub struct SessionPromptParams {
 }
 
 /// Result returned by a successful `session.prompt` call.
+///
+/// `command` is retained for compatibility with older gateways. Current DSH
+/// command adapters use the independent `commands/execute` plane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPromptResult {
@@ -215,6 +218,42 @@ pub struct CommandDescriptor {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<CommandInputDescriptor>,
+}
+
+/// Outcome kind returned by DSH's official command runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandResultKind {
+    Success,
+    Error,
+}
+
+/// Settled result from one official DSH command handler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResultValue {
+    pub kind: CommandResultKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_seq: Option<u64>,
+}
+
+/// Correlates a command admission response with `command/run`/`command/done`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecution {
+    pub command_id: String,
+    pub result: CommandResultValue,
+}
+
+/// Native-TUI wrapper that preserves DSH's `undefined` unmatched result on JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecuteValue {
+    pub matched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<CommandExecution>,
 }
 
 /// Answer sent to a pending approval or question interaction.
@@ -925,6 +964,38 @@ mod tests {
         assert_eq!(descriptor.name, "plan");
         assert_eq!(descriptor.input.as_ref().unwrap().hint, "[off|message]");
         assert_eq!(serde_json::to_value(descriptor).unwrap(), raw);
+    }
+
+    #[test]
+    fn command_execute_value_preserves_matched_result_and_unmatched_null() {
+        let matched: CommandExecuteValue = serde_json::from_value(serde_json::json!({
+            "matched": true,
+            "execution": {
+                "commandId": "cmd-1",
+                "result": { "kind": "success", "text": "preset danger-full-access" }
+            }
+        }))
+        .expect("matched command");
+        assert!(matched.matched);
+        assert_eq!(
+            matched.execution.as_ref().unwrap().result.kind,
+            CommandResultKind::Success
+        );
+        assert_eq!(
+            matched
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.result.text.as_deref()),
+            Some("preset danger-full-access")
+        );
+
+        let unmatched: CommandExecuteValue = serde_json::from_value(serde_json::json!({
+            "matched": false,
+            "execution": null
+        }))
+        .expect("unmatched command");
+        assert!(!unmatched.matched);
+        assert!(unmatched.execution.is_none());
     }
 
     #[test]

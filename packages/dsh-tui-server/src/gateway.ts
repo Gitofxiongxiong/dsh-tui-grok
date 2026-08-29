@@ -88,6 +88,8 @@ export class TuiGateway {
   readonly controlPlane = new ControlPlaneRouter()
   private muxAbort: AbortController | undefined
   private hostAbort: AbortController | undefined
+  /** Cancels request-scoped Host work when this connection generation ends. */
+  private requestAbort = new AbortController()
   /**
    * Interaction responses are at-most-once by request id.  Keep the payload
    * fingerprint next to the in-flight/completed promise so reusing an id for
@@ -105,6 +107,7 @@ export class TuiGateway {
   dispose(): void {
     this.muxAbort?.abort()
     this.hostAbort?.abort()
+    this.requestAbort.abort()
   }
 
   /**
@@ -121,7 +124,14 @@ export class TuiGateway {
     }
     if (kind === 'tui-request') return await this.handleControl(method, params)
     if (kind === 'api') {
-      const result = await dispatchUnary(this.api, method, params, rpcId, this.extensions)
+      const result = await dispatchUnary(
+        this.api,
+        method,
+        params,
+        rpcId,
+        this.extensions,
+        this.requestAbort.signal,
+      )
       if (method === 'session.list' && apiResultSucceeded(result)) {
         this.controlPlane.store.seedSessionList((result as { value?: unknown }).value)
       }
@@ -461,6 +471,8 @@ export class TuiGateway {
     this.hostAbort?.abort()
     this.muxAbort = undefined
     this.hostAbort = undefined
+    this.requestAbort.abort()
+    this.requestAbort = new AbortController()
     this.attached.clear()
     this.subscriptions.clear()
     this.controlPlaneSubscribed = false

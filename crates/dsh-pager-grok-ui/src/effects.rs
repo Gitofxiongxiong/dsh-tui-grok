@@ -7,8 +7,8 @@ use dsh_pager::{
     RpcTransport, SessionState,
 };
 use dsh_pager_protocol::{
-    AgentPresetListValue, CommandDescriptor, ModelSelection, PromptMode, QueueAction,
-    SessionModelsValue, SubagentAddress, TuiInteractionResponse,
+    AgentPresetListValue, CommandDescriptor, CommandExecuteValue, CommandExecution, ModelSelection,
+    PromptMode, QueueAction, SessionModelsValue, SubagentAddress, TuiInteractionResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,6 +21,9 @@ pub enum UiIntent {
     SubmitPrompt {
         text: String,
         mode: PromptMode,
+    },
+    ExecuteCommand {
+        line: String,
     },
     AttachSession {
         session_id: DshSessionId,
@@ -189,6 +192,10 @@ pub enum UiEffect {
         operation: OperationKey,
         text: String,
         mode: PromptMode,
+    },
+    ExecuteCommand {
+        operation: OperationKey,
+        line: String,
     },
     AttachSession {
         operation: OperationKey,
@@ -394,6 +401,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
     let action_name = match &intent {
         UiIntent::CancelSession => "cancel-session",
         UiIntent::SubmitPrompt { .. } => "submit",
+        UiIntent::ExecuteCommand { .. } => "execute-command",
         UiIntent::AttachSession { .. } => "attach",
         UiIntent::ListSessions { .. } => "list-sessions",
         UiIntent::SearchSessions { .. } => "search-sessions",
@@ -422,6 +430,9 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
                 prompt_digest(text),
                 mode_label(*mode)
             )
+        }
+        UiIntent::ExecuteCommand { line } => {
+            format!("{action_name}:{}", prompt_digest(line))
         }
         UiIntent::AttachSession { session_id } => format!("{action_name}:{session_id}"),
         UiIntent::ListSessions { revision } => format!("{action_name}:{revision}"),
@@ -499,6 +510,7 @@ pub fn compile_intent(intent: UiIntent, context: &UiContext) -> UiEffect {
             text,
             mode,
         },
+        UiIntent::ExecuteCommand { line } => UiEffect::ExecuteCommand { operation, line },
         UiIntent::AttachSession { session_id } => UiEffect::AttachSession {
             operation,
             session_id,
@@ -614,6 +626,21 @@ impl DshEffectSink<'_, '_> {
                     mode,
                 );
                 (operation, result.map(|value| value.accepted))
+            }
+            UiEffect::ExecuteCommand {
+                mut operation,
+                line,
+            } => {
+                self.ledger.prepare_operation(&mut operation);
+                if self.ledger.contains(&operation) {
+                    return Ok(self.ledger.duplicate_receipt(operation));
+                }
+                let result = dsh_pager::execute_command(
+                    self.transport,
+                    operation.session_id.as_str(),
+                    &line,
+                );
+                (operation, result.map(|value| value.matched))
             }
             UiEffect::ListSessions {
                 mut operation,
@@ -808,13 +835,12 @@ impl DshEffectSink<'_, '_> {
                 if self.ledger.contains(&operation) {
                     return Ok(self.ledger.duplicate_receipt(operation));
                 }
-                let result = dsh_pager::submit_prompt_for_session(
+                let result = dsh_pager::execute_command(
                     self.transport,
                     operation.session_id.as_str(),
-                    format!("/permission {preset}"),
-                    PromptMode::Steer,
+                    &format!("/permission {preset}"),
                 );
-                (operation, result.map(|value| value.accepted))
+                (operation, result.map(|value| value.matched))
             }
             UiEffect::ListCommands {
                 mut operation,
@@ -921,10 +947,8 @@ pub struct UiEffectCompletion {
     pub file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
     pub commands: Option<Vec<CommandDescriptor>>,
-    /// True when `session.prompt` was handled by DSH's command runtime and
-    /// therefore did not start a model turn.
-    pub command_handled: bool,
-    pub command_result_text: Option<String>,
+    /// Settled official Host command result. Commands never share the prompt plane.
+    pub command_execution: Option<CommandExecution>,
     pub agent_preset_list: Option<AgentPresetListValue>,
     pub selected_agent_preset: Option<String>,
     pub session_models: Option<SessionModelsValue>,
@@ -1008,6 +1032,7 @@ fn effect_operation(effect: &UiEffect) -> &OperationKey {
     match effect {
         UiEffect::CancelSession { operation }
         | UiEffect::SubmitPrompt { operation, .. }
+        | UiEffect::ExecuteCommand { operation, .. }
         | UiEffect::AttachSession { operation, .. }
         | UiEffect::ListSessions { operation, .. }
         | UiEffect::SearchSessions { operation, .. }
@@ -1034,6 +1059,9 @@ fn set_effect_operation(effect: &mut UiEffect, operation: OperationKey) {
     match effect {
         UiEffect::CancelSession { operation: target }
         | UiEffect::SubmitPrompt {
+            operation: target, ..
+        }
+        | UiEffect::ExecuteCommand {
             operation: target, ..
         }
         | UiEffect::AttachSession {
@@ -1110,6 +1138,14 @@ fn encode_async_request(
                 "content": [{"type": "text", "text": text}],
             }),
         )),
+        UiEffect::ExecuteCommand { line, .. } => Some((
+            "commands/execute",
+            json!({
+                "agentId": operation.session_id,
+                "line": line,
+                "images": [],
+            }),
+        )),
         UiEffect::ListSessions { .. } => Some(("session.list", json!({}))),
         UiEffect::SearchSessions { query, .. } => Some(("session.search", json!({"query": query}))),
         UiEffect::QueueMutation {
@@ -1183,11 +1219,11 @@ fn encode_async_request(
             }),
         )),
         UiEffect::SetPermissionPreset { preset, .. } => Some((
-            "session.prompt",
+            "commands/execute",
             json!({
-                "sessionId": operation.session_id,
-                "mode": PromptMode::Steer,
-                "content": [{"type": "text", "text": format!("/permission {preset}")}],
+                "agentId": operation.session_id,
+                "line": format!("/permission {preset}"),
+                "images": [],
             }),
         )),
         UiEffect::ListCommands { .. } => {
@@ -1238,8 +1274,7 @@ struct DecodedAsyncResult {
     file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
     commands: Option<Vec<CommandDescriptor>>,
-    command_handled: bool,
-    command_result_text: Option<String>,
+    command_execution: Option<CommandExecution>,
     agent_preset_list: Option<AgentPresetListValue>,
     selected_agent_preset: Option<String>,
     session_models: Option<SessionModelsValue>,
@@ -1264,22 +1299,21 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         });
     }
     let value = unwrap_api_value(raw)?;
-    if matches!(
-        effect,
-        UiEffect::SubmitPrompt { .. } | UiEffect::SetPermissionPreset { .. }
-    ) {
+    if matches!(effect, UiEffect::SubmitPrompt { .. }) {
         let prompt: dsh_pager_protocol::SessionPromptResult = serde_json::from_value(value)?;
-        let command_handled = prompt.command.is_some();
-        let command_result_text = prompt
-            .command
-            .as_ref()
-            .and_then(|command| command.get("text"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
         return Ok(DecodedAsyncResult {
             accepted: prompt.accepted,
-            command_handled,
-            command_result_text,
+            ..DecodedAsyncResult::default()
+        });
+    }
+    if matches!(
+        effect,
+        UiEffect::ExecuteCommand { .. } | UiEffect::SetPermissionPreset { .. }
+    ) {
+        let command: CommandExecuteValue = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: command.matched,
+            command_execution: command.execution,
             ..DecodedAsyncResult::default()
         });
     }
@@ -1434,8 +1468,7 @@ fn build_completion(
                 file_references: decoded.file_references,
                 attachment_preview: decoded.attachment_preview,
                 commands: decoded.commands,
-                command_handled: decoded.command_handled,
-                command_result_text: decoded.command_result_text,
+                command_execution: decoded.command_execution,
                 agent_preset_list: decoded.agent_preset_list,
                 selected_agent_preset: decoded.selected_agent_preset,
                 session_models: decoded.session_models,
@@ -1455,8 +1488,7 @@ fn build_completion(
             file_references: decoded.file_references,
             attachment_preview: decoded.attachment_preview,
             commands: decoded.commands,
-            command_handled: decoded.command_handled,
-            command_result_text: decoded.command_result_text,
+            command_execution: decoded.command_execution,
             agent_preset_list: decoded.agent_preset_list,
             selected_agent_preset: decoded.selected_agent_preset,
             session_models: decoded.session_models,
@@ -1475,8 +1507,7 @@ fn build_completion(
             file_references: None,
             attachment_preview: None,
             commands: None,
-            command_handled: false,
-            command_result_text: None,
+            command_execution: None,
             agent_preset_list: None,
             selected_agent_preset: None,
             session_models: None,
@@ -1619,13 +1650,10 @@ mod tests {
         )
         .expect("encode")
         .expect("supported");
-        assert_eq!(method, "session.prompt");
-        assert_eq!(params["sessionId"], "s");
-        assert_eq!(params["mode"], "steer");
-        assert_eq!(
-            params["content"][0]["text"],
-            "/permission danger-full-access"
-        );
+        assert_eq!(method, "commands/execute");
+        assert_eq!(params["agentId"], "s");
+        assert_eq!(params["line"], "/permission danger-full-access");
+        assert_eq!(params["images"], json!([]));
     }
 
     #[test]
@@ -1671,31 +1699,44 @@ mod tests {
     }
 
     #[test]
-    fn slash_command_result_text_is_preserved_for_runtime_feedback() {
+    fn official_command_effect_uses_execute_plane_and_preserves_result() {
         let session = SessionState::new("s".into(), 3);
         let effect = compile_intent(
-            UiIntent::SubmitPrompt {
-                text: "/plan".into(),
-                mode: PromptMode::Steer,
+            UiIntent::ExecuteCommand {
+                line: "/plan".into(),
             },
             &UiContext::from_session(&session),
+        );
+        let (method, params) = encode_async_request(&effect, effect_operation(&effect))
+            .expect("encode")
+            .expect("supported");
+        assert_eq!(method, "commands/execute");
+        assert_eq!(
+            params,
+            json!({"agentId": "s", "line": "/plan", "images": []})
         );
         let decoded = decode_async_result(
             &effect,
             json!({
                 "ok": true,
                 "value": {
-                    "accepted": true,
-                    "command": {"kind": "success", "text": "Plan mode enabled"}
+                    "matched": true,
+                    "execution": {
+                        "commandId": "plan",
+                        "result": {"kind": "success", "text": "Plan mode enabled"}
+                    }
                 }
             }),
         )
         .expect("decode");
         assert_eq!(
-            decoded.command_result_text.as_deref(),
+            decoded
+                .command_execution
+                .as_ref()
+                .and_then(|execution| execution.result.text.as_deref()),
             Some("Plan mode enabled")
         );
-        assert!(decoded.command_handled);
+        assert!(decoded.accepted);
     }
 
     #[test]

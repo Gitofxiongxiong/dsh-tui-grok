@@ -557,6 +557,20 @@ fn visible_host_command_name(name: &str) -> bool {
     valid_command_name(name) && name != "preset"
 }
 
+/// Return whether `line` names one of the commands currently advertised by
+/// the official DSH command runtime. Local TUI commands keep precedence and
+/// `/preset` stays excluded because it is fixed before the first turn.
+pub fn is_host_command(line: &str, commands: &[CommandDescriptor]) -> bool {
+    let Some(invocation) = parse_invocation(line) else {
+        return false;
+    };
+    commands.iter().any(|command| {
+        command.name == invocation.token
+            && command_spec(invocation.token).is_none()
+            && visible_host_command_name(invocation.token)
+    })
+}
+
 struct SlashInput {
     command_range: Range<usize>,
     query: String,
@@ -895,6 +909,20 @@ mod tests {
         let snapshot = controller.snapshot();
         assert!(snapshot.command_recognized);
         assert_eq!(snapshot.args_placeholder.as_deref(), Some("[off|message]"));
+    }
+
+    #[test]
+    fn host_command_matching_is_exact_and_never_claims_local_or_hidden_commands() {
+        let commands = official_commands();
+        assert!(is_host_command("/permission danger-full-access", &commands));
+        assert!(is_host_command("/plan", &commands));
+        assert!(!is_host_command("/permissionish", &commands));
+        assert!(!is_host_command(
+            " /permission danger-full-access",
+            &commands
+        ));
+        assert!(!is_host_command("/model DeepSeek-V4-Pro", &commands));
+        assert!(!is_host_command("/preset", &commands));
     }
 
     #[test]
