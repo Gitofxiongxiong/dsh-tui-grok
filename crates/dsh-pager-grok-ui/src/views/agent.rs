@@ -616,11 +616,17 @@ impl AgentView {
         area: Rect,
         hints: &[HintItem],
         help_hint: Option<HintItem>,
+        pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
     ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        frame.render_widget(ShortcutsBar::new(hints).compact(5, help_hint), area);
+        frame.render_widget(
+            ShortcutsBar::new(hints)
+                .compact(5, help_hint)
+                .with_pending(pending_hint),
+            area,
+        );
     }
 }
 

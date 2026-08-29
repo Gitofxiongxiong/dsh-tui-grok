@@ -22,6 +22,7 @@ pub mod interaction;
 #[allow(dead_code)]
 pub mod modal_window;
 pub mod model_picker;
+pub mod overlay_list;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/permission_view.rs"]
 pub mod permission_view;
 pub mod preset_picker;
@@ -32,6 +33,7 @@ pub mod prompt_widget;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/question_view.rs"]
 pub mod question_view;
 pub mod queue;
+pub mod rewind;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/session_picker.rs"]
 pub mod session_picker;
 #[path = "../../vendor/grok/xai-grok-pager/src/views/shortcuts_bar.rs"]

@@ -944,6 +944,8 @@ pub struct UiEffectCompletion {
     pub receipt: UiEffectReceipt,
     pub session_list: Option<dsh_pager_protocol::SessionListValue>,
     pub session_search: Option<dsh_pager_protocol::SessionSearchValue>,
+    /// Child created by `session.fork`; used by the rewind attach barrier.
+    pub forked_session_id: Option<DshSessionId>,
     pub file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     pub attachment_preview: Option<dsh_pager::AttachmentPreview>,
     pub commands: Option<Vec<CommandDescriptor>>,
@@ -1271,6 +1273,7 @@ struct DecodedAsyncResult {
     accepted: bool,
     session_list: Option<dsh_pager_protocol::SessionListValue>,
     session_search: Option<dsh_pager_protocol::SessionSearchValue>,
+    forked_session_id: Option<DshSessionId>,
     file_references: Option<dsh_pager_protocol::FileReferencesListValue>,
     attachment_preview: Option<dsh_pager::AttachmentPreview>,
     commands: Option<Vec<CommandDescriptor>>,
@@ -1338,6 +1341,14 @@ fn decode_async_result(effect: &UiEffect, raw: Value) -> PagerResult<DecodedAsyn
         return Ok(DecodedAsyncResult {
             accepted: true,
             session_search: Some(session_search),
+            ..DecodedAsyncResult::default()
+        });
+    }
+    if matches!(effect, UiEffect::ForkSession { .. }) {
+        let forked: dsh_pager_protocol::SessionForkResult = serde_json::from_value(value)?;
+        return Ok(DecodedAsyncResult {
+            accepted: true,
+            forked_session_id: Some(DshSessionId::new(forked.session_id)),
             ..DecodedAsyncResult::default()
         });
     }
@@ -1465,6 +1476,7 @@ fn build_completion(
                 },
                 session_list: decoded.session_list,
                 session_search: decoded.session_search,
+                forked_session_id: decoded.forked_session_id,
                 file_references: decoded.file_references,
                 attachment_preview: decoded.attachment_preview,
                 commands: decoded.commands,
@@ -1485,6 +1497,7 @@ fn build_completion(
             },
             session_list: decoded.session_list,
             session_search: decoded.session_search,
+            forked_session_id: decoded.forked_session_id,
             file_references: decoded.file_references,
             attachment_preview: decoded.attachment_preview,
             commands: decoded.commands,
@@ -1504,6 +1517,7 @@ fn build_completion(
             },
             session_list: None,
             session_search: None,
+            forked_session_id: None,
             file_references: None,
             attachment_preview: None,
             commands: None,
@@ -1579,6 +1593,34 @@ mod tests {
         .expect("cancel is supported");
         assert_eq!(method, "session.cancel");
         assert_eq!(params["sessionId"], "cancel-me");
+    }
+
+    #[test]
+    fn rewind_fork_decodes_the_child_session_attach_identity() {
+        let session = SessionState::new("parent".into(), 7);
+        let effect = compile_intent(
+            UiIntent::ForkSession {
+                at_seq: Some(DshSeq::new(12)),
+            },
+            &UiContext::from_session(&session),
+        );
+        let operation = effect_operation(&effect);
+        let (method, params) = encode_async_request(&effect, operation)
+            .expect("encode fork")
+            .expect("fork supported");
+        assert_eq!(method, "session.fork");
+        assert_eq!(params["sessionId"], "parent");
+        assert_eq!(params["atSeq"], 12);
+
+        let decoded = decode_async_result(
+            &effect,
+            json!({"ok": true, "value": {"sessionId": "child"}}),
+        )
+        .expect("decode fork");
+        assert_eq!(
+            decoded.forked_session_id.as_ref().map(DshSessionId::as_str),
+            Some("child")
+        );
     }
 
     #[test]

@@ -4,8 +4,12 @@
 //! It is the small, replayable state machine between terminal events and the
 //! existing Grok-derived widgets used by the runtime.
 
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+
+use crate::esc::{EscContext, EscOutcome, EscPolicy, PendingEscAction, is_bare_esc_press};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyOwner {
@@ -108,6 +112,11 @@ pub struct HomeKeyState {
     pub prompt_empty: bool,
     pub turn_running: bool,
     pub cancel_pending: bool,
+    pub has_rewindable_turns: bool,
+    pub selection_active: bool,
+    pub blocking_input_pending: bool,
+    pub normal_prompt_mode: bool,
+    pub history_search_active: bool,
 }
 
 impl HomeKeyState {
@@ -116,6 +125,11 @@ impl HomeKeyState {
             prompt_empty,
             turn_running: false,
             cancel_pending: false,
+            has_rewindable_turns: false,
+            selection_active: false,
+            blocking_input_pending: false,
+            normal_prompt_mode: true,
+            history_search_active: false,
         }
     }
 }
@@ -126,6 +140,10 @@ pub enum ShellAction {
     Quit,
     /// Interrupt the in-flight turn without leaving the session.
     CancelTurn,
+    /// Open Grok's prompt-area rewind picker after the silent double-Esc arm.
+    OpenRewindPicker,
+    /// Selection consumes Esc before the homepage policy can arm.
+    ClearSelection,
     CloseOverlay,
     ClearPrompt,
     ScrollUp(u16),
@@ -268,6 +286,7 @@ pub struct AppShell {
     previous_owner: KeyOwner,
     layout: Option<ShellLayout>,
     layout_revision: u64,
+    esc_policy: EscPolicy,
 }
 
 impl Default for AppShell {
@@ -278,6 +297,7 @@ impl Default for AppShell {
             previous_owner: KeyOwner::Transcript,
             layout: None,
             layout_revision: 0,
+            esc_policy: EscPolicy::default(),
         }
     }
 }
@@ -394,11 +414,32 @@ impl AppShell {
         self.owner = self.previous_owner;
     }
 
+    pub fn pending_esc_action(&self) -> Option<PendingEscAction> {
+        self.esc_policy.pending_action(Instant::now())
+    }
+
+    /// A key consumed before AppShell (currently slash completion) still
+    /// retires an idle pending action, matching Grok's app-level matcher.
+    pub fn observe_preempted_key(&mut self, key: &KeyEvent) {
+        if key.kind != crossterm::event::KeyEventKind::Release {
+            self.esc_policy.clear_pending();
+        }
+    }
+
     pub fn dispatch(&mut self, event: ShellEvent, prompt_empty: bool) -> ShellAction {
         self.dispatch_home(event, HomeKeyState::idle_prompt(prompt_empty))
     }
 
     pub fn dispatch_home(&mut self, event: ShellEvent, home: HomeKeyState) -> ShellAction {
+        self.dispatch_home_at(event, home, Instant::now())
+    }
+
+    fn dispatch_home_at(
+        &mut self,
+        event: ShellEvent,
+        home: HomeKeyState,
+        now: Instant,
+    ) -> ShellAction {
         match event {
             ShellEvent::Resize { width, height } => {
                 let area = Rect::new(0, 0, width, height);
@@ -406,7 +447,11 @@ impl AppShell {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
                 ShellAction::Resized(area)
             }
-            ShellEvent::Tick | ShellEvent::Notification => ShellAction::Redraw,
+            ShellEvent::Tick => {
+                self.esc_policy.expire_at(now);
+                ShellAction::Redraw
+            }
+            ShellEvent::Notification => ShellAction::Redraw,
             ShellEvent::Paste(text) => match self.owner {
                 KeyOwner::Picker => ShellAction::PickerPaste(text),
                 KeyOwner::Queue => ShellAction::QueuePaste(text),
@@ -446,12 +491,29 @@ impl AppShell {
                     _ => ShellAction::TranscriptMouse(mouse),
                 }
             }
-            ShellEvent::Key(key) => self.dispatch_key(key, home),
+            ShellEvent::Key(key) => self.dispatch_key_at(key, home, now),
         }
     }
 
-    fn dispatch_key(&mut self, key: KeyEvent, home: HomeKeyState) -> ShellAction {
+    fn esc_context(&self, home: HomeKeyState) -> EscContext {
+        EscContext {
+            prompt_has_content: !home.prompt_empty,
+            prompt_owns_keys: self.owner == KeyOwner::Prompt,
+            has_rewindable_turns: home.has_rewindable_turns,
+            turn_running: home.turn_running,
+            cancel_pending: home.cancel_pending,
+            blocking_input_pending: home.blocking_input_pending,
+            normal_prompt_mode: home.normal_prompt_mode,
+            history_search_active: home.history_search_active,
+        }
+    }
+
+    fn dispatch_key_at(&mut self, key: KeyEvent, home: HomeKeyState, now: Instant) -> ShellAction {
         let prompt_empty = home.prompt_empty;
+        let esc_context = self.esc_context(home);
+        if let Some(outcome) = self.esc_policy.try_fire_pending_at(&key, esc_context, now) {
+            return shell_action_for_esc(outcome);
+        }
         if self.overlay != Overlay::None {
             if self.overlay == Overlay::Picker {
                 // The copied Grok picker owns its own Esc ladder: first leave
@@ -498,6 +560,9 @@ impl AppShell {
                 _ => ShellAction::PromptKey(key),
             };
         }
+        if home.selection_active && is_bare_esc_press(&key) {
+            return ShellAction::ClearSelection;
+        }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             // Grok CancelTurn / Ctrl+C ladder: a draft is cleared first and
             // the turn keeps running; an empty running prompt cancels the
@@ -511,18 +576,8 @@ impl AppShell {
             }
             return ShellAction::Quit;
         }
-        if key.code == KeyCode::Esc {
-            // Grok `try_handle_esc_policy` (non-vim homepage): running or
-            // cancelling → cancel/retry immediately, even with a draft;
-            // idle draft → clear; idle empty → swallow. Esc never quits.
-            if home.turn_running || home.cancel_pending {
-                return ShellAction::CancelTurn;
-            }
-            return if prompt_empty {
-                ShellAction::None
-            } else {
-                ShellAction::ClearPrompt
-            };
+        if let Some(outcome) = self.esc_policy.handle_unclaimed_at(&key, esc_context, now) {
+            return shell_action_for_esc(outcome);
         }
         if key.code == KeyCode::Enter
             && key
@@ -624,6 +679,17 @@ impl AppShell {
     }
 }
 
+fn shell_action_for_esc(outcome: EscOutcome) -> ShellAction {
+    match outcome {
+        EscOutcome::CancelTurn => ShellAction::CancelTurn,
+        EscOutcome::ClearPrompt => ShellAction::ClearPrompt,
+        EscOutcome::ShowRewindPicker => ShellAction::OpenRewindPicker,
+        EscOutcome::ArmedClear | EscOutcome::ArmedRewind | EscOutcome::Swallowed => {
+            ShellAction::None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,11 +716,11 @@ mod tests {
         assert_eq!(shell.owner(), KeyOwner::Prompt);
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), false),
-            ShellAction::ClearPrompt
+            ShellAction::None
         );
         assert_eq!(
-            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
-            ShellAction::None
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), false),
+            ShellAction::ClearPrompt
         );
     }
 
@@ -701,6 +767,7 @@ mod tests {
             prompt_empty,
             turn_running: true,
             cancel_pending: false,
+            ..HomeKeyState::idle_prompt(prompt_empty)
         }
     }
 
@@ -709,6 +776,7 @@ mod tests {
             prompt_empty,
             turn_running: false,
             cancel_pending: true,
+            ..HomeKeyState::idle_prompt(prompt_empty)
         }
     }
 
@@ -732,15 +800,41 @@ mod tests {
     }
 
     #[test]
-    fn homepage_esc_idle_empty_is_swallowed() {
+    fn homepage_esc_idle_clear_and_rewind_are_double_press_actions() {
         let mut shell = AppShell::default();
+        shell.focus_prompt();
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
             ShellAction::None
         );
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), false),
+            ShellAction::None
+        );
+        assert_eq!(
+            shell.pending_esc_action(),
+            Some(PendingEscAction::ClearPrompt)
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), false),
             ShellAction::ClearPrompt
+        );
+
+        let history = HomeKeyState {
+            has_rewindable_turns: true,
+            ..HomeKeyState::idle_prompt(true)
+        };
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(key(KeyCode::Esc)), history),
+            ShellAction::None
+        );
+        assert_eq!(
+            shell.pending_esc_action(),
+            Some(PendingEscAction::ShowRewindPicker)
+        );
+        assert_eq!(
+            shell.dispatch_home(ShellEvent::Key(key(KeyCode::Esc)), history),
+            ShellAction::OpenRewindPicker
         );
     }
 
@@ -776,6 +870,7 @@ mod tests {
                     prompt_empty: true,
                     turn_running: true,
                     cancel_pending: true,
+                    ..HomeKeyState::idle_prompt(true)
                 }
             ),
             ShellAction::Quit,

@@ -49,10 +49,15 @@ fallback；它们不是 Grok reference golden，M10 reference runner 会替换�
 ```bash
 cargo run -p dsh-pager-bin -- --backend <mock-server>
 python3 scripts/pty-smoke.py --binary target/debug/dsh-pager
+python3 scripts/pty-esc-parity.py --binary target/debug/dsh-pager
 python3 scripts/pty-stream-scroll.py --binary target/debug/dsh-pager
 ```
 
 检查窗口 resize、折行、滚动、picker/modal 打开关闭以及退出后的终端恢复。UI 的快照/黄金测试只断言稳定文本和几何关系，不把 ANSI 控制序列硬编码到 runtime 测试。
+`pty-esc-parity.py` 固定覆盖 Grok 的三类 Esc 契约：非空草稿双击清空、空
+prompt 双击 rewind（含确认、空 session attach 和 prompt 恢复）、running/cancel
+pending 的取消重发；mock 会故意让第一次 cancel 保持 running，第二次才发布
+`running=false`。
 流式滚动 PTY 使用 Zed forced-wheel 一报告一行定价，只允许 24 个向下 report 到达 live tail，
 随后用 fully-clamped overscroll 断言恢复 follow；不得再用 80-report flood 代替正常手势。
 
@@ -66,6 +71,22 @@ approval/question 和 queue authority 由同一 mock Harness 的 binary integrat
 tests 覆盖。真实 DeepSeek
 Harness 可通过 DSH_TUI_SERVER 注入同一 binary；没有凭据或服务时脚本仍保留
 mock 证据，并将真实后端状态记录为 unavailable，而不会伪造成功。
+
+浏览器/xterm.js 对照需要分别用 ttyd 启动当前 DSH binary 和本机 Grok Build
+新空 Agent session，再运行（Playwright 模块和 Chromium 路径按本机安装设置）：
+
+```bash
+PLAYWRIGHT_MODULE=/path/to/node_modules/playwright \
+PLAYWRIGHT_CHROMIUM=/path/to/chrome \
+node scripts/playwright-esc-parity.mjs \
+  --dsh-url http://127.0.0.1:7681 \
+  --grok-url http://127.0.0.1:7683 \
+  --output /tmp/dsh-esc-playwright
+```
+
+脚本在 1200×800、DPR 1 下比较两端完全相同的
+`Esc:press again to clear`，验证空历史 Grok 吞键，并为 DSH rewind picker/confirm
+留像素证据；不会向真实 Grok 模型提交 prompt。
 
 ## 真实 DeepSeek Harness
 

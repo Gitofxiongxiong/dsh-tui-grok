@@ -17,8 +17,8 @@ use crossterm::event::{
 };
 use dsh_pager::dashboard::DashboardModel;
 use dsh_pager::{
-    DshGeneration, DshInteraction, DshQueueItemId, DshRequestId, PagerError, PagerResult,
-    RpcTransport, SessionState, SessionUpdate, create_blank_session, load_session_id,
+    DshGeneration, DshInteraction, DshQueueItemId, DshRenderKind, DshRequestId, DshSeq, PagerError,
+    PagerResult, RpcTransport, SessionState, SessionUpdate, create_blank_session, load_session_id,
     peek_session_tail, repair_tail,
 };
 use dsh_pager_protocol::{
@@ -42,6 +42,7 @@ use crate::effects::{
     AsyncEffectExecutor, EffectLedger, OperationKey, UiContext, UiEffect, UiEffectCompletion,
     UiEffectStatus, UiIntent, compile_intent, receipt_status_message,
 };
+use crate::esc::PendingEscAction;
 use crate::geometry::{
     GeometryLine, HitMap, HitTarget, LinkTarget, column_for_grapheme, first_link_target,
     insert_text_line,
@@ -102,8 +103,13 @@ use crate::views::{
         QueueRenderState, moved_selection, queue_item_is_visible, render_queue_content,
         visible_queue_items, visible_queue_len,
     },
+    rewind::{
+        RewindInput, RewindPhase, RewindPoint, RewindState, confirm_cursor, handle_rewind_key,
+        move_cursor, render_rewind_overlay, rewind_activate, rewind_overlay_height, rewind_row_at,
+        set_rewind_cursor,
+    },
     session_picker::{ResumePickerOutcome, ResumePickerState},
-    shortcuts_bar::{HintItem, ShortcutsBar},
+    shortcuts_bar::{HintItem, PendingHint, ShortcutsBar},
     slash_dropdown::{desired_item_rows, render_dropdown},
     status_bar::StatusBar,
     timeline::{RailViewport, compute_rail, render_rail},
@@ -541,6 +547,12 @@ enum PickerKind {
     Model,
 }
 
+#[derive(Debug, Clone)]
+struct PendingRewind {
+    operation: OperationKey,
+    prompt_text: String,
+}
+
 #[derive(Debug, Default)]
 struct UiState {
     shell: AppShell,
@@ -580,6 +592,11 @@ struct UiState {
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
     cancel_pending: Option<OperationKey>,
+    rewind: Option<RewindState>,
+    rewind_target: Option<RewindPoint>,
+    pending_rewind: Option<PendingRewind>,
+    rewind_skip_confirmation: bool,
+    rewind_area: Rect,
     interaction_args_expanded: bool,
     permission_area: Rect,
     permission_option_rows: Vec<Rect>,
@@ -806,7 +823,7 @@ impl UiState {
     fn poll_effects(
         &mut self,
         transport: &mut RpcTransport,
-        session: &SessionState,
+        session: &mut SessionState,
     ) -> PagerResult<()> {
         if !self.roster_requested {
             self.roster_requested = true;
@@ -828,7 +845,34 @@ impl UiState {
             executor.poll(transport, ledger)?
         };
         for completion in completions {
+            let rewind_prompt = self.pending_rewind.as_ref().and_then(|pending| {
+                (matches!(completion.effect, UiEffect::ForkSession { .. })
+                    && pending.operation == completion.receipt.operation)
+                    .then(|| pending.prompt_text.clone())
+            });
+            let forked_session_id = completion.forked_session_id.clone();
+            let rewind_accepted = completion.receipt.status == UiEffectStatus::Accepted;
             self.apply_effect_completion(completion, session);
+            if let Some(prompt_text) = rewind_prompt {
+                self.pending_rewind = None;
+                if rewind_accepted {
+                    if let Some(session_id) = forked_session_id {
+                        self.finish_rewind_attach(
+                            transport,
+                            session,
+                            session_id.as_str(),
+                            &prompt_text,
+                        );
+                    } else {
+                        self.fail_rewind("session.fork returned no child session id");
+                    }
+                } else if !matches!(
+                    self.rewind.as_ref().map(|rewind| &rewind.phase),
+                    Some(RewindPhase::Error { .. })
+                ) {
+                    self.fail_rewind("host rejected session.fork");
+                }
+            }
         }
         Ok(())
     }
@@ -959,6 +1003,13 @@ impl UiState {
             self.interaction_pending = None;
         }
         if matches!(completion.effect, UiEffect::CancelSession { .. }) {
+            let matches_latest = self
+                .cancel_pending
+                .as_ref()
+                .is_some_and(|pending| *pending == completion.receipt.operation);
+            if !matches_latest {
+                return;
+            }
             if matches!(
                 completion.receipt.status,
                 UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
@@ -1265,7 +1316,7 @@ impl UiState {
                 self.interaction_args_expanded,
             )
         });
-        let blocking_card = permission.is_some() || question.is_some();
+        let blocking_card = permission.is_some() || question.is_some() || self.rewind.is_some();
         self.slash.refresh(
             self.prompt.text(),
             self.prompt.cursor(),
@@ -1314,6 +1365,8 @@ impl UiState {
                 area.height,
                 prompt_outer_width.saturating_sub(5) as usize,
             )
+        } else if let Some(rewind) = self.rewind.as_ref() {
+            rewind_overlay_height(&rewind.phase, area.height)
         } else {
             GrokPromptRenderer::desired_height(
                 self.prompt.textarea(),
@@ -1370,6 +1423,7 @@ impl UiState {
         let agent_layout = AgentView::layout(&mut self.shell, layout_params);
         let header = agent_layout.status_bar;
         let input = agent_layout.prompt;
+        self.rewind_area = input;
         let home = std::env::var("HOME").ok();
         let cwd = format_cwd(
             &snapshot.cwd,
@@ -1430,6 +1484,16 @@ impl UiState {
                 self.shell.owner() == KeyOwner::Interaction,
             );
             self.permission_option_rows = result.option_rows;
+        } else if let Some(rewind) = self.rewind.as_ref() {
+            self.permission_area = Rect::default();
+            self.permission_option_rows.clear();
+            self.hovered_permission_item = None;
+            render_rewind_overlay(
+                frame.buffer_mut(),
+                input,
+                &rewind.phase,
+                self.shell.owner() == KeyOwner::Prompt,
+            );
         } else {
             self.permission_area = Rect::default();
             self.permission_option_rows.clear();
@@ -1492,6 +1556,8 @@ impl UiState {
             (HitTarget::Overlay("permission".into()), "permission")
         } else if question.is_some() {
             (HitTarget::Overlay("question".into()), "question")
+        } else if self.rewind.is_some() {
+            (HitTarget::Overlay("rewind".into()), "rewind")
         } else {
             (HitTarget::Prompt, "prompt")
         };
@@ -1651,7 +1717,19 @@ impl UiState {
             );
         } else {
             let (hints, help_hint) = self.pane_shortcut_hints(&snapshot, textarea_rows > 1);
-            AgentView::render_shortcuts(frame, agent_layout.shortcuts, &hints, help_hint);
+            let pending_hint = (self.shell.pending_esc_action()
+                == Some(PendingEscAction::ClearPrompt))
+            .then_some(PendingHint {
+                shortcut: KeyShortcut::key(KeyCode::Esc),
+                label: "clear",
+            });
+            AgentView::render_shortcuts(
+                frame,
+                agent_layout.shortcuts,
+                &hints,
+                help_hint,
+                pending_hint,
+            );
         }
 
         self.render_inline_panes(frame, &agent_layout, &snapshot, theme);
@@ -2669,6 +2747,22 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<bool> {
+        if let ShellEvent::Key(key) = &event
+            && key.code == KeyCode::Esc
+        {
+            diag::log(
+                "input",
+                format!(
+                    "esc owner={:?} overlay={:?} running={} cancel_pending={} rewind={} prompt_empty={}",
+                    self.shell.owner(),
+                    self.shell.overlay(),
+                    session.running(),
+                    self.cancel_pending.is_some(),
+                    self.rewind.is_some(),
+                    self.prompt.is_empty()
+                ),
+            );
+        }
         if let ShellEvent::Mouse(mouse) = &event {
             self.context_hovered = self.shell.overlay() == Overlay::None
                 && self
@@ -2680,6 +2774,20 @@ impl UiState {
                             HitTarget::Overlay(name) if name == "context-usage"
                         )
                     });
+        }
+        if self.rewind.is_some() {
+            match event {
+                ShellEvent::Key(key) => {
+                    self.handle_rewind_key_event(key, transport, session)?;
+                    return Ok(false);
+                }
+                ShellEvent::Mouse(mouse) => {
+                    self.handle_rewind_mouse_event(mouse, transport, session)?;
+                    return Ok(false);
+                }
+                ShellEvent::Paste(_) => return Ok(false),
+                ShellEvent::Resize { .. } | ShellEvent::Tick | ShellEvent::Notification => {}
+            }
         }
         if self.shell.overlay() == Overlay::None
             && let ShellEvent::Mouse(mouse) = &event
@@ -2752,6 +2860,7 @@ impl UiState {
             );
             self.refresh_slash(&snapshot);
             if self.handle_slash_key(*key, &snapshot, transport, session)? {
+                self.shell.observe_preempted_key(key);
                 return Ok(false);
             }
         }
@@ -2762,8 +2871,23 @@ impl UiState {
                 prompt_empty,
                 turn_running: session.running(),
                 cancel_pending: self.cancel_pending.is_some(),
+                has_rewindable_turns: session
+                    .history()
+                    .iter()
+                    .any(|entry| entry.event.event_type == "user/message"),
+                selection_active: self.selection.selection().is_some()
+                    || self.selected_transcript.is_some(),
+                blocking_input_pending: false,
+                normal_prompt_mode: true,
+                history_search_active: false,
             },
         );
+        if matches!(
+            action,
+            ShellAction::CancelTurn | ShellAction::OpenRewindPicker
+        ) {
+            diag::log("input", format!("esc action={action:?}"));
+        }
         match action {
             ShellAction::Quit => {
                 diag::log(
@@ -2777,6 +2901,16 @@ impl UiState {
             }
             ShellAction::CancelTurn => {
                 self.request_cancel_session(transport, session)?;
+                Ok(false)
+            }
+            ShellAction::OpenRewindPicker => {
+                self.open_rewind_picker(session);
+                Ok(false)
+            }
+            ShellAction::ClearSelection => {
+                self.selection.clear();
+                self.selected_transcript = None;
+                self.status = None;
                 Ok(false)
             }
             ShellAction::OpenQueue => {
@@ -3210,17 +3344,235 @@ impl UiState {
         Ok(true)
     }
 
+    fn open_rewind_picker(&mut self, session: &SessionState) {
+        let snapshot = GrokHostSnapshot::from_session(session);
+        let points = rewind_points(&snapshot);
+        if points.is_empty() {
+            self.status = Some("No undoable prompts".into());
+            return;
+        }
+        self.rewind_target = None;
+        self.rewind = Some(RewindState::picker(points));
+        self.status = None;
+    }
+
+    fn handle_rewind_key_event(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        let Some(rewind) = self.rewind.as_ref() else {
+            return Ok(());
+        };
+        let input = handle_rewind_key(rewind, &key);
+        self.apply_rewind_input(input, transport, session)
+    }
+
+    fn handle_rewind_mouse_event(
+        &mut self,
+        mouse: MouseEvent,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        let Some(index) = self.rewind.as_ref().and_then(|rewind| {
+            rewind_row_at(&rewind.phase, self.rewind_area, mouse.column, mouse.row)
+        }) else {
+            return Ok(());
+        };
+        let input = match mouse.kind {
+            MouseEventKind::Moved => {
+                if let Some(rewind) = self.rewind.as_mut() {
+                    set_rewind_cursor(&mut rewind.phase, index);
+                }
+                RewindInput::Consumed
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(rewind) = self.rewind.as_mut() else {
+                    return Ok(());
+                };
+                set_rewind_cursor(&mut rewind.phase, index);
+                rewind_activate(&rewind.phase)
+            }
+            _ => RewindInput::Consumed,
+        };
+        self.apply_rewind_input(input, transport, session)
+    }
+
+    fn apply_rewind_input(
+        &mut self,
+        input: RewindInput,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        match input {
+            RewindInput::Dismissed | RewindInput::DismissError => {
+                self.rewind = None;
+                self.rewind_target = None;
+                self.pending_rewind = None;
+                self.status = None;
+            }
+            RewindInput::MoveUp => {
+                if let Some(rewind) = self.rewind.as_mut() {
+                    move_cursor(&mut rewind.phase, -1);
+                }
+            }
+            RewindInput::MoveDown => {
+                if let Some(rewind) = self.rewind.as_mut() {
+                    move_cursor(&mut rewind.phase, 1);
+                }
+            }
+            RewindInput::ConfirmCursor => {
+                let resolved = self
+                    .rewind
+                    .as_ref()
+                    .map(|rewind| confirm_cursor(&rewind.phase))
+                    .unwrap_or(RewindInput::Consumed);
+                return self.apply_rewind_input(resolved, transport, session);
+            }
+            RewindInput::PickerSelect(prompt_index) => {
+                let point = self
+                    .rewind
+                    .as_ref()
+                    .and_then(|rewind| rewind.point(prompt_index))
+                    .cloned();
+                let Some(point) = point else {
+                    self.fail_rewind("selected rewind point disappeared");
+                    return Ok(());
+                };
+                self.rewind_target = Some(point.clone());
+                if self.rewind_skip_confirmation {
+                    self.execute_rewind(point, transport, session)?;
+                } else if let Some(rewind) = self.rewind.as_mut() {
+                    rewind.phase = RewindPhase::Confirm {
+                        target_prompt_index: point.prompt_index,
+                        active_idx: 0,
+                        prompt_preview: point.prompt_preview,
+                    };
+                }
+            }
+            RewindInput::Confirm(prompt_index) | RewindInput::ConfirmNeverAsk(prompt_index) => {
+                if matches!(input, RewindInput::ConfirmNeverAsk(_)) {
+                    self.rewind_skip_confirmation = true;
+                }
+                let point = self
+                    .rewind_target
+                    .clone()
+                    .filter(|point| point.prompt_index == prompt_index);
+                let Some(point) = point else {
+                    self.fail_rewind("selected rewind point disappeared");
+                    return Ok(());
+                };
+                self.execute_rewind(point, transport, session)?;
+            }
+            RewindInput::Consumed => {}
+        }
+        Ok(())
+    }
+
+    fn execute_rewind(
+        &mut self,
+        point: RewindPoint,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+    ) -> PagerResult<()> {
+        if let Some(rewind) = self.rewind.as_mut() {
+            rewind.phase = RewindPhase::Executing {
+                target_prompt_index: point.prompt_index,
+            };
+        }
+        if let Some(at_seq) = point.fork_at_seq {
+            let request_id = DshRequestId::new(format!("rewind-{}", self.next_operation));
+            self.next_operation = self.next_operation.saturating_add(1);
+            let context = UiContext::for_operation(session, request_id);
+            let receipt = self.submit_effect(
+                transport,
+                UiIntent::ForkSession {
+                    at_seq: Some(at_seq),
+                },
+                &context,
+            )?;
+            if matches!(
+                receipt.status,
+                UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
+            ) {
+                self.pending_rewind = Some(PendingRewind {
+                    operation: receipt.operation,
+                    prompt_text: point.prompt_text,
+                });
+                self.status = Some("Rewinding conversation…".into());
+            } else {
+                self.fail_rewind(&receipt_status_message(&receipt, "Rewind"));
+            }
+            return Ok(());
+        }
+
+        let prompt_text = point.prompt_text;
+        let current_preset = transport
+            .control_plane()
+            .snapshot(session.session_id())
+            .and_then(|snapshot| snapshot.agent_preset.clone());
+        match self.start_new_session_with_preset(transport, session, current_preset.as_deref()) {
+            Ok(()) => {
+                let _ = self.prompt.replace_text(&prompt_text);
+                self.shell.focus_prompt();
+                self.rewind = None;
+                self.rewind_target = None;
+                self.status = Some("Conversation rewound; prompt restored".into());
+                Ok(())
+            }
+            Err(error) => {
+                self.fail_rewind(&error.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    fn finish_rewind_attach(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        target: &str,
+        prompt_text: &str,
+    ) {
+        if let Err(error) = self.attach_session(transport, session, target) {
+            self.fail_rewind(&error.to_string());
+            return;
+        }
+        if session.session_id() != target {
+            let diagnostic = self
+                .status
+                .clone()
+                .unwrap_or_else(|| "could not attach forked session".into());
+            self.fail_rewind(&diagnostic);
+            return;
+        }
+        let _ = self.prompt.replace_text(prompt_text);
+        self.shell.focus_prompt();
+        self.rewind = None;
+        self.rewind_target = None;
+        self.status = Some("Conversation rewound; prompt restored".into());
+    }
+
+    fn fail_rewind(&mut self, message: &str) {
+        self.pending_rewind = None;
+        self.rewind_target = None;
+        self.rewind = Some(RewindState {
+            phase: RewindPhase::Error {
+                message: message.to_string(),
+            },
+        });
+        self.status = Some(format!("Rewind failed: {message}"));
+    }
+
     fn request_cancel_session(
         &mut self,
         transport: &mut RpcTransport,
         session: &SessionState,
     ) -> PagerResult<()> {
-        if !session.running() {
+        let retrying = self.cancel_pending.is_some();
+        if !session.running() && !retrying {
             self.status = Some("Turn already finished".into());
-            return Ok(());
-        }
-        if self.cancel_pending.is_some() {
-            self.status = Some("Cancellation already pending".into());
             return Ok(());
         }
 
@@ -3233,7 +3585,11 @@ impl UiState {
             UiEffectStatus::Accepted | UiEffectStatus::Queued | UiEffectStatus::Pending
         ) {
             self.cancel_pending = Some(receipt.operation.clone());
-            self.status = Some("Cancelling turn; waiting for host snapshot".into());
+            self.status = Some(if retrying {
+                "Cancellation retry sent; waiting for host snapshot".into()
+            } else {
+                "Cancelling turn; waiting for host snapshot".into()
+            });
         } else {
             self.status = Some(receipt_status_message(&receipt, "Cancel session"));
         }
@@ -4016,6 +4372,15 @@ impl UiState {
         transport: &mut RpcTransport,
         session: &mut SessionState,
     ) -> PagerResult<()> {
+        self.start_new_session_with_preset(transport, session, None)
+    }
+
+    fn start_new_session_with_preset(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        preset_override: Option<&str>,
+    ) -> PagerResult<()> {
         let cwd = transport
             .control_plane()
             .snapshot(session.session_id())
@@ -4026,8 +4391,9 @@ impl UiState {
                     .map(|path| path.to_string_lossy().into_owned())
             })
             .unwrap_or_else(|| ".".to_string());
-        let requested = std::env::var("DSH_PAGER_PRESET")
-            .ok()
+        let requested = preset_override
+            .map(str::to_string)
+            .or_else(|| std::env::var("DSH_PAGER_PRESET").ok())
             .or_else(|| std::env::var("DSH_TUI_PRESET").ok())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
@@ -5590,6 +5956,39 @@ fn next_permission_preset(current: Option<&str>) -> &'static str {
     }
 }
 
+/// Project DSH's user-message history into Grok's newest-first rewind list.
+/// DSH `session.fork(atSeq)` rounds an anchor forward to the first completed
+/// turn boundary, so the previous user message is the stable anchor that
+/// retains the previous turn while excluding the selected one.
+fn rewind_points(snapshot: &GrokHostSnapshot) -> Vec<RewindPoint> {
+    let users = snapshot
+        .transcript
+        .iter()
+        .filter(|row| row.kind == DshRenderKind::User)
+        .collect::<Vec<_>>();
+    let mut points = users
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let preview = row.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            RewindPoint {
+                prompt_index: index,
+                prompt_preview: if preview.is_empty() {
+                    "(no preview)".into()
+                } else {
+                    preview
+                },
+                prompt_text: row.text.clone(),
+                fork_at_seq: index
+                    .checked_sub(1)
+                    .map(|previous| DshSeq::new(users[previous].source_seq)),
+            }
+        })
+        .collect::<Vec<_>>();
+    points.reverse();
+    points
+}
+
 #[cfg(test)]
 fn steer_capability_available(session: &SessionState, snapshot: &GrokHostSnapshot) -> bool {
     if !snapshot.capabilities.queue_steer {
@@ -5633,7 +6032,7 @@ mod tests {
     use super::{
         MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand, UiState,
         agent_overlay_close_click, agent_overlay_key_closes, register_model_label_click,
-        render_agent_tasks_content, render_image_preview_content,
+        render_agent_tasks_content, render_image_preview_content, rewind_points,
     };
     use crate::app::Overlay;
     use crate::effects::UiEffectStatus;
@@ -5677,7 +6076,9 @@ mod tests {
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use dsh_pager::{ControlPlaneStore, DshRenderEntryId, SessionState, scrollback::Scrollback};
+    use dsh_pager::{
+        ControlPlaneStore, DshRenderEntryId, DshSeq, SessionState, scrollback::Scrollback,
+    };
     use dsh_pager_protocol::{
         CommandDescriptor, HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
     };
@@ -5759,6 +6160,54 @@ mod tests {
     }
 
     #[test]
+    fn rewind_points_are_newest_first_and_anchor_before_the_selected_turn() {
+        let event = |seq: i64, event_type: &str, text: Option<&str>| HistoryEntry {
+            event: SessionEvent {
+                event_type: event_type.into(),
+                seq,
+                time: seq as f64,
+                data: text.map_or_else(
+                    || json!({}),
+                    |text| {
+                        json!({
+                            "role": "user",
+                            "content": [{"type": "text", "text": text}]
+                        })
+                    },
+                ),
+                source_event_seqs: None,
+                surface_op: None,
+                ignorable: None,
+            },
+            view: None,
+        };
+        let mut session = SessionState::new("rewind".into(), 1);
+        session
+            .install_initial(SessionHistoryValue {
+                events: vec![
+                    event(0, "user/message", Some("alpha\nline")),
+                    event(1, "assistant/message", None),
+                    event(2, "turn/end", None),
+                    event(3, "user/message", Some("bravo")),
+                    event(4, "assistant/message", None),
+                    event(5, "turn/end", None),
+                ],
+                has_more: false,
+                projections: None,
+            })
+            .expect("history");
+        let points = rewind_points(&GrokHostSnapshot::from_session(&session));
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].prompt_index, 1);
+        assert_eq!(points[0].prompt_preview, "bravo");
+        assert_eq!(points[0].fork_at_seq.map(DshSeq::get), Some(0));
+        assert_eq!(points[1].prompt_index, 0);
+        assert_eq!(points[1].prompt_preview, "alpha line");
+        assert_eq!(points[1].prompt_text, "alpha\nline");
+        assert_eq!(points[1].fork_at_seq, None);
+    }
+
+    #[test]
     fn dsh_prompt_replaces_the_upstream_mode_hint_with_grok_toggle_yolo() {
         let snapshot = GrokHostSnapshot::demo();
         let mut ui = UiState::default();
@@ -5823,6 +6272,7 @@ mod tests {
                 },
                 session_list: None,
                 session_search: None,
+                forked_session_id: None,
                 file_references: None,
                 attachment_preview: None,
                 commands: None,
@@ -5866,6 +6316,7 @@ mod tests {
                 },
                 session_list: None,
                 session_search: None,
+                forked_session_id: None,
                 file_references: None,
                 attachment_preview: None,
                 commands: None,
@@ -5943,6 +6394,7 @@ mod tests {
                 },
                 session_list: None,
                 session_search: None,
+                forked_session_id: None,
                 file_references: None,
                 attachment_preview: None,
                 commands: None,
@@ -5967,6 +6419,54 @@ mod tests {
             ui.status.as_deref(),
             Some("Turn cancelled; host snapshot converged")
         );
+    }
+
+    #[test]
+    fn stale_cancel_failure_cannot_clear_the_latest_retry() {
+        let session = SessionState::new("cancel-session".into(), 4);
+        let operation = |request_id: &str| crate::effects::OperationKey {
+            session_id: dsh_pager::DshSessionId::new("cancel-session"),
+            generation: dsh_pager::DshGeneration::new(4),
+            request_id: dsh_pager::DshRequestId::new(request_id),
+            action: "cancel-session".into(),
+            dedupe_key: format!("cancel-session:{request_id}"),
+        };
+        let stale = operation("cancel-1");
+        let latest = operation("cancel-2");
+        let mut ui = UiState {
+            cancel_pending: Some(latest.clone()),
+            status: Some("Cancellation retry requested".into()),
+            ..UiState::default()
+        };
+
+        ui.apply_effect_completion(
+            crate::effects::UiEffectCompletion {
+                effect: crate::effects::UiEffect::CancelSession {
+                    operation: stale.clone(),
+                },
+                receipt: crate::effects::UiEffectReceipt {
+                    status: UiEffectStatus::Timeout,
+                    operation: stale,
+                    diagnostic: Some("old cancel timed out".into()),
+                    retryable: Some(true),
+                },
+                session_list: None,
+                session_search: None,
+                forked_session_id: None,
+                file_references: None,
+                attachment_preview: None,
+                commands: None,
+                command_execution: None,
+                agent_preset_list: None,
+                selected_agent_preset: None,
+                session_models: None,
+                selected_model: None,
+            },
+            &session,
+        );
+
+        assert_eq!(ui.cancel_pending.as_ref(), Some(&latest));
+        assert_eq!(ui.status.as_deref(), Some("Cancellation retry requested"));
     }
 
     fn session_with_long_messages(count: usize) -> SessionState {

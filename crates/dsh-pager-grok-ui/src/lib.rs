@@ -23,6 +23,7 @@ pub mod views;
 pub mod agent_preset;
 pub mod diag;
 pub mod effects;
+pub mod esc;
 pub mod geometry;
 pub mod host_adapter;
 pub mod media;

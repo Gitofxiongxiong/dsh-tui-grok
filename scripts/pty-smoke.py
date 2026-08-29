@@ -304,13 +304,14 @@ def main() -> int:
             resize(fd, 30, 100)
             pump(0.6)
 
-        # Exit through the same Esc path used by the interactive shell.
-        os.write(fd, b"\x1b")
+        # Grok's idle Esc is reserved for clear/rewind and never quits.
+        # Exit through the empty-idle Ctrl+C rung instead.
+        os.write(fd, b"\x03")
         if args.full:
-            # Keep the close and quit steps separate so an implementation with
-            # an extra modal layer still follows the Esc ladder deterministically.
+            # The full matrix can leave an invisible draft after mouse/input
+            # probing. The first Ctrl+C clears it; the second exits.
             pump(0.2)
-            os.write(fd, b"\x1b\x1b")
+            os.write(fd, b"\x03")
         while time.monotonic() < deadline:
             pump()
             waited, status = os.waitpid(pid, os.WNOHANG)

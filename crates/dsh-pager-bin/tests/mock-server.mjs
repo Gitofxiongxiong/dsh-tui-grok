@@ -328,6 +328,7 @@ let tailPushed = false
 let approvalPending = false
 let questionPending = false
 let cancelPending = false
+let cancelAttempts = 0
 let archivedSessionIds = []
 let queue = [
   {
@@ -566,6 +567,14 @@ rl.on('line', (line) => {
       success(message.id, { events: [], hasMore: false })
       return
     }
+    if (message.params?.sessionId === 'session-created') {
+      success(message.id, {
+        events: [],
+        hasMore: false,
+        projections: { asOfSeq: -1, values: controlProjections() },
+      })
+      return
+    }
     emitTailOnce()
     success(message.id, {
       events: events.slice(0, 3).map(entry),
@@ -710,10 +719,12 @@ rl.on('line', (line) => {
     }
     if (promptText === 'cancel smoke') {
       cancelPending = true
+      cancelAttempts = 0
+      const targetSessionId = String(message.params?.sessionId ?? sessionId)
       write({
         jsonrpc: '2.0',
         method: 'events.host',
-        params: { type: 'host/session-status', sessionId, running: true },
+        params: { type: 'host/session-status', sessionId: targetSessionId, running: true },
       })
       success(message.id, { accepted: true })
       return
@@ -825,12 +836,19 @@ rl.on('line', (line) => {
       success(message.id, { accepted: true })
       return
     }
+    cancelAttempts += 1
+    if (cancelAttempts === 1) {
+      console.error('MOCK_CANCEL_ATTEMPT_1')
+      success(message.id, { accepted: true })
+      return
+    }
     cancelPending = false
-    console.error('MOCK_CANCEL')
+    console.error('MOCK_CANCEL_ATTEMPT_2')
+    const targetSessionId = String(message.params?.sessionId ?? sessionId)
     write({
       jsonrpc: '2.0',
       method: 'events.host',
-      params: { type: 'host/session-status', sessionId, running: false },
+      params: { type: 'host/session-status', sessionId: targetSessionId, running: false },
     })
     success(message.id, { accepted: true })
     return

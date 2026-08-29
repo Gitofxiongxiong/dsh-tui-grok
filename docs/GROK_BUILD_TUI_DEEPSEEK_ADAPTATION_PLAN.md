@@ -504,7 +504,7 @@ L7 的 backend workstream 与 M1、M6、M7、M9 并行，但任何 backend 新�
 | M0 治理/基线 | ✅ 已完成（M0 baseline） | Git 根/初始提交、source manifest checker、baseline.sh、fallback semantic fixtures、协议 fixture、all-features clippy 和 mock PTY 已闭合；baseline 仍明确不是 Grok reference matrix | 由 M2-M10 消费基线并逐步替换 fallback |
 | M1 contract/projection/effects | ✅ 已完成（M1 contract） | typed identity、rich block/partial/lineage DTO、分区 GrokHostSnapshot、UiIntent→UiEffect→Receipt、dedupe guard、capability matrix、projection/effect/fixture tests 已闭合 | M2/M3 消费 neutral contract |
 | M2 terminal/render | ◐ 部分完成（迁移基线） | `TerminalSurface` 统一 capability-aware raw/alternate/paste/mouse/cursor lifecycle、resize epoch、cell diff/link-map draw；semantic Theme 收归 renderer；prompt 使用 grapheme-aware viewport/cursor；但完整 Grok Appearance/render primitive 和主界面组件树尚未成为默认生产路径 | 完成 Grok theme/render/scrollback primitive parity |
-| M3 AppView/AgentView | ◐ 部分完成（自建 AppShell 基线） | 已有 `AppShell` reducer、KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch、picker-owned Esc ladder、adaptive pane layout 和 semantic focus snapshot；但 `runtime.rs` 仍是手工布局，完整 Grok AppView/AgentView 未接入 | 按 M3.1-M3.8 移植完整组件树并移除 runtime 手工主屏 |
+| M3 AppView/AgentView | ◐ 部分完成（自建 AppShell 基线） | 已有 `AppShell` reducer、KeyOwner/overlay/back state、统一 key/mouse/paste/resize/tick/notification dispatch；M3.5 的 bare-Esc pending-action、双击 clear/silent rewind、cancel retry/保护窗和 Grok rewind picker/confirm 已按 source manifest 接入，并有 unit + PTY + ttyd/Playwright 对照；但 `runtime.rs` 仍是手工布局，完整 Grok AppView/AgentView 未接入 | 按 M3.1-M3.4/M3.6-M3.8 移植完整组件树并移除 runtime 手工主屏 |
 | M4 scrollback/blocks | ◐ 部分完成（vertical slice 基线） | `DshRenderBlock` 保留 Markdown/Reasoning/Tool/Result/Image/Diff/Unknown；Grok-derived block projection、结构化 copy、`Scrollback::visible_lines`/materialization 已进入默认 runtime；仍缺完整 Grok scrollback/block renderer、reference golden、selection/link map 和 50k 性能门禁 | 完成 M4.1-M4.8 rich renderer/reference/selection/perf |
 | M5 prompt | ◐ 部分完成（completion slice） | Grok `EditBuffer` prompt 已加入 host capability-gated history/slash suggestions、Ctrl-P/Ctrl-N history navigation、Ctrl-X/Ctrl-P external process gating、Unicode/paste/receipt tests；完整 Grok prompt widget、外部进程真实 terminal handoff 与 mouse-selection golden 仍缺 | 完成 M5 prompt widget/state/effect parity |
 | M6 picker/dashboard | ◐ 部分完成（completion slice） | `DashboardModel` 从 `ControlPlaneStore` revision/workspace hierarchy 同步；Dashboard owner/overlay 支持 stable-ID query/group/archive/collapse、非 attach `peek_session_tail`、peek→attach/back；真实双 session race、完整 Grok picker/list pane 和 reference golden 仍缺 | 完成 M6.1-M6.8 multi-session/reference parity |
@@ -667,6 +667,12 @@ Grok 原实现的分叉。
   UI thread 只做 reducer/render，effect 在 host boundary 执行。
 - M3.5 实现 Esc ladder：prompt draft、completion、selection、picker、queue、
   interaction、modal、dashboard、detach/quit 逐层退出。
+  - 2026-08-29：homepage bare-Esc 子闭包已完成：800ms clear/rewind arm、
+    cancel pending 重发、取消后 1s rewind 抑制、selection/overlay 抢键、rewind
+    picker/confirm/execute/error；DSH 无原地 rewind API，因此通过 host
+    `session.fork(atSeq)`（首轮用 `session.create`）建立权威历史前缀后 attach，
+    再恢复所选 prompt，不在 UI 本地篡改 transcript。其余 modal/back owner 仍随
+    M3 总出口验收。
 - M3.6 迁移 Grok 的宽度断点、pane composition、status/prompt/footer placement；
   不用固定三行 layout 代替。
 - M3.7 对每个旧 DSH view 建立 replacement map，禁止同职责模块同时成为默认
