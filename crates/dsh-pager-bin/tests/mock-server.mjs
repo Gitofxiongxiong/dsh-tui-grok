@@ -327,6 +327,7 @@ const events = [
 let tailPushed = false
 let approvalPending = false
 let questionPending = false
+let multiQuestionPending = false
 let cancelPending = false
 let cancelAttempts = 0
 let deepseekCredentialConfigured = false
@@ -764,6 +765,52 @@ rl.on('line', (line) => {
       success(message.id, { accepted: true })
       return
     }
+    if (promptText === 'multi question smoke') {
+      multiQuestionPending = true
+      write({
+        jsonrpc: '2.0',
+        method: 'events.mux',
+        params: {
+          type: 'question/requested',
+          sessionId,
+          requestId: 'multi-question-rpc',
+          questions: [
+            {
+              id: 'target',
+              header: 'Connection target',
+              question: 'What should happen on the remote server?',
+              options: [
+                { label: 'Inspect code', description: 'Read project files' },
+                { label: 'Build / verify', description: 'Run tests and checks' },
+                { label: 'Deploy', description: 'Publish the current build' },
+                { label: 'Other', description: 'Choose another goal' },
+              ],
+            },
+            {
+              id: 'auth',
+              header: 'Authentication',
+              question: 'How should SSH authenticate?',
+              options: [
+                { label: 'SSH key' },
+                { label: 'Password' },
+                { label: 'Agent forwarding' },
+              ],
+            },
+            {
+              id: 'scope',
+              header: 'Change scope',
+              question: 'May the remote project be modified?',
+              options: [
+                { label: 'Read only' },
+                { label: 'Allow changes' },
+              ],
+            },
+          ],
+        },
+      })
+      success(message.id, { accepted: true })
+      return
+    }
     approvalPending = true
     write({
       jsonrpc: '2.0',
@@ -782,6 +829,32 @@ rl.on('line', (line) => {
   }
   if (message?.method === 'tui.respond') {
     const interaction = message.params?.interaction
+    if (interaction?.type === 'question' && multiQuestionPending) {
+      const answers = interaction.answers?.answers
+      const expectedIds = ['target', 'auth', 'scope']
+      const complete = Array.isArray(answers)
+        && answers.length === expectedIds.length
+        && answers.every((answer, index) => answer?.id === expectedIds[index]
+          && Array.isArray(answer?.selected)
+          && answer.selected.length === 1)
+      if (!complete) {
+        write({ jsonrpc: '2.0', id: message.id, result: { accepted: false } })
+        return
+      }
+      multiQuestionPending = false
+      write({
+        jsonrpc: '2.0',
+        method: 'events.mux',
+        params: {
+          type: 'question/resolved',
+          sessionId,
+          questionRpcId: 'multi-question-rpc',
+          outcome: 'answered',
+        },
+      })
+      write({ jsonrpc: '2.0', id: message.id, result: { accepted: true } })
+      return
+    }
     if (interaction?.type === 'approval' && approvalPending) {
       approvalPending = false
       write({

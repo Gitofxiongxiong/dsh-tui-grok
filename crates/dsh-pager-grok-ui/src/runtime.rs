@@ -86,7 +86,9 @@ use crate::views::{
     context_bar::context_bar_line,
     dashboard::{DashboardPeek, DashboardRenderState, render_dashboard_content},
     file_search::{controller::FileSearchController, line_viewer::render_file_search_content},
-    interaction::{approval_outcome, permission_state, question_state, response_for},
+    interaction::{
+        QuestionAnswerDraft, approval_outcome, permission_state, question_state, response_for,
+    },
     login::{DEEPSEEK_LOGIN_PROVIDER, LoginModalState, LoginOutcome},
     modal_window::{
         ModalSizing, ModalWindowConfig, ModalWindowOutcome, Shortcut, handle_modal_mouse,
@@ -603,6 +605,8 @@ struct UiState {
     queue_pending: Option<PendingQueueMutation>,
     interaction_editor: PromptEditor,
     interaction_selected: usize,
+    interaction_question_index: usize,
+    interaction_answer_drafts: Vec<QuestionAnswerDraft>,
     interaction_request_id: Option<DshRequestId>,
     interaction_generation: Option<DshGeneration>,
     interaction_pending: Option<DshRequestId>,
@@ -1388,6 +1392,7 @@ impl UiState {
         let question = snapshot.interaction.as_ref().and_then(|interaction| {
             question_state(
                 interaction,
+                self.interaction_question_index,
                 self.interaction_selected,
                 self.interaction_pending.is_some(),
                 self.interaction_args_expanded,
@@ -1779,6 +1784,8 @@ impl UiState {
                 agent_layout.shortcuts,
                 permission.options.len(),
                 permission.pending,
+                "select",
+                (permission.options.len() > 1).then_some("next option"),
                 permission
                     .has_collapsible_display(self.permission_area.width.saturating_sub(5) as usize),
                 permission.args_expanded,
@@ -1786,11 +1793,31 @@ impl UiState {
                 "permission",
             );
         } else if let Some(question) = question.as_ref() {
+            let question_count =
+                snapshot
+                    .interaction
+                    .as_ref()
+                    .map_or(0, |interaction| match interaction {
+                        DshInteraction::Question { questions, .. } => questions.len(),
+                        DshInteraction::Approval { .. } => 0,
+                    });
             self.render_blocking_card_shortcuts(
                 frame,
                 agent_layout.shortcuts,
                 question.options.len(),
                 question.pending,
+                if question_count > 1 {
+                    "answer"
+                } else {
+                    "select"
+                },
+                if question_count > 1 {
+                    Some("next question")
+                } else if question.options.len() > 1 {
+                    Some("next option")
+                } else {
+                    None
+                },
                 question
                     .has_collapsible_display(self.permission_area.width.saturating_sub(5) as usize),
                 question.args_expanded,
@@ -1962,6 +1989,13 @@ impl UiState {
                 self.interaction_generation = Some(generation);
                 self.interaction_editor.reset();
                 self.interaction_selected = 0;
+                self.interaction_question_index = 0;
+                self.interaction_answer_drafts = match interaction {
+                    DshInteraction::Question { questions, .. } => {
+                        vec![QuestionAnswerDraft::default(); questions.len()]
+                    }
+                    DshInteraction::Approval { .. } => Vec::new(),
+                };
                 self.interaction_pending = None;
                 self.interaction_args_expanded = false;
                 self.hovered_permission_item = None;
@@ -1988,6 +2022,8 @@ impl UiState {
             self.interaction_request_id = None;
             self.interaction_generation = None;
             self.interaction_pending = None;
+            self.interaction_question_index = 0;
+            self.interaction_answer_drafts.clear();
             self.interaction_args_expanded = false;
             self.permission_area = Rect::default();
             self.permission_option_rows.clear();
@@ -2602,6 +2638,8 @@ impl UiState {
         area: Rect,
         option_count: usize,
         pending: bool,
+        selection_label: &'static str,
+        tab_label: Option<&'static str>,
         collapsible: bool,
         expanded: bool,
         compact: bool,
@@ -2618,11 +2656,11 @@ impl UiState {
                 hints.push(HintItem::paired(
                     KeyShortcut::key(KeyCode::Char('1')),
                     KeyShortcut::key(KeyCode::Char(last)),
-                    "select",
+                    selection_label,
                 ));
-                if option_count > 1 {
-                    hints.push(HintItem::new(KeyShortcut::key(KeyCode::Tab), "next option"));
-                }
+            }
+            if !pending && let Some(tab_label) = tab_label {
+                hints.push(HintItem::new(KeyShortcut::key(KeyCode::Tab), tab_label));
             }
             if !pending && collapsible {
                 hints.push(HintItem::new(
@@ -3224,8 +3262,14 @@ impl UiState {
                         Some(transport.control_plane()),
                     );
                     let has_options = snapshot.interaction.as_ref().is_some_and(|interaction| {
-                        question_state(interaction, 0, false, false)
-                            .is_some_and(|state| !state.options.is_empty())
+                        question_state(
+                            interaction,
+                            self.interaction_question_index,
+                            0,
+                            false,
+                            false,
+                        )
+                        .is_some_and(|state| !state.options.is_empty())
                     });
                     if !has_options {
                         let _ = self.interaction_editor.insert_paste(&text);
@@ -5379,6 +5423,107 @@ impl UiState {
         Ok(())
     }
 
+    fn current_question_has_options(&self, interaction: &DshInteraction) -> bool {
+        question_state(
+            interaction,
+            self.interaction_question_index,
+            self.interaction_selected,
+            false,
+            self.interaction_args_expanded,
+        )
+        .is_some_and(|state| !state.options.is_empty())
+    }
+
+    fn save_current_question_draft(&mut self, has_options: bool, explicit: bool) {
+        let custom = self.interaction_editor.text().to_string();
+        let Some(draft) = self
+            .interaction_answer_drafts
+            .get_mut(self.interaction_question_index)
+        else {
+            return;
+        };
+        draft.selected_option = self.interaction_selected;
+        if has_options {
+            if explicit {
+                draft.answered = true;
+            }
+        } else {
+            draft.custom = custom;
+            draft.answered = !draft.custom.trim().is_empty();
+        }
+    }
+
+    fn load_question_draft(&mut self, question_index: usize) {
+        if self.interaction_answer_drafts.is_empty() {
+            return;
+        }
+        self.interaction_question_index =
+            question_index.min(self.interaction_answer_drafts.len().saturating_sub(1));
+        let draft = &self.interaction_answer_drafts[self.interaction_question_index];
+        self.interaction_selected = draft.selected_option;
+        let _ = self.interaction_editor.replace_text(&draft.custom);
+        self.interaction_args_expanded = false;
+        self.hovered_permission_item = None;
+        self.last_permission_click = None;
+    }
+
+    fn move_question(&mut self, interaction: &DshInteraction, backwards: bool) {
+        let total = self.interaction_answer_drafts.len();
+        if total <= 1 {
+            return;
+        }
+        let has_options = self.current_question_has_options(interaction);
+        self.save_current_question_draft(has_options, false);
+        let next = if backwards {
+            if self.interaction_question_index == 0 {
+                total - 1
+            } else {
+                self.interaction_question_index - 1
+            }
+        } else {
+            (self.interaction_question_index + 1) % total
+        };
+        self.load_question_draft(next);
+        self.status = Some(format!("Question {}/{}", next + 1, total));
+    }
+
+    fn complete_question_or_submit(
+        &mut self,
+        transport: &mut RpcTransport,
+        session: &mut SessionState,
+        interaction: &DshInteraction,
+    ) -> PagerResult<()> {
+        let has_options = self.current_question_has_options(interaction);
+        self.save_current_question_draft(has_options, true);
+        let total = self.interaction_answer_drafts.len();
+        if total == 0 {
+            self.status = Some("Question has no answerable items".into());
+            return Ok(());
+        }
+        if let Some(next) = (1..=total)
+            .map(|offset| (self.interaction_question_index + offset) % total)
+            .find(|index| !self.interaction_answer_drafts[*index].answered)
+        {
+            self.load_question_draft(next);
+            let answered = self
+                .interaction_answer_drafts
+                .iter()
+                .filter(|draft| draft.answered)
+                .count();
+            self.status = Some(format!(
+                "Question {}/{} · {answered}/{total} answered",
+                next + 1,
+                total
+            ));
+            return Ok(());
+        }
+        let Some(response) = response_for(interaction, &self.interaction_answer_drafts) else {
+            self.status = Some("Complete every question before submitting".into());
+            return Ok(());
+        };
+        self.submit_interaction(transport, session, interaction, response)
+    }
+
     fn handle_interaction_key(
         &mut self,
         key: crossterm::event::KeyEvent,
@@ -5421,6 +5566,7 @@ impl UiState {
         }
         let Some(mut state) = question_state(
             interaction,
+            self.interaction_question_index,
             self.interaction_selected,
             false,
             self.interaction_args_expanded,
@@ -5435,7 +5581,14 @@ impl UiState {
             return Ok(());
         }
         let count = state.options.len();
+        let question_count = self.interaction_answer_drafts.len();
         match key.code {
+            KeyCode::Tab if question_count > 1 => {
+                self.move_question(interaction, false);
+            }
+            KeyCode::BackTab if question_count > 1 => {
+                self.move_question(interaction, true);
+            }
             KeyCode::Tab if count > 0 => {
                 self.interaction_selected = (self.interaction_selected + 1) % count;
             }
@@ -5459,25 +5612,21 @@ impl UiState {
                 let index = digit.to_digit(10).unwrap_or(1) as usize - 1;
                 if index < count {
                     self.interaction_selected = index;
-                    if let Some(response) = response_for(interaction, index, "") {
-                        self.submit_interaction(transport, session, interaction, response)?;
-                    }
+                    self.complete_question_or_submit(transport, session, interaction)?;
                 }
             }
             KeyCode::Enter => {
                 if count == 0 {
-                    let typed = self.interaction_editor.text();
-                    if let Some(response) = response_for(interaction, 0, typed) {
-                        self.submit_interaction(transport, session, interaction, response)?;
-                    } else {
+                    if self.interaction_editor.text().trim().is_empty() {
                         self.status = Some("Answer is empty".into());
+                    } else {
+                        self.complete_question_or_submit(transport, session, interaction)?;
                     }
                 } else {
                     state.active_idx = self.interaction_selected;
                     state.clamp_selection();
-                    if let Some(response) = response_for(interaction, state.active_idx, "") {
-                        self.submit_interaction(transport, session, interaction, response)?;
-                    }
+                    self.interaction_selected = state.active_idx;
+                    self.complete_question_or_submit(transport, session, interaction)?;
                 }
             }
             _ if count == 0 => {
@@ -5627,9 +5776,7 @@ impl UiState {
                             });
                     if double_click {
                         self.last_permission_click = None;
-                        if let Some(response) = response_for(interaction, index, "") {
-                            self.submit_interaction(transport, session, interaction, response)?;
-                        }
+                        self.complete_question_or_submit(transport, session, interaction)?;
                     } else {
                         self.last_permission_click = Some((now, index));
                     }
@@ -6293,7 +6440,8 @@ mod tests {
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use dsh_pager::{
-        ControlPlaneStore, DshRenderEntryId, DshSeq, SessionState, scrollback::Scrollback,
+        ControlPlaneStore, DshInteraction, DshRenderEntryId, DshSeq, SessionState,
+        scrollback::Scrollback,
     };
     use dsh_pager_protocol::{
         CommandDescriptor, HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue,
@@ -7018,6 +7166,58 @@ mod tests {
         }));
         assert!(!screen.contains("Interaction · host request"));
         assert!(!screen.contains("answer:"));
+    }
+
+    #[test]
+    fn multi_question_tabs_preserve_each_questions_local_choice() {
+        let interaction = DshInteraction::Question {
+            request_id: "rpc-multi".into(),
+            questions: vec![
+                json!({
+                    "id": "target",
+                    "header": "Connection target",
+                    "question": "What should happen?",
+                    "options": [{"label": "Inspect"}, {"label": "Build"}]
+                }),
+                json!({
+                    "id": "auth",
+                    "header": "Authentication",
+                    "question": "How should SSH authenticate?",
+                    "options": [{"label": "Key"}, {"label": "Password"}]
+                }),
+            ],
+        };
+        let mut ui = UiState {
+            interaction_answer_drafts: vec![Default::default(); 2],
+            ..UiState::default()
+        };
+
+        ui.interaction_selected = 1;
+        ui.save_current_question_draft(true, true);
+        ui.move_question(&interaction, false);
+        assert_eq!(ui.interaction_question_index, 1);
+        assert_eq!(ui.interaction_selected, 0);
+
+        ui.interaction_selected = 1;
+        ui.save_current_question_draft(true, true);
+        ui.move_question(&interaction, false);
+        assert_eq!(ui.interaction_question_index, 0);
+        assert_eq!(ui.interaction_selected, 1);
+        assert!(
+            ui.interaction_answer_drafts
+                .iter()
+                .all(|draft| draft.answered)
+        );
+
+        let first = crate::views::interaction::question_state(
+            &interaction,
+            ui.interaction_question_index,
+            ui.interaction_selected,
+            false,
+            false,
+        )
+        .expect("first question");
+        assert_eq!(first.header.as_deref(), Some("Connection target · 1/2"));
     }
 
     #[test]
