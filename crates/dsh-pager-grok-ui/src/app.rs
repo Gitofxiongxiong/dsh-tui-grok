@@ -130,6 +130,12 @@ pub enum ShellAction {
     ClearPrompt,
     ScrollUp(u16),
     ScrollDown(u16),
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+    GotoTop,
+    GotoBottom,
     SubmitPrompt,
     PromptNewline,
     ToggleYolo,
@@ -466,8 +472,8 @@ impl AppShell {
                     }
                     KeyCode::Up | KeyCode::Char('k') => ShellAction::ScrollUp(1),
                     KeyCode::Down | KeyCode::Char('j') => ShellAction::ScrollDown(1),
-                    KeyCode::PageUp => ShellAction::ScrollUp(8),
-                    KeyCode::PageDown => ShellAction::ScrollDown(8),
+                    KeyCode::PageUp => ShellAction::PageUp,
+                    KeyCode::PageDown => ShellAction::PageDown,
                     _ => ShellAction::None,
                 };
             }
@@ -580,7 +586,7 @@ impl AppShell {
                     self.open_agent_tasks();
                     return ShellAction::OpenAgentTasks;
                 }
-                KeyCode::Char('d') => {
+                KeyCode::Char('d') if key.modifiers.is_empty() => {
                     self.previous_owner = self.owner;
                     self.overlay = Overlay::Dashboard;
                     self.owner = KeyOwner::Dashboard;
@@ -588,8 +594,22 @@ impl AppShell {
                 }
                 KeyCode::Up | KeyCode::Char('k') => return ShellAction::ScrollUp(1),
                 KeyCode::Down | KeyCode::Char('j') => return ShellAction::ScrollDown(1),
-                KeyCode::PageUp => return ShellAction::ScrollUp(8),
-                KeyCode::PageDown => return ShellAction::ScrollDown(8),
+                KeyCode::PageUp => return ShellAction::PageUp,
+                KeyCode::PageDown => return ShellAction::PageDown,
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    return ShellAction::HalfPageUp;
+                }
+                KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                    return ShellAction::HalfPageDown;
+                }
+                KeyCode::Char('g') if key.modifiers.is_empty() => {
+                    return ShellAction::GotoTop;
+                }
+                KeyCode::Char('G')
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    return ShellAction::GotoBottom;
+                }
                 _ => {}
             }
         }
@@ -635,6 +655,40 @@ mod tests {
         assert_eq!(
             shell.dispatch(ShellEvent::Key(key(KeyCode::Esc)), true),
             ShellAction::None
+        );
+    }
+
+    #[test]
+    fn empty_prompt_routes_grok_scrollback_navigation_actions() {
+        let mut shell = AppShell::default();
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::Char('g'))), true),
+            ShellAction::GotoTop
+        );
+        assert_eq!(
+            shell.dispatch(
+                ShellEvent::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+                true,
+            ),
+            ShellAction::GotoBottom
+        );
+        assert_eq!(
+            shell.dispatch(ShellEvent::Key(key(KeyCode::PageUp)), true),
+            ShellAction::PageUp
+        );
+        assert_eq!(
+            shell.dispatch(
+                ShellEvent::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+                true,
+            ),
+            ShellAction::HalfPageUp
+        );
+        assert_eq!(
+            shell.dispatch(
+                ShellEvent::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                true,
+            ),
+            ShellAction::HalfPageDown
         );
     }
 

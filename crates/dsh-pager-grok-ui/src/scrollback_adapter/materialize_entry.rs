@@ -4,7 +4,7 @@
 //! user-visible role, indentation and copy projection so production and
 //! parity consume the same renderer without inspecting protocol JSON.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -124,12 +124,24 @@ impl<'a> MaterializeContext<'a> {
     }
 }
 
-pub(crate) fn semantic_lines(
+#[cfg(test)]
+fn semantic_lines(
     entry: &DshRenderEntry,
     width: usize,
     theme: Theme,
     projection: &ProjectionInfo,
     context: &MaterializeContext<'_>,
+) -> Vec<RichPaintLine> {
+    semantic_lines_with_markdown_cache(entry, width, theme, projection, context, None)
+}
+
+pub(crate) fn semantic_lines_with_markdown_cache(
+    entry: &DshRenderEntry,
+    width: usize,
+    theme: Theme,
+    projection: &ProjectionInfo,
+    context: &MaterializeContext<'_>,
+    markdown: Option<&HashMap<usize, Vec<Line<'static>>>>,
 ) -> Vec<RichPaintLine> {
     if projection.group_hidden {
         return Vec::new();
@@ -157,6 +169,7 @@ pub(crate) fn semantic_lines(
         width.saturating_sub(usize::from(timestamp.is_some()) * TIMESTAMP_RESERVED_WIDTH),
         effective_mode,
         context,
+        markdown,
     );
     let fallback_color = if projection.group_failed || entry.finish == DshRenderFinish::Failed {
         theme.accent_error
@@ -362,6 +375,7 @@ fn render_semantic_lines(
     width: usize,
     entry_mode: DisplayMode,
     context: &MaterializeContext<'_>,
+    markdown: Option<&HashMap<usize, Vec<Line<'static>>>>,
 ) -> Vec<SemanticLine> {
     let appearance = context.appearance;
     let expanded_blocks = context.expanded_blocks;
@@ -393,7 +407,13 @@ fn render_semantic_lines(
                 let ProjectedBlock::Thinking { text } = &projected_block.block else {
                     unreachable!()
                 };
-                let body = render_markdown_body(text, theme, content_width);
+                let body = render_markdown_body_cached(
+                    text,
+                    theme,
+                    content_width,
+                    projected_block.source_index,
+                    markdown,
+                );
                 let block = ThinkingBlock::new(body, thinking_elapsed_ms(entry)).render(
                     ThinkingBlockContext {
                         mode: projected_entry.display_mode,
@@ -416,7 +436,14 @@ fn render_semantic_lines(
                 else {
                     unreachable!()
                 };
-                let body = render_agent_projection(*block, fallback, theme, content_width);
+                let body = render_agent_projection_cached(
+                    *block,
+                    fallback,
+                    theme,
+                    content_width,
+                    projected_block.source_index,
+                    markdown,
+                );
                 return materialize_block(
                     AgentMessageBlock::new(body).render(),
                     content_width,
@@ -532,7 +559,8 @@ fn render_semantic_lines(
                 } else {
                     DisplayMode::Collapsed
                 };
-                let body = render_markdown_body(text, theme, content_width);
+                let body =
+                    render_markdown_body_cached(text, theme, content_width, block_index, markdown);
                 let rendered = ThinkingBlock::new(body, thinking_elapsed_ms(entry)).render(
                     ThinkingBlockContext {
                         mode,
@@ -550,7 +578,14 @@ fn render_semantic_lines(
                 continue;
             }
             ProjectedBlock::AgentMarkdown { block, fallback } => {
-                let rendered = render_agent_projection(*block, fallback, theme, content_width);
+                let rendered = render_agent_projection_cached(
+                    *block,
+                    fallback,
+                    theme,
+                    content_width,
+                    block_index,
+                    markdown,
+                );
                 semantic.extend(materialize_block(
                     AgentMessageBlock::new(rendered).render(),
                     content_width,
@@ -677,6 +712,19 @@ fn render_markdown_body(text: &str, theme: Theme, width: usize) -> Vec<Line<'sta
     body
 }
 
+fn render_markdown_body_cached(
+    text: &str,
+    theme: Theme,
+    width: usize,
+    block_index: Option<usize>,
+    cache: Option<&HashMap<usize, Vec<Line<'static>>>>,
+) -> Vec<Line<'static>> {
+    block_index
+        .and_then(|index| cache.and_then(|cache| cache.get(&index)))
+        .cloned()
+        .unwrap_or_else(|| render_markdown_body(text, theme, width))
+}
+
 fn render_agent_projection(
     block: Option<&DshRenderBlock>,
     fallback: &str,
@@ -689,6 +737,20 @@ fn render_agent_projection(
     let mut body = Vec::new();
     render_block(&mut body, block, theme, 0, width);
     body
+}
+
+fn render_agent_projection_cached(
+    block: Option<&DshRenderBlock>,
+    fallback: &str,
+    theme: Theme,
+    width: usize,
+    block_index: Option<usize>,
+    cache: Option<&HashMap<usize, Vec<Line<'static>>>>,
+) -> Vec<Line<'static>> {
+    let Some(DshRenderBlock::Markdown { text }) = block else {
+        return render_agent_projection(block, fallback, theme, width);
+    };
+    render_markdown_body_cached(text, theme, width, block_index, cache)
 }
 
 fn render_generic_row_at_width(

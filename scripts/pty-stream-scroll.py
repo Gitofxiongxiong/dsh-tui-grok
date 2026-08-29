@@ -165,10 +165,27 @@ def main() -> int:
                 f"{later_rows[0] if later_rows else None}\nscreen:\n{screen.text()}"
             )
 
-        # Travel to the tail and deliberately overscroll. Once follow is restored,
-        # later stream chunks must enter the screen without any further input.
-        os.write(fd, wheel(65, 80))
-        wait_until(lambda: bool(visible_tail_indices(screen)), "wheel-down tail")
+        # Travel to the tail with a bounded, human-sized gesture.  The previous
+        # regression sent 80 reports as one flood, which could hide a moving or
+        # stale max_scroll: brute force eventually crossed either value.  Send
+        # one-row reports and require the real tail to become visible within a
+        # viewport-sized budget, just like the upstream Grok PTY scenario.
+        down_reports = 0
+        down_budget = ROWS // 2 + 4
+        while down_reports < down_budget:
+            os.write(fd, wheel(65))
+            down_reports += 1
+            pump(0.012)
+        if not visible_tail_indices(screen):
+            raise AssertionError(
+                "bounded wheel-down could not reach the live tail: "
+                f"reports={down_reports}\nscreen:\n{screen.text()}"
+            )
+
+        # Landing at the bottom remains manual in Grok.  One additional fully
+        # clamped downward report is the explicit gesture that restores follow.
+        os.write(fd, wheel(65))
+        pump(0.05)
         tail_after_down = max(visible_tail_indices(screen))
         follow_until = time.monotonic() + 1.0
         while time.monotonic() < follow_until:
@@ -189,7 +206,8 @@ def main() -> int:
         wait_for_exit()
         print(
             "stream scroll PTY ok: "
-            f"top={top_before}->{parked_marker}, tail={tail_after_down}->"
+            f"top={top_before}->{parked_marker}, down_reports={down_reports}, "
+            f"tail={tail_after_down}->"
             f"{max(tails_following)}"
         )
         return 0

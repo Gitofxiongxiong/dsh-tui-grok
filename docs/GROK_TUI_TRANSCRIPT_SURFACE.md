@@ -289,6 +289,15 @@ host/viewport/direct-Buffer painter，semantic rows、cells、copy 与 entry/blo
 N2 scrollback renderer closure 因而已闭合；全 TUI 或任意数据的逐像素一致仍由上级
 parity 计划和同数据浏览器/golden 证据另行验收。
 
+2026-08-29 的流式滚动闭包继续收紧了这里的“viewport”定义：production 主 transcript
+现在由 `scrollback_adapter::state::GrokScrollbackState` 单独拥有 `scroll_offset`、
+`total_height`、`viewport_height`、`follow_mode` 和稳定顶部 anchor。Runtime 不再保存
+`TranscriptViewportState`/独立 `scroll_anchor`，绘制也只消费已经 prepare 的窗口，不会在
+`visible_lines` 内开始第二次 layout。手工滚动只精确测量可见 entry 加下方 8-entry margin，
+不测量上方；follow 初次布局按 Grok 常量预热上方 3 页，render cache 保留 128-entry margin。
+单 Markdown streaming entry 同时保留上游 `StreamingMarkdownRenderer` frozen checkpoint，
+partial revision 只 push suffix；离开视口会释放 rich rows，但不会丢失 Markdown stream state。
+
 特殊态：
 
 | 条件 | 竖条 |
@@ -414,17 +423,24 @@ Btw（`/btw`）与 Agent 正文同类，走同一套 overlay 资格；触发仍�
 
 ### 10.1 流式输出期间的滚动
 
-手工视口用“从 transcript 顶部开始的绝对行号”表示，是否跟随尾部由独立的
-`follow_mode` 表示，不能再用“距底部距离”同时表达两件事：
+手工视口由 Grok-derived `GrokScrollbackState` 用“从 transcript 顶部开始的绝对行号”表示，
+是否跟随尾部由独立的 `follow_mode` 表示，不能再用“距底部距离”同时表达两件事：
 
 - 鼠标滚轮或键盘向上移动后立刻退出 follow；后续 token/工具状态增长不改变当前首行。
 - 手工向下落到当时的底部仍保持 manual，避免同一滚轮事件刚到边界就被流式增长重新吸走。
 - 已在底部时再向下 overscroll 一次才恢复 follow；此后新内容继续贴底。
-- 流式 in-place 更新不得把上一帧 rich 高度打回 cheap estimate。`begin_frame` 在
-  `prepare_viewport` 之前不得用可能偏小的 transient `max_scroll` clamp 手工 `scroll_top`；
-  真实变矮只在物化后的 `settle_frame` 钳到底。
+- 流式 in-place 更新不得把上一帧 rich 高度打回 cheap estimate；所有 height settle、anchor
+  restore、follow re-pin 和最终 clamp 必须在唯一 `prepare_layout` 内完成。绘制阶段不能再
+  调第二次 `prepare_viewport`。
 - resize、估算高度收敛或 fold 改变仍用稳定 entry/block anchor 恢复；同一帧有明确滚动输入时，
   输入优先，不能再用旧 anchor 覆盖它。
+- 手工停驻时禁止测量 viewport 上方 estimate；只测可见窗口和下方 8 个 entry。底部 follow
+  可以预热上方 3 页，rich cache 的保留带是 128 entry。
+- 单一 running Markdown block 使用 Grok `StreamingMarkdownRenderer`：append-only revision
+  只 push suffix 并重绘 unfrozen tail，finish 做一次全量校正，非前缀 host correction 只重建
+  当前 block。不能在每个 token 新建 `MarkdownBuffers` 重渲染完整回答。
+- `g/G`、`Ctrl+U/Ctrl+D`、PageUp/PageDown 使用 Grok 导航语义；Page 行数扣除 sticky header
+  和 2 行 overlap，`G` 清除 manual/preserve 并立即恢复 bottom follow。
 - 原始 `ScrollUp` / `ScrollDown` 不能直接换成固定 3 行。Production 使用固定 Grok snapshot
   的 `MouseScrollState`：按 terminal/multiplexer profile 归一化 wheel/trackpad，16ms cadence
   合帧，处理方向翻转、fractional carry、backlog cap/coast；`GROK_SCROLL_MODE`、

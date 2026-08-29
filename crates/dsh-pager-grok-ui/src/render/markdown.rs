@@ -6,7 +6,7 @@
 
 use anstyle::{Ansi256Color, AnsiColor, Color, Style};
 use ratatui::text::{Line, Span};
-use xai_grok_markdown::{MarkdownBuffers, MarkdownStyle};
+use xai_grok_markdown::{MarkdownBuffers, MarkdownStyle, StreamingMarkdownRenderer};
 
 use crate::theme::Theme;
 
@@ -192,6 +192,100 @@ pub fn render(text: &str, width: usize, prefix: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Grok `scrollback/blocks/markdown_content.rs` adapted to the DSH-neutral
+/// transcript projection.
+///
+/// It retains the upstream `StreamingMarkdownRenderer` across host revisions,
+/// appends only the new suffix, and lets its frozen checkpoints avoid
+/// re-parsing the settled prefix.  Width/theme changes reset renderer output
+/// but retain source; a non-prefix host correction rebuilds this one block.
+#[derive(Debug, Clone)]
+pub struct StreamingMarkdownContent {
+    renderer: StreamingMarkdownRenderer,
+    raw_source: String,
+    width: usize,
+    theme: Theme,
+    finished: bool,
+}
+
+impl StreamingMarkdownContent {
+    pub fn new(text: &str, width: usize, theme: Theme, finished: bool) -> Self {
+        let width = width.max(1);
+        let mut renderer = StreamingMarkdownRenderer::new(style(), true);
+        renderer.set_max_table_width(Some(width));
+        renderer.push(text);
+        if finished {
+            renderer.finish(None);
+        } else {
+            renderer.render(None);
+        }
+        Self {
+            renderer,
+            raw_source: text.to_string(),
+            width,
+            theme,
+            finished,
+        }
+    }
+
+    /// Synchronize a complete host snapshot through the streaming delta path.
+    pub fn sync(&mut self, text: &str, width: usize, theme: Theme, finished: bool) {
+        let width = width.max(1);
+        if !text.starts_with(&self.raw_source) {
+            *self = Self::new(text, width, theme, finished);
+            return;
+        }
+
+        let suffix = &text[self.raw_source.len()..];
+        let theme_changed = self.theme != theme;
+        let width_changed = self.width != width;
+        if theme_changed {
+            self.renderer.set_style(style());
+            self.theme = theme;
+        }
+        if width_changed {
+            self.renderer.set_max_table_width(Some(width));
+            self.width = width;
+        }
+
+        if !suffix.is_empty() {
+            self.renderer.push_and_render(suffix, None);
+            self.raw_source.push_str(suffix);
+            self.finished = false;
+        } else if theme_changed || width_changed {
+            self.renderer.render(None);
+        }
+
+        if finished && !self.finished {
+            self.renderer.finish(None);
+            self.finished = true;
+        }
+    }
+
+    pub fn lines(&self, prefix: &str) -> Vec<Line<'static>> {
+        let lines = self.renderer.view().lines;
+        if prefix.is_empty() {
+            return lines.to_vec();
+        }
+        lines
+            .iter()
+            .cloned()
+            .map(|mut line| {
+                line.spans.insert(
+                    0,
+                    Span::styled(prefix.to_string(), Theme::current().md_muted),
+                );
+                line
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn frozen_bytes(&self) -> usize {
+        self.renderer.frozen_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +342,40 @@ mod tests {
                 .any(|line| line.contains("dsh-pager-grok-ui"))
         );
         assert!(rendered.iter().all(|line| !line.contains("AreaContent")));
+    }
+
+    #[test]
+    fn streaming_content_keeps_frozen_prefix_and_appends_tail() {
+        let theme = *Theme::current();
+        let mut content = StreamingMarkdownContent::new(
+            "# heading\n\nsettled paragraph\n\nopen",
+            40,
+            theme,
+            false,
+        );
+        let frozen = content.frozen_bytes();
+        assert!(frozen > 0);
+
+        content.sync(
+            "# heading\n\nsettled paragraph\n\nopen tail words",
+            40,
+            theme,
+            false,
+        );
+        assert!(content.frozen_bytes() >= frozen);
+        assert!(
+            content
+                .lines("")
+                .iter()
+                .any(|line| line.to_string().contains("open tail words"))
+        );
+    }
+
+    #[test]
+    fn non_prefix_correction_rebuilds_only_the_markdown_block() {
+        let theme = *Theme::current();
+        let mut content = StreamingMarkdownContent::new("old text", 40, theme, false);
+        content.sync("corrected text", 40, theme, true);
+        assert_eq!(content.lines("")[0].to_string(), "corrected text");
     }
 }

@@ -547,3 +547,28 @@ pixel parity”仍必须由上级计划的 N1/N3/N4 和同数据浏览器/golden
 | semantic materializer + legacy `RichTranscript` oracle | 中性 materializer 迁到 `scrollback_adapter/materialize_entry.rs`；legacy oracle 删除 | S7 已关闭 |
 
 新增 TEMPORARY 必须改本表，不能只在 PR 描述里写「以后再迁」。
+
+## 13. 2026-08-29：滚动状态闭包补充批次
+
+S1–S7 的“renderer closure”结论只覆盖 painter/window 接线；第 6.5 节当时保留了 DSH
+Fenwick + runtime viewport 的边界。流式输出实测证明该边界仍会让 runtime viewport、host
+anchor/materialization 和 Fenwick estimate 在同一帧分别 clamp，因而不能外推成
+scroll interaction closure。
+
+本补充批次在不改变 DSH canonical identity/session authority 的前提下，把生产 viewport
+owner 上移为单一 `scrollback_adapter::state::GrokScrollbackState`：
+
+- 保留 Grok `state/nav.rs` 的 absolute-row、manual landing、fully-clamped overscroll-follow、
+  dynamic page、half-page、goto-top/bottom 语义；
+- 按 `state/mod.rs::prepare_layout` 把 height settle、anchor restore、follow re-pin 和 clamp
+  收口到一个 frame preparation；render 只消费 prepared window；
+- 按 `state/layout.rs` 禁止 manual viewport 的 above-margin measurement，并采用上游常量
+  `MEASURE_MARGIN_ENTRIES=8`、`EVICT_KEEP_MARGIN_ENTRIES=128`、`RESUME_WARM_PAGES=3`；
+- DSH Fenwick 继续保存 canonical entry 的可复用高度索引，但不再拥有 production
+  `scroll_offset/follow/max_scroll`；runtime 的 `TranscriptViewportState` 和独立 anchor 删除；
+- 单 running Markdown surface 接入上游 `StreamingMarkdownRenderer` checkpoint，cache 按
+  stable `DshRenderEntryId` 跨 partial revision 与 viewport line eviction 保留。
+
+因此 N2 renderer closure 的历史结论不变；新增可声明的是“主 transcript 滚动状态闭包已
+接入”。多 block `MarkdownContent`、logical-source-line resize anchor、selection drag
+autoscroll 和非 transcript pane 坐标路由仍需各自证据，不能由本节结论外推。

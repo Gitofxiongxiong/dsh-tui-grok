@@ -64,7 +64,9 @@ use crate::modal_window_state::ModalWindowState;
 use crate::model_state::{ModelId, ModelState, compact_model_label};
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
-use crate::scrollback_adapter::{host_pane::DshScrollbackHost, tick::animation_tick};
+use crate::scrollback_adapter::{
+    host_pane::DshScrollbackHost, state::GrokScrollbackState, tick::animation_tick,
+};
 use crate::selection::SelectionModel;
 use crate::session_controls::{DEFAULT_PERMISSION_PRESET, YOLO_PRESET};
 use crate::slash::SlashController;
@@ -200,8 +202,7 @@ fn agent_overlay_close_click(modal: &ModalWindowState, mouse: &MouseEvent) -> bo
 
 fn paint_child_scrollback(
     pane: &mut DshScrollbackHost,
-    scroll_top: &mut usize,
-    follow: &mut bool,
+    state: &mut GrokScrollbackState,
     wave_started_at: &mut Option<Instant>,
     buf: &mut ratatui::buffer::Buffer,
     area: Rect,
@@ -216,20 +217,8 @@ fn paint_child_scrollback(
     pane.set_wave_tick(animation_tick(now.saturating_duration_since(started_at)));
     let width = area.width.max(1) as usize;
     pane.sync_with_options(scrollback, width, *theme, false);
-    let total_height = pane.total_height(scrollback);
-    let max_scroll = total_height.saturating_sub(area.height as usize);
-    if *follow {
-        *scroll_top = max_scroll;
-    }
-    let next_top = pane.prepare_viewport(scrollback, *scroll_top, area.height, *follow);
-    let total_height = pane.total_height(scrollback);
-    let max_scroll = total_height.saturating_sub(area.height as usize);
-    *scroll_top = if *follow {
-        max_scroll
-    } else {
-        next_top.min(max_scroll)
-    };
-    for paint in pane.visible_lines(scrollback, *scroll_top, area.height) {
+    state.prepare_layout(pane, scrollback, width, area.height);
+    for paint in state.visible_lines(pane, scrollback) {
         let _ = pane.paint_buffer_line(buf, area, &paint, None);
     }
 }
@@ -317,8 +306,9 @@ pub fn run_interactive(mut transport: RpcTransport, mut session: SessionState) -
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
     {
-        ui.mouse_scroll
-            .set_redraw_cadence(Duration::from_millis(cadence_ms));
+        let cadence = Duration::from_millis(cadence_ms);
+        ui.mouse_scroll.set_redraw_cadence(cadence);
+        ui.child_mouse_scroll.set_redraw_cadence(cadence);
     }
     ui.refresh_agent_subagents(&mut transport, &session, true);
     // Restore the terminal before resuming a panic so the payload is not
@@ -434,6 +424,9 @@ fn run_loop(
         if let Some(scroll_deadline) = ui.mouse_scroll.scroll_clock_deadline(Instant::now()) {
             poll_interval = poll_interval.min(scroll_deadline);
         }
+        if let Some(scroll_deadline) = ui.child_mouse_scroll.scroll_clock_deadline(Instant::now()) {
+            poll_interval = poll_interval.min(scroll_deadline);
+        }
         match event::poll(poll_interval) {
             Ok(false) => continue,
             // Leave the event in crossterm's queue. The loop-top batch drain
@@ -538,87 +531,6 @@ fn drain_notifications_bounded(
     Ok((combined, processed))
 }
 
-/// Grok-compatible transcript viewport state.
-///
-/// `scroll_top` is an absolute virtual row. Follow mode is independent, so
-/// growth below a manually parked viewport cannot drag that viewport back
-/// toward the streaming tail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TranscriptViewportState {
-    scroll_top: usize,
-    max_scroll: usize,
-    follow_mode: bool,
-    explicit_navigation: bool,
-}
-
-impl Default for TranscriptViewportState {
-    fn default() -> Self {
-        Self {
-            scroll_top: 0,
-            max_scroll: 0,
-            follow_mode: true,
-            explicit_navigation: false,
-        }
-    }
-}
-
-impl TranscriptViewportState {
-    fn begin_frame(&mut self, max_scroll: usize, restored_anchor: Option<usize>) -> usize {
-        self.max_scroll = max_scroll;
-        if self.follow_mode {
-            self.scroll_top = max_scroll;
-        } else if !self.explicit_navigation
-            && let Some(restored) = restored_anchor
-        {
-            // Streaming frames may report a transient underestimate of
-            // `max_scroll` before rich materialization. Clamping the restored
-            // row here is what bounced wheel-down back toward the top.
-            self.scroll_top = restored;
-        }
-        self.explicit_navigation = false;
-        self.scroll_top
-    }
-
-    fn settle_frame(&mut self, max_scroll: usize, scroll_top: usize) {
-        self.max_scroll = max_scroll;
-        self.scroll_top = if self.follow_mode {
-            max_scroll
-        } else {
-            scroll_top.min(max_scroll)
-        };
-    }
-
-    fn scroll_up(&mut self, rows: usize) {
-        self.scroll_top = self.scroll_top.saturating_sub(rows);
-        self.follow_mode = false;
-        self.explicit_navigation = true;
-    }
-
-    fn scroll_down(&mut self, rows: usize) {
-        let before = self.scroll_top;
-        self.scroll_top = self.scroll_top.saturating_add(rows).min(self.max_scroll);
-        // Match Grok's overscroll-to-follow rule: landing at the bottom is
-        // still a manual viewport; one more downward gesture re-enables tail
-        // following.
-        if rows > 0 && self.scroll_top == before && self.scroll_top >= self.max_scroll {
-            self.follow_mode = true;
-        }
-        self.explicit_navigation = true;
-    }
-
-    fn should_restore_anchor(self) -> bool {
-        !self.follow_mode && !self.explicit_navigation
-    }
-
-    fn is_following(self) -> bool {
-        self.follow_mode
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PickerKind {
     #[default]
@@ -631,10 +543,8 @@ enum PickerKind {
 struct UiState {
     shell: AppShell,
     capabilities: TerminalCapabilities,
-    transcript_viewport: TranscriptViewportState,
-    transcript_viewport_height: u16,
+    scrollback_state: GrokScrollbackState,
     mouse_scroll: MouseScrollState,
-    scroll_anchor: Option<dsh_pager::scrollback::ScrollAnchor>,
     scrollback_pane: DshScrollbackHost,
     resume_picker: ResumePickerState,
     preset_picker: PresetPickerState,
@@ -687,8 +597,8 @@ struct UiState {
     child_transcript: Option<ChildTranscriptView>,
     child_scrollback: Option<dsh_pager::scrollback::Scrollback>,
     child_scrollback_pane: DshScrollbackHost,
-    child_scroll_top: usize,
-    child_follow: bool,
+    child_scrollback_state: GrokScrollbackState,
+    child_mouse_scroll: MouseScrollState,
     child_history_at: Option<Instant>,
     last_agent_item_click: Option<(Instant, AgentItemId)>,
     last_model_label_click: Option<Instant>,
@@ -730,19 +640,36 @@ struct UiState {
 
 impl UiState {
     fn mouse_scroll_config(&self) -> MouseScrollConfig {
-        MouseScrollConfig::from_settings().with_viewport_height(self.transcript_viewport_height)
+        MouseScrollConfig::from_settings()
+            .with_viewport_height(self.scrollback_state.viewport_height())
     }
 
     /// Route the main transcript's wheel reports through Grok's production
     /// wheel/trackpad normalizer. Overlay owners retain their existing input
     /// behavior and never mutate the hidden transcript viewport.
     fn handle_normalized_transcript_scroll(&mut self, mouse: &MouseEvent) -> bool {
-        if self.shell.overlay() != Overlay::None {
-            return false;
-        }
         let Some(direction) = ScrollDirection::from_mouse_event(mouse) else {
             return false;
         };
+        if self.shell.overlay() == Overlay::AgentTasks && self.agent_detail.is_some() {
+            if self.child_scrollback_pane.is_empty() {
+                return true;
+            }
+            let config = MouseScrollConfig::from_settings()
+                .with_viewport_height(self.child_scrollback_state.viewport_height());
+            let update = self.child_mouse_scroll.on_scroll_event(direction, config);
+            if update.lines < 0 {
+                self.child_scrollback_state
+                    .scroll_up(update.lines.unsigned_abs().min(u16::MAX as u32) as u16);
+            } else if update.lines > 0 {
+                self.child_scrollback_state
+                    .scroll_down((update.lines as u32).min(u16::MAX as u32) as u16);
+            }
+            return true;
+        }
+        if self.shell.overlay() != Overlay::None {
+            return false;
+        }
         if self.scrollback_pane.is_empty() {
             return true;
         }
@@ -753,6 +680,22 @@ impl UiState {
     }
 
     fn tick_mouse_scroll(&mut self) -> bool {
+        if self.shell.overlay() == Overlay::AgentTasks && self.agent_detail.is_some() {
+            self.mouse_scroll.cancel_stream();
+            let update = self.child_mouse_scroll.on_tick();
+            if update.lines < 0 {
+                self.child_scrollback_state
+                    .scroll_up(update.lines.unsigned_abs().min(u16::MAX as u32) as u16);
+                return true;
+            }
+            if update.lines > 0 {
+                self.child_scrollback_state
+                    .scroll_down((update.lines as u32).min(u16::MAX as u32) as u16);
+                return true;
+            }
+            return false;
+        }
+        self.child_mouse_scroll.cancel_stream();
         if self.shell.overlay() != Overlay::None {
             self.mouse_scroll.cancel_stream();
             return false;
@@ -766,12 +709,12 @@ impl UiState {
             return false;
         }
         if lines < 0 {
-            self.transcript_viewport
-                .scroll_up(lines.unsigned_abs() as usize);
+            self.scrollback_state
+                .scroll_up(lines.unsigned_abs().min(u16::MAX as u32) as u16);
         } else {
-            self.transcript_viewport.scroll_down(lines as usize);
+            self.scrollback_state
+                .scroll_down((lines as u32).min(u16::MAX as u32) as u16);
         }
-        self.scroll_anchor = None;
         true
     }
 
@@ -1951,7 +1894,6 @@ impl UiState {
             .timestamps_enabled
             .unwrap_or(appearance.show_timestamps);
         let content = layout.scrollback_content;
-        self.transcript_viewport_height = content.height;
         let rail = Rect::new(
             layout.timeline_x,
             layout.scrollback.y,
@@ -1984,39 +1926,19 @@ impl UiState {
         frame.render_widget(block, content);
         let empty = self.scrollback_pane.is_empty();
         if empty {
-            self.transcript_viewport.reset();
-            self.scroll_anchor = None;
+            self.scrollback_state.reset();
         } else {
-            total_height = self.scrollback_pane.total_height(scrollback);
-            let mut max_scroll = total_height.saturating_sub(content.height as usize);
-            let restored_anchor = self
-                .transcript_viewport
-                .should_restore_anchor()
-                .then(|| {
-                    self.scroll_anchor.and_then(|anchor| {
-                        self.scrollback_pane.scroll_for_anchor(scrollback, anchor)
-                    })
-                })
-                .flatten();
-            scroll_top = self
-                .transcript_viewport
-                .begin_frame(max_scroll, restored_anchor);
-            let following = self.transcript_viewport.is_following();
-            scroll_top = self.scrollback_pane.prepare_viewport(
+            self.scrollback_state.prepare_layout(
+                &mut self.scrollback_pane,
                 scrollback,
-                scroll_top,
+                render_width,
                 content.height,
-                following,
             );
-            total_height = self.scrollback_pane.total_height(scrollback);
-            max_scroll = total_height.saturating_sub(content.height as usize);
-            scroll_top = scroll_top.min(max_scroll);
-            self.transcript_viewport
-                .settle_frame(max_scroll, scroll_top);
-            scroll_top = self.transcript_viewport.scroll_top;
+            total_height = self.scrollback_state.total_height();
+            scroll_top = self.scrollback_state.scroll_offset();
             for paint in self
-                .scrollback_pane
-                .visible_lines(scrollback, scroll_top, content.height)
+                .scrollback_state
+                .visible_lines(&mut self.scrollback_pane, scrollback)
             {
                 let text = paint.copy_text.clone();
                 if let Some(timestamp) = self.scrollback_pane.paint_buffer_line(
@@ -2061,7 +1983,6 @@ impl UiState {
                 );
                 self.geometry_lines.push(geometry);
             }
-            self.scroll_anchor = self.scrollback_pane.anchor_at(scrollback, scroll_top);
         }
         if empty {
             let elapsed = self.welcome_animation.elapsed(Instant::now());
@@ -2143,7 +2064,7 @@ impl UiState {
                     active: turn_count.checked_sub(1),
                     up_target: turn_count.checked_sub(2),
                     down_target: None,
-                    at_bottom: self.transcript_viewport.is_following(),
+                    at_bottom: self.scrollback_state.is_following(),
                 },
             )
         } else {
@@ -2163,7 +2084,7 @@ impl UiState {
                     viewport_height: content.height,
                     scroll_offset: scroll_top,
                 }),
-                self.transcript_viewport.is_following(),
+                self.scrollback_state.is_following(),
                 theme,
             );
         }
@@ -2606,8 +2527,7 @@ impl UiState {
                     if body.height > 0 {
                         paint_child_scrollback(
                             &mut self.child_scrollback_pane,
-                            &mut self.child_scroll_top,
-                            &mut self.child_follow,
+                            &mut self.child_scrollback_state,
                             &mut self.rail_wave_started_at,
                             buf,
                             body,
@@ -2890,13 +2810,35 @@ impl UiState {
                 Ok(false)
             }
             ShellAction::ScrollUp(amount) => {
-                self.transcript_viewport.scroll_up(amount as usize);
-                self.scroll_anchor = None;
+                self.scrollback_state.scroll_up(amount);
                 Ok(false)
             }
             ShellAction::ScrollDown(amount) => {
-                self.transcript_viewport.scroll_down(amount as usize);
-                self.scroll_anchor = None;
+                self.scrollback_state.scroll_down(amount);
+                Ok(false)
+            }
+            ShellAction::PageUp => {
+                self.scrollback_state.page_up();
+                Ok(false)
+            }
+            ShellAction::PageDown => {
+                self.scrollback_state.page_down();
+                Ok(false)
+            }
+            ShellAction::HalfPageUp => {
+                self.scrollback_state.half_page_up();
+                Ok(false)
+            }
+            ShellAction::HalfPageDown => {
+                self.scrollback_state.half_page_down();
+                Ok(false)
+            }
+            ShellAction::GotoTop => {
+                self.scrollback_state.goto_top();
+                Ok(false)
+            }
+            ShellAction::GotoBottom => {
+                self.scrollback_state.goto_bottom();
                 Ok(false)
             }
             ShellAction::SubmitPrompt => {
@@ -3387,8 +3329,18 @@ impl UiState {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.scroll_child_transcript(-3),
                 KeyCode::Down | KeyCode::Char('j') => self.scroll_child_transcript(3),
-                KeyCode::PageUp => self.scroll_child_transcript(-12),
-                KeyCode::PageDown => self.scroll_child_transcript(12),
+                KeyCode::PageUp => self.child_scrollback_state.page_up(),
+                KeyCode::PageDown => self.child_scrollback_state.page_down(),
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.child_scrollback_state.half_page_up();
+                }
+                KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.child_scrollback_state.half_page_down();
+                }
+                KeyCode::Char('g') if key.modifiers.is_empty() => {
+                    self.child_scrollback_state.goto_top();
+                }
+                KeyCode::Char('G') => self.child_scrollback_state.goto_bottom(),
                 _ => {}
             }
             return;
@@ -3472,8 +3424,8 @@ impl UiState {
         self.child_transcript = None;
         self.child_scrollback = None;
         self.child_scrollback_pane.clear();
-        self.child_scroll_top = 0;
-        self.child_follow = true;
+        self.child_scrollback_state.reset();
+        self.child_mouse_scroll.cancel_stream();
         self.child_history_at = None;
         if matches!(id, AgentItemId::Task(_)) {
             self.status = Some("Agent detail opened".into());
@@ -3594,8 +3546,8 @@ impl UiState {
         self.child_transcript = None;
         self.child_scrollback = None;
         self.child_scrollback_pane.clear();
-        self.child_scroll_top = 0;
-        self.child_follow = true;
+        self.child_scrollback_state.reset();
+        self.child_mouse_scroll.cancel_stream();
         self.child_history_at = None;
     }
 
@@ -3605,11 +3557,12 @@ impl UiState {
     }
 
     fn scroll_child_transcript(&mut self, delta: isize) {
-        self.child_follow = false;
         if delta.is_negative() {
-            self.child_scroll_top = self.child_scroll_top.saturating_sub(delta.unsigned_abs());
+            self.child_scrollback_state
+                .scroll_up(delta.unsigned_abs().min(u16::MAX as usize) as u16);
         } else {
-            self.child_scroll_top = self.child_scroll_top.saturating_add(delta as usize);
+            self.child_scrollback_state
+                .scroll_down((delta as usize).min(u16::MAX as usize) as u16);
         }
     }
 
@@ -4300,8 +4253,7 @@ impl UiState {
     }
 
     fn reset_transcript_view(&mut self) {
-        self.transcript_viewport.reset();
-        self.scroll_anchor = None;
+        self.scrollback_state.reset();
         self.geometry_lines.clear();
         self.last_transcript_click = None;
         self.selected_transcript = None;
@@ -5601,8 +5553,8 @@ mod tests {
     use super::render_transcript_selection_box;
     use super::steer_capability_available;
     use super::{
-        MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand, TranscriptViewportState,
-        UiState, agent_overlay_close_click, agent_overlay_key_closes, register_model_label_click,
+        MediaPreviewBuffer, NOTIFICATION_BUDGET, PendingHostCommand, UiState,
+        agent_overlay_close_click, agent_overlay_key_closes, register_model_label_click,
         render_agent_tasks_content, render_image_preview_content,
     };
     use crate::app::Overlay;
@@ -5719,80 +5671,6 @@ mod tests {
             &modal,
             &mouse(MouseEventKind::Down(MouseButton::Left), 30, 12)
         ));
-    }
-
-    #[test]
-    fn transcript_viewport_stays_on_absolute_row_while_streaming_grows() {
-        let mut viewport = TranscriptViewportState::default();
-        assert_eq!(viewport.begin_frame(100, None), 100);
-
-        viewport.scroll_up(12);
-        assert_eq!(viewport.begin_frame(100, None), 88);
-        assert!(!viewport.is_following());
-
-        assert_eq!(viewport.begin_frame(140, None), 88);
-        viewport.settle_frame(140, 88);
-        assert_eq!(viewport.scroll_top, 88);
-        assert!(!viewport.is_following());
-    }
-
-    #[test]
-    fn transcript_viewport_requires_downward_overscroll_to_resume_following() {
-        let mut viewport = TranscriptViewportState::default();
-        viewport.begin_frame(100, None);
-        viewport.scroll_up(10);
-        viewport.begin_frame(100, None);
-
-        viewport.scroll_down(10);
-        assert_eq!(viewport.scroll_top, 100);
-        assert!(!viewport.is_following());
-
-        viewport.scroll_down(3);
-        assert!(viewport.is_following());
-        assert_eq!(viewport.begin_frame(125, None), 125);
-    }
-
-    #[test]
-    fn transcript_viewport_keeps_downward_offset_across_transient_max_dip() {
-        let mut viewport = TranscriptViewportState::default();
-        assert_eq!(viewport.begin_frame(185, None), 185);
-        viewport.scroll_up(5);
-        viewport.settle_frame(185, 180);
-        assert_eq!(viewport.scroll_top, 180);
-        assert!(!viewport.is_following());
-
-        viewport.scroll_down(3);
-        assert_eq!(viewport.scroll_top, 183);
-        // Streaming frame reports a cheaper estimate before rematerialize.
-        assert_eq!(viewport.begin_frame(180, None), 183);
-        viewport.settle_frame(185, 183);
-        assert_eq!(viewport.scroll_top, 183);
-        assert!(!viewport.is_following());
-
-        viewport.settle_frame(170, 183);
-        assert_eq!(viewport.scroll_top, 170);
-    }
-
-    #[test]
-    fn transcript_viewport_up_is_not_pushed_down_by_transient_max() {
-        let mut viewport = TranscriptViewportState::default();
-        viewport.begin_frame(185, None);
-        viewport.scroll_up(5);
-        viewport.settle_frame(185, 180);
-        viewport.scroll_up(3);
-        assert_eq!(viewport.begin_frame(180, None), 177);
-        viewport.settle_frame(185, 177);
-        assert_eq!(viewport.scroll_top, 177);
-    }
-
-    #[test]
-    fn transcript_viewport_restores_anchor_only_without_explicit_navigation() {
-        let mut viewport = TranscriptViewportState::default();
-        viewport.begin_frame(100, None);
-        viewport.scroll_up(20);
-
-        assert_eq!(viewport.begin_frame(120, Some(77)), 80);
-        assert_eq!(viewport.begin_frame(120, Some(77)), 77);
     }
 
     #[test]

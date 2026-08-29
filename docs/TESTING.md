@@ -49,9 +49,12 @@ fallback；它们不是 Grok reference golden，M10 reference runner 会替换�
 ```bash
 cargo run -p dsh-pager-bin -- --backend <mock-server>
 python3 scripts/pty-smoke.py --binary target/debug/dsh-pager
+python3 scripts/pty-stream-scroll.py --binary target/debug/dsh-pager
 ```
 
 检查窗口 resize、折行、滚动、picker/modal 打开关闭以及退出后的终端恢复。UI 的快照/黄金测试只断言稳定文本和几何关系，不把 ANSI 控制序列硬编码到 runtime 测试。
+流式滚动 PTY 使用 Zed forced-wheel 一报告一行定价，只允许 24 个向下 report 到达 live tail，
+随后用 fully-clamped overscroll 断言恢复 follow；不得再用 80-report flood 代替正常手势。
 
 ## M8-M10 完整端到端门禁
 

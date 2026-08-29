@@ -17,8 +17,12 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use crate::{
     appearance::{GrokAppearanceSnapshot, ScrollbackAppearance},
     geometry::HitTarget,
+    render::markdown::StreamingMarkdownContent,
     scrollback::{
-        entry_renderer::{DynamicAccentSpec, EntryRenderer, RenderedEntryLine, TimestampPaint},
+        entry_renderer::{
+            DynamicAccentSpec, EntryRenderer, RenderedEntryLine, TIMESTAMP_RESERVED_WIDTH,
+            TimestampPaint,
+        },
         render::RenderWindow,
         sticky::{PromptDescriptor, RenderedPrompt, StickyHeaderLayout, compute_sticky_layout},
         types::DisplayMode,
@@ -26,13 +30,22 @@ use crate::{
     scrollback_adapter::{
         materialize_entry::{
             MaterializeContext, RichPaintLine, default_display_mode_ref, finish_flash_active,
-            is_local_foldable_block, now_epoch_ms, semantic_lines,
+            is_local_foldable_block, now_epoch_ms, semantic_lines_with_markdown_cache,
         },
         project_groups::project_groups,
         tick::GROK_WAVE_SPEED,
     },
     theme::Theme,
 };
+
+/// Copied from Grok `scrollback/state/types.rs`.  Manual navigation measures
+/// visible entries plus this small entry margin below, deliberately never an
+/// above-window whose newly exact heights could move the parked viewport.
+const MEASURE_MARGIN_ENTRIES: usize = 8;
+/// Copied from Grok `scrollback/state/types.rs`.
+const EVICT_KEEP_MARGIN_ENTRIES: usize = 128;
+/// Copied from Grok `scrollback/state/types.rs`.
+const RESUME_WARM_PAGES: usize = 3;
 
 #[derive(Debug, Clone)]
 struct CachedPaneEntry {
@@ -103,6 +116,11 @@ pub struct DshScrollbackHost {
     wave_tick: u64,
     appearance: ScrollbackAppearance,
     entries: HashMap<DshRenderEntryId, CachedPaneEntry>,
+    /// Grok streaming Markdown checkpoints outlive viewport line eviction.
+    markdown_caches: HashMap<(DshRenderEntryId, usize), StreamingMarkdownContent>,
+    /// Entries whose host revision changed but whose existing Markdown cache
+    /// must survive until the entry next enters the measurement window.
+    dirty_entries: HashSet<DshRenderEntryId>,
     expanded_entries: HashSet<DshRenderEntryId>,
     expanded_blocks: HashSet<(DshRenderEntryId, usize)>,
     foldable_entries: HashSet<DshRenderEntryId>,
@@ -130,6 +148,8 @@ impl Default for DshScrollbackHost {
             wave_tick: 0,
             appearance: GrokAppearanceSnapshot::default().scrollback(theme),
             entries: HashMap::new(),
+            markdown_caches: HashMap::new(),
+            dirty_entries: HashSet::new(),
             expanded_entries: HashSet::new(),
             expanded_blocks: HashSet::new(),
             foldable_entries: HashSet::new(),
@@ -156,6 +176,8 @@ impl DshScrollbackHost {
         self.show_timestamps = true;
         self.wave_tick = 0;
         self.entries.clear();
+        self.markdown_caches.clear();
+        self.dirty_entries.clear();
         self.expanded_entries.clear();
         self.expanded_blocks.clear();
         self.foldable_entries.clear();
@@ -193,10 +215,10 @@ impl DshScrollbackHost {
             return;
         }
         if let Some(entry_id) = self.selected_target.as_ref().and_then(hit_target_entry_id) {
-            self.entries.remove(&entry_id);
+            self.dirty_entries.insert(entry_id);
         }
         if let Some(entry_id) = target.as_ref().and_then(hit_target_entry_id) {
-            self.entries.remove(&entry_id);
+            self.dirty_entries.insert(entry_id);
         }
         self.selected_target = target;
     }
@@ -257,6 +279,7 @@ impl DshScrollbackHost {
         }
 
         self.entries.clear();
+        self.dirty_entries.clear();
         let entries = scrollback.render_entry_refs().collect::<Vec<_>>();
         self.prompt_entries = entries
             .iter()
@@ -266,6 +289,9 @@ impl DshScrollbackHost {
             })
             .collect();
         self.prune_local_state(&entries);
+        let live_ids = entries.iter().map(|entry| entry.id).collect::<HashSet<_>>();
+        self.markdown_caches
+            .retain(|(entry_id, _), _| live_ids.contains(entry_id));
         self.foldable_entries = entries
             .iter()
             .copied()
@@ -386,7 +412,7 @@ impl DshScrollbackHost {
                 (entry.id, projection, visible, foldable, foldable_blocks)
             };
 
-            self.entries.remove(&entry_id);
+            self.dirty_entries.insert(entry_id);
             self.projections.insert(entry_id, projection);
             self.set_prompt_entry(
                 entry_idx,
@@ -635,15 +661,49 @@ impl DshScrollbackHost {
         let mut keep_ids = HashSet::new();
 
         // Every changing pass converts at least one estimate in the bounded
-        // window to an exact rich-renderer height.
+        // window to an exact rich-renderer height.  Grok deliberately has no
+        // above-margin while manually parked: measuring above the viewport
+        // changes cumulative virtual_y and is the classic scroll-back bounce.
+        // Bottom-follow mode may safely warm one page above because the final
+        // tail re-pin cancels the uniform shift.
         loop {
-            let window =
-                scrollback.paint_window(self.width.max(1), top, viewport_height, viewport_height);
-            if window.entries.is_empty() {
+            let window = scrollback.paint_window(
+                self.width.max(1),
+                top,
+                viewport_height,
+                if follow {
+                    viewport_height.saturating_mul(RESUME_WARM_PAGES)
+                } else {
+                    0
+                },
+            );
+            let mut entries = window.entries;
+            if !follow {
+                entries.end = entries
+                    .end
+                    .saturating_add(MEASURE_MARGIN_ENTRIES)
+                    .min(scrollback.entries().len());
+            }
+            if entries.is_empty() {
                 break;
             }
-            let (changed, ids) = self.materialize_range(scrollback, window.entries);
+            let materialized = entries.clone();
+            let (changed, ids) = self.materialize_range(scrollback, entries);
             keep_ids = ids;
+            let keep_start = materialized.start.saturating_sub(EVICT_KEEP_MARGIN_ENTRIES);
+            let keep_end = materialized
+                .end
+                .saturating_add(EVICT_KEEP_MARGIN_ENTRIES)
+                .min(scrollback.entries().len());
+            for entry_idx in keep_start..keep_end {
+                let Some(entry_id) = scrollback.render_entry_ref(entry_idx).map(|entry| entry.id)
+                else {
+                    continue;
+                };
+                if self.entries.contains_key(&entry_id) {
+                    keep_ids.insert(entry_id);
+                }
+            }
             let next_top = if follow {
                 self.total_height(scrollback)
                     .saturating_sub(viewport_height)
@@ -764,9 +824,55 @@ impl DshScrollbackHost {
                 changed |= scrollback.set_projected_height(self.width, entry_idx, 0);
                 continue;
             }
-            if !self.entries.contains_key(&entry_id) {
+            let needs_materialize =
+                !self.entries.contains_key(&entry_id) || self.dirty_entries.remove(&entry_id);
+            if needs_materialize {
                 let entry = entry_ref.to_owned();
-                let lines = semantic_lines(
+                let timestamp_reserved = self.show_timestamps
+                    && matches!(entry.kind, DshRenderKind::User | DshRenderKind::Assistant)
+                    && !projection.group_header;
+                let markdown_width = self
+                    .width
+                    .saturating_sub(usize::from(timestamp_reserved) * TIMESTAMP_RESERVED_WIDTH)
+                    .saturating_sub(EntryRenderer::chrome_width(
+                        &self.appearance.scrollback.layout,
+                    ))
+                    .max(1);
+                let mut markdown_lines = HashMap::new();
+                let mut live_markdown_blocks = HashSet::new();
+                if matches!(
+                    entry.kind,
+                    DshRenderKind::Assistant | DshRenderKind::Thinking
+                ) {
+                    for (block_index, block) in entry.content.blocks.iter().enumerate() {
+                        let Some(text) = streaming_markdown_text(block) else {
+                            continue;
+                        };
+                        live_markdown_blocks.insert(block_index);
+                        let cache = self
+                            .markdown_caches
+                            .entry((entry_id, block_index))
+                            .or_insert_with(|| {
+                                StreamingMarkdownContent::new(
+                                    text,
+                                    markdown_width,
+                                    self.theme,
+                                    entry.finish != DshRenderFinish::Running,
+                                )
+                            });
+                        cache.sync(
+                            text,
+                            markdown_width,
+                            self.theme,
+                            entry.finish != DshRenderFinish::Running,
+                        );
+                        markdown_lines.insert(block_index, cache.lines(""));
+                    }
+                }
+                self.markdown_caches.retain(|(candidate, block_index), _| {
+                    *candidate != entry_id || live_markdown_blocks.contains(block_index)
+                });
+                let lines = semantic_lines_with_markdown_cache(
                     &entry,
                     self.width,
                     self.theme,
@@ -777,6 +883,7 @@ impl DshScrollbackHost {
                         &self.appearance,
                         self.selected_target.as_ref(),
                     ),
+                    Some(&markdown_lines),
                 );
                 self.entries
                     .insert(entry_id, CachedPaneEntry { entry, lines });
@@ -812,6 +919,23 @@ impl DshScrollbackHost {
             return Vec::new();
         }
         let top = self.prepare_viewport(scrollback, scroll_top, viewport_height, false);
+        self.visible_lines_prepared(scrollback, top, viewport_height)
+    }
+
+    /// Paint a viewport whose estimates and anchor have already been settled
+    /// by `GrokScrollbackState::prepare_layout`.  Production uses this method
+    /// so render cannot start a second layout pass behind the state owner's
+    /// back; `visible_lines` remains as a compatibility helper for tests and
+    /// secondary viewers.
+    pub(crate) fn visible_lines_prepared(
+        &mut self,
+        scrollback: &mut Scrollback,
+        top: usize,
+        viewport_height: u16,
+    ) -> Vec<RichPaintLine> {
+        if viewport_height == 0 {
+            return Vec::new();
+        }
         let sticky = self.sticky_layout(scrollback, top, viewport_height);
         let header_rows = sticky.header_screen_rows();
         let mut painted = self.visible_sticky_lines(scrollback, &sticky);
@@ -823,6 +947,16 @@ impl DshScrollbackHost {
         ));
         self.stats.painted_lines = self.stats.painted_lines.saturating_add(painted.len());
         painted
+    }
+
+    pub(crate) fn sticky_header_rows(
+        &mut self,
+        scrollback: &mut Scrollback,
+        scroll_top: usize,
+        viewport_height: u16,
+    ) -> u16 {
+        self.sticky_layout(scrollback, scroll_top, viewport_height)
+            .header_screen_rows()
     }
 
     fn visible_sticky_lines(
@@ -1135,6 +1269,18 @@ fn hit_target_entry_id(target: &HitTarget) -> Option<DshRenderEntryId> {
         HitTarget::TranscriptEntry(entry_id) | HitTarget::TranscriptBlock { entry_id, .. } => {
             Some(*entry_id)
         }
+        _ => None,
+    }
+}
+
+/// The upstream `MarkdownContent` cache is block-owned.  Until the remaining
+/// multi-block Grok `RenderBlock` closure is wired, retain that exact hot path
+/// for the overwhelmingly common streaming surface: one assistant/thinking
+/// Markdown block with a stable entry id.  Structured multi-block entries keep
+/// the existing typed renderer and never share an ambiguous cache.
+fn streaming_markdown_text(block: &DshRenderBlock) -> Option<&str> {
+    match block {
+        DshRenderBlock::Markdown { text } | DshRenderBlock::Reasoning { text } => Some(text),
         _ => None,
     }
 }
@@ -1542,6 +1688,7 @@ mod tests {
         host.sync(&mut scrollback, width, theme);
         let viewport = 10;
         let _ = host.prepare_viewport(&mut scrollback, 0, viewport, true);
+        assert_eq!(host.markdown_caches.len(), 1);
         let measured_total = host.total_height(&mut scrollback);
         let max_scroll = measured_total.saturating_sub(viewport as usize);
         let parked = max_scroll.saturating_sub(5);
@@ -1557,6 +1704,11 @@ mod tests {
             }),
         ));
         host.sync(&mut scrollback, width, theme);
+        assert_eq!(
+            host.markdown_caches.len(),
+            1,
+            "incremental host sync must retain Grok Markdown checkpoints"
+        );
         let after_sync = host.total_height(&mut scrollback);
         assert!(
             after_sync >= measured_total,
@@ -1564,6 +1716,7 @@ mod tests {
         );
 
         let rematerialized = host.prepare_viewport(&mut scrollback, scrolled, viewport, false);
+        assert_eq!(host.markdown_caches.len(), 1);
         assert!(
             rematerialized >= scrolled,
             "manual downward offset bounced up: {scrolled} -> {rematerialized}"
