@@ -7,13 +7,13 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use dsh_grok_inline::{LinkSpan, Terminal as InlineTerminal};
+use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::Frame;
 
 /// Semantic palette shared by every Grok-derived view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

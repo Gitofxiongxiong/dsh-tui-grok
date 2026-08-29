@@ -1,4 +1,4 @@
-use dsh_pager::{fetch_attachment, list_file_references, RpcTransport};
+use dsh_pager::{RpcTransport, fetch_attachment, list_file_references};
 use dsh_pager_test_support::NodeStdioMock;
 
 fn scripted_transport(response: &str) -> (RpcTransport, NodeStdioMock) {

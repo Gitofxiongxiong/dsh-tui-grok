@@ -1,7 +1,7 @@
 use std::fs;
 use std::time::{Duration, Instant};
 
-use dsh_pager::{validate_backend_program, RpcTransport};
+use dsh_pager::{RpcTransport, validate_backend_program};
 use dsh_pager_test_support::TestSandbox;
 
 const HELLO_SCRIPT: &str = r#"
@@ -95,24 +95,35 @@ fn reconnect_keeps_prior_stderr_tail() {
     )
     .expect("spawn reconnect backend");
     let first = transport.hello("/work".into());
-    assert!(first.is_err(), "first backend must exit before hello completes");
+    assert!(
+        first.is_err(),
+        "first backend must exit before hello completes"
+    );
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline
-        && !transport.backend_stderr_tail().contains("OLD_BACKEND_STDERR")
+        && !transport
+            .backend_stderr_tail()
+            .contains("OLD_BACKEND_STDERR")
     {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        transport.backend_stderr_tail().contains("OLD_BACKEND_STDERR"),
+        transport
+            .backend_stderr_tail()
+            .contains("OLD_BACKEND_STDERR"),
         "failed backend stderr should be captured, got {}",
         transport.backend_stderr_tail()
     );
     transport.reconnect().expect("reconnect");
     assert!(
-        transport.backend_stderr_tail().contains("OLD_BACKEND_STDERR"),
+        transport
+            .backend_stderr_tail()
+            .contains("OLD_BACKEND_STDERR"),
         "reconnect must keep prior stderr tail, got {}",
         transport.backend_stderr_tail()
     );
-    let hello = transport.hello("/work".into()).expect("hello after reconnect");
+    let hello = transport
+        .hello("/work".into())
+        .expect("hello after reconnect");
     assert_eq!(hello.client_id, "client-reconnect");
 }

@@ -3,7 +3,7 @@ use dsh_pager::{
     DshRenderUpdate, SessionState,
 };
 use dsh_pager_protocol::{HistoryEntry, JsonRpcNotification, SessionEvent, SessionHistoryValue};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn history(seq: i64, event_type: &str, data: Value) -> HistoryEntry {
     HistoryEntry {
@@ -165,10 +165,12 @@ fn session_fixture_deduplicates_replay_live_and_rejects_stale_generation() {
 
     let stale = mux("s", Some(3), "session/queue", json!({ "items": [] }));
     assert!(!state.accept_notification(stale).unwrap().changed);
-    assert!(state
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == "stale-generation"));
+    assert!(
+        state
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "stale-generation")
+    );
 }
 
 #[test]

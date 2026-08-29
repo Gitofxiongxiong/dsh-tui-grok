@@ -1,7 +1,7 @@
 [package]
 name = "dsh-pager-test-support"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 description = "Shared deterministic test support for the native DSH pager"
 publish = false

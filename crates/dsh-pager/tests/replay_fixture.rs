@@ -1,6 +1,6 @@
 use dsh_pager::{ConnectionPhase, SessionState};
 use dsh_pager_protocol::{HistoryEntry, JsonRpcNotification, SessionHistoryValue};
-use dsh_pager_test_support::{read_jsonl, Scenario, ScenarioStep};
+use dsh_pager_test_support::{Scenario, ScenarioStep, read_jsonl};
 use serde_json::json;
 
 fn fixture_entries() -> Vec<HistoryEntry> {
@@ -37,9 +37,11 @@ fn replay_fixture_stitches_duplicate_and_out_of_order_live_events() {
     assert_eq!(scenario.steps.len(), 1);
     let entries = fixture_entries();
     assert_eq!(entries.len(), 4);
-    assert!(entries
-        .windows(2)
-        .all(|pair| { pair[0].event.seq.saturating_add(1) == pair[1].event.seq }));
+    assert!(
+        entries
+            .windows(2)
+            .all(|pair| { pair[0].event.seq.saturating_add(1) == pair[1].event.seq })
+    );
 
     let mut state = SessionState::new("fixture-session".into(), 3);
     state
@@ -61,9 +63,11 @@ fn replay_fixture_stitches_duplicate_and_out_of_order_live_events() {
     assert!(next.expect("buffer drained").changed);
     assert_eq!(state.tail_seq(), Some(3));
     assert_eq!(state.connection_phase(), ConnectionPhase::Connected);
-    assert!(state
-        .presentation_model()
-        .entries
-        .iter()
-        .any(|entry| { entry.text == "fixture answer" }));
+    assert!(
+        state
+            .presentation_model()
+            .entries
+            .iter()
+            .any(|entry| { entry.text == "fixture answer" })
+    );
 }

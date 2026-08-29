@@ -1,7 +1,7 @@
 [package]
 name = "dsh-pager-protocol"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 description = "JSON-RPC line codec for the DeepSeek Harness native TUI protocol"
 

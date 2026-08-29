@@ -7,13 +7,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use dsh_pager::{
+    DashboardModel, DashboardStatus, InteractionKind, RpcTransport, SessionChoice,
     drain_notifications, fork_session, list_sessions, load_session, rename_session, respond,
-    submit_prompt, update_queue, DashboardModel, DashboardStatus, InteractionKind, RpcTransport,
-    SessionChoice,
+    submit_prompt, update_queue,
 };
 use dsh_pager_grok_ui::run_interactive;
 use dsh_pager_protocol::{
-    PromptMode, QueueAction, ResumeClass, TuiInteractionResponse, TUI_PROTOCOL_VERSION,
+    PromptMode, QueueAction, ResumeClass, TUI_PROTOCOL_VERSION, TuiInteractionResponse,
 };
 
 struct Args {
@@ -608,7 +608,9 @@ mod tests {
 
     #[test]
     fn parse_args_blank_dsh_tui_server_is_usage_error() {
-        let error = parse_args_from(Vec::<String>::new(), Some(" \t ")).err().expect("blank env");
+        let error = parse_args_from(Vec::<String>::new(), Some(" \t "))
+            .err()
+            .expect("blank env");
         assert!(error.is::<UsageError>(), "{error}");
         assert!(error.to_string().contains("DSH_TUI_SERVER"), "{error}");
     }

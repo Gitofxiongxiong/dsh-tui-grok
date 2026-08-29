@@ -12,10 +12,10 @@ mod sandbox;
 mod scenario;
 mod screen;
 
-pub use fixture::{read_jsonl, write_jsonl, JsonlFixture};
-pub use node_mock::{require_node, utf8_path_arg, NodeStdioMock};
+pub use fixture::{JsonlFixture, read_jsonl, write_jsonl};
+pub use node_mock::{NodeStdioMock, require_node, utf8_path_arg};
 pub use parity::{ParityManifest, ParityReport, ParityScenario, ReferenceMatrix};
-pub use process::{run_with_timeout, CommandOutput, ProcessError};
+pub use process::{CommandOutput, ProcessError, run_with_timeout};
 pub use sandbox::TestSandbox;
 pub use scenario::{Scenario, ScenarioStep};
 pub use screen::{normalize_ansi, visible_lines};

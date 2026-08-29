@@ -1,7 +1,7 @@
 [package]
 name = "dsh-pager-bin"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 description = "DeepSeek Harness client with the Grok-derived native TUI"
 

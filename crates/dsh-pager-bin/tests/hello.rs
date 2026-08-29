@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use dsh_pager_test_support::{run_with_timeout, utf8_path_arg, TestSandbox};
+use dsh_pager_test_support::{TestSandbox, run_with_timeout, utf8_path_arg};
 
 fn mock_server() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/mock-server.mjs")
