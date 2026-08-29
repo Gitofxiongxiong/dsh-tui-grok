@@ -463,10 +463,7 @@ mod tests {
         let started = Instant::now();
         let text = capture_cli(
             "node",
-            &[
-                "-e",
-                "process.stdout.write('x'.repeat(2 * 1024 * 1024))",
-            ],
+            &["-e", "process.stdout.write('x'.repeat(2 * 1024 * 1024))"],
         );
         assert!(
             started.elapsed() < Duration::from_secs(2),

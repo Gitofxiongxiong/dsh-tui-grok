@@ -1226,7 +1226,7 @@ pub fn compute_paint_window(
 mod tests {
     use super::*;
     use dsh_pager_protocol::SessionEvent;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn history(seq: i64, event_type: &str, data: Value) -> HistoryEntry {
         HistoryEntry {
@@ -1424,9 +1424,11 @@ mod tests {
                 topology_changed: false,
             })
         );
-        assert!(scrollback
-            .content_delta_since(scrollback.revision().saturating_add(1))
-            .is_none());
+        assert!(
+            scrollback
+                .content_delta_since(scrollback.revision().saturating_add(1))
+                .is_none()
+        );
     }
 
     #[test]

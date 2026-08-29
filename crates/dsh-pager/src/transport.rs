@@ -7,11 +7,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use dsh_pager_protocol::{
-    embedded_hello_params, encode_request_line, parse_line, rpc_request, JsonRpcLine,
-    JsonRpcNotification, TuiHelloResult, TUI_PROTOCOL_VERSION, TUI_SERVER_INFO_NAME,
+    JsonRpcLine, JsonRpcNotification, TUI_PROTOCOL_VERSION, TUI_SERVER_INFO_NAME, TuiHelloResult,
+    embedded_hello_params, encode_request_line, parse_line, rpc_request,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::control_plane::ControlPlaneRouter;
@@ -374,9 +374,7 @@ impl RpcTransport {
                     return self.fail(format!("timed out waiting for {method} response"));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return self.fail(format!(
-                        "backend disconnected while waiting for {method}"
-                    ));
+                    return self.fail(format!("backend disconnected while waiting for {method}"));
                 }
             };
             self.process_message(message)?;

@@ -1341,10 +1341,12 @@ mod tests {
         let update = state.accept_notification(note).unwrap();
         assert!(update.changed);
         assert_eq!(state.connection_phase(), ConnectionPhase::Reconnecting);
-        assert!(state
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code == "host-stream/internal"));
+        assert!(
+            state
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "host-stream/internal")
+        );
     }
 
     #[test]
@@ -1441,10 +1443,12 @@ mod tests {
         let update = state.accept_notification(note).unwrap();
         assert!(!update.changed);
         assert!(state.queue().is_empty());
-        assert!(state
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code == "stale-generation"));
+        assert!(
+            state
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "stale-generation")
+        );
     }
 
     #[test]

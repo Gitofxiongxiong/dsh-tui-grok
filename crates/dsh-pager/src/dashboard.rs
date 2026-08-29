@@ -881,7 +881,7 @@ fn projection_failed(snapshot: &SessionControlSnapshot) -> bool {
 mod tests {
     use super::*;
     use dsh_pager_protocol::{SessionProjectionsBlock, SessionSummary};
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     fn snapshot(id: &str, at: u64) -> SessionControlSnapshot {
         SessionControlSnapshot {

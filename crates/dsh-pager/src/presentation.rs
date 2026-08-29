@@ -2984,10 +2984,12 @@ mod tests {
         assert_eq!(content.lines[0], " first");
         assert_eq!(content.lines[1], "");
         assert!(content.lines.iter().any(|line| line == "[image]"));
-        assert!(content
-            .lines
-            .iter()
-            .any(|line| line.starts_with("[tool-call] read")));
+        assert!(
+            content
+                .lines
+                .iter()
+                .any(|line| line.starts_with("[tool-call] read"))
+        );
         assert!(content.lines.iter().any(|line| line == "          next"));
         assert_eq!(content.editable_text, None);
         assert_eq!(content.block_count, 4);
