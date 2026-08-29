@@ -23,6 +23,19 @@ pub fn compact_model_label(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+/// Compact current-model label with its Host-authoritative reasoning effort.
+///
+/// Keep effort attached to the model, matching Grok's prompt/welcome contract.
+/// The model alias must be resolved before adding the effort suffix because the
+/// checked-in alias table intentionally matches exact catalog display names.
+pub fn compact_model_effort_label(name: &str, effort: Option<&str>) -> String {
+    let model = compact_model_label(name);
+    match effort {
+        Some(effort) => format!("{model} ({effort})"),
+        None => model,
+    }
+}
+
 fn model_label_aliases() -> &'static BTreeMap<String, String> {
     MODEL_LABEL_ALIASES.get_or_init(|| {
         let aliases = serde_json::from_str::<BTreeMap<String, String>>(MODEL_LABEL_ALIASES_JSON)
@@ -352,6 +365,26 @@ mod tests {
             "DeepSeek V4 Flash"
         );
         assert_eq!(compact_model_label("private-preview"), "private-preview");
+    }
+
+    #[test]
+    fn compact_prompt_label_appends_authoritative_effort_after_aliasing() {
+        assert_eq!(
+            compact_model_effort_label("DeepSeek-V4-Flash", Some("high")),
+            "dsv4 flash (high)"
+        );
+        assert_eq!(
+            compact_model_effort_label("DeepSeek-V4-Flash", Some("off")),
+            "dsv4 flash (off)"
+        );
+        assert_eq!(
+            compact_model_effort_label("DeepSeek-V4-Pro", None),
+            "dsv4 pro"
+        );
+        assert_eq!(
+            compact_model_effort_label("private-preview", Some("max")),
+            "private-preview (max)"
+        );
     }
 
     #[test]

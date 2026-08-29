@@ -62,7 +62,7 @@ use crate::media::{
     MediaPreviewBuffer, MediaPreviewController, MediaPreviewDecision, render_image_preview_content,
 };
 use crate::modal_window_state::ModalWindowState;
-use crate::model_state::{ModelId, ModelState, compact_model_label};
+use crate::model_state::{ModelId, ModelState, compact_model_effort_label};
 use crate::render::line_utils::truncate_str;
 use crate::scheduler::SchedulerStats;
 use crate::scrollback_adapter::{
@@ -1348,7 +1348,10 @@ impl UiState {
             .current_model_name()
             .unwrap_or_else(|| snapshot.model.clone());
         let prompt_info = PromptInfoContract {
-            model_name: compact_model_label(&model_name),
+            model_name: compact_model_effort_label(
+                &model_name,
+                self.models.reasoning_effort.as_deref(),
+            ),
             flags: self.prompt_flags(&snapshot, theme),
             multiline: textarea_rows > 1,
             ..PromptInfoContract::default()
@@ -2146,7 +2149,8 @@ impl UiState {
                 .models
                 .current_model_name()
                 .unwrap_or_else(|| snapshot.model.clone());
-            let model_label = compact_model_label(&model_name);
+            let model_label =
+                compact_model_effort_label(&model_name, self.models.reasoning_effort.as_deref());
             let welcome = render_welcome(
                 frame.buffer_mut(),
                 transcript_inner,
@@ -6599,6 +6603,10 @@ mod tests {
 
         let control_plane = ControlPlaneStore::default();
         let mut ui = UiState::default();
+        ui.models.set_current(
+            crate::model_state::ModelId::new("deepseek-official", "DeepSeek-V4-Flash"),
+            Some("high".into()),
+        );
         let mut wide_terminal = Terminal::new(TestBackend::new(80, 24)).expect("wide terminal");
         wide_terminal
             .draw(|frame| ui.render(frame, &mut session, &control_plane))
@@ -6610,9 +6618,14 @@ mod tests {
         assert!(wide.contains("Explore the uncharted!"));
         assert!(wide.contains("Shift+Tab preset"));
         assert!(wide.contains("preset"));
+        assert!(wide.contains("dsv4 flash (high)"));
         assert!(ui.hit_map.regions().iter().any(|region| {
             matches!(&region.target, HitTarget::Overlay(name) if name == "agent-preset")
                 && region.rect.width > 0
+        }));
+        assert!(ui.hit_map.regions().iter().any(|region| {
+            matches!(&region.target, HitTarget::Overlay(name) if name == "model-label")
+                && region.rect.width == "dsv4 flash (high)".len() as u16
         }));
         assert!(!wide.contains("private-session-id"));
         assert!(!wide.contains("No transcript events yet"));
@@ -6633,6 +6646,7 @@ mod tests {
         let compact = buffer_text(compact_terminal.backend().buffer(), 40, 12);
         assert!(compact.contains("DeepSeek Harness"));
         assert!(compact.contains("Shift+Tab preset"));
+        assert!(compact.contains("dsv4 flash (high)"));
         assert!(!compact.contains("Explore the uncharted!"));
         assert!(!compact.contains("private-session-id"));
     }
