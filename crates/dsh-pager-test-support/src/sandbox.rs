@@ -50,6 +50,21 @@ impl TestSandbox {
         if let Some(path) = std::env::var_os("PATH") {
             environment.insert("PATH".into(), path);
         }
+        // `env_clear` also removes SYSTEMROOT on Windows. System services may
+        // expand `%SYSTEMROOT%` while lazily loading DLLs, so runtimes such as
+        // Node can fail during crypto initialization before user code starts.
+        // Keep this platform bootstrap value without inheriting user config,
+        // credentials, or ambient DSH variables.
+        #[cfg(windows)]
+        {
+            let system_root = std::env::var_os("SYSTEMROOT").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "SYSTEMROOT is required for a usable Windows test sandbox",
+                )
+            })?;
+            environment.insert("SYSTEMROOT".into(), system_root);
+        }
         // Isolate Unix HOME/TMPDIR and Windows USERPROFILE/TMP/TEMP. Key set
         // matches grok-build xai-grok-test-support sandbox.rs; DSH does not set
         // GROK_HOME or Grok telemetry/git hermetic env.
@@ -156,5 +171,30 @@ mod tests {
         assert_eq!(env_value(&sandbox, "TEMP"), Some(sandbox.tmp().into()));
         assert_eq!(env_value(&sandbox, "TMP"), Some(sandbox.tmp().into()));
         assert_eq!(env_value(&sandbox, "TMPDIR"), Some(sandbox.tmp().into()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_systemroot_is_preserved_for_child_runtime_support() {
+        let expected = std::env::var_os("SYSTEMROOT").expect("parent SYSTEMROOT");
+        let sandbox = TestSandbox::new().expect("sandbox");
+        assert_eq!(env_value(&sandbox, "SYSTEMROOT"), Some(expected));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sandbox_can_start_node_crypto_runtime() {
+        crate::require_node().expect("node is required for Windows sandbox tests");
+        let sandbox = TestSandbox::new().expect("sandbox");
+        let output = sandbox
+            .command("node")
+            .args(["-e", "require('node:crypto').randomBytes(1)"])
+            .output()
+            .expect("start node in sandbox");
+        assert!(
+            output.status.success(),
+            "node crypto runtime failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
