@@ -73,13 +73,20 @@ const specs = {
   ...(manifest.optionalDependencies ?? {}),
 }
 for (const [name, spec] of Object.entries(specs)) {
-  if (String(spec).includes('workspace:')) {
-    fail(`packed ${name} is still ${spec}`)
+  if (/^(?:link|workspace):/.test(String(spec))) {
+    fail(`packed ${name} has local specifier ${spec}`)
+  }
+  if (String(spec).includes('alpha')) {
+    fail(`packed ${name} contains alpha version ${spec}`)
   }
 }
-const runtime = specs['@dsh-pager-grok/runtime']
-if (runtime !== '0.1.0') {
-  fail(`runtime must pack as 0.1.0, got ${runtime}`)
+if (specs['@deepseek-ai/dsh'] !== '0.1.1-rc.2') {
+  fail(`default DSH must pack as 0.1.1-rc.2, got ${specs['@deepseek-ai/dsh']}`)
+}
+for (const name of Object.keys(manifest.dependencies ?? {})) {
+  if (name.startsWith('@dsh-pager-grok/runtime')) {
+    fail(`CLI must delay-resolve family runtimes, found public dependency ${name}`)
+  }
 }
 rmSync(dir, { recursive: true, force: true })
 console.log(`verify-cli-pack: ${tarballLine} ok`)

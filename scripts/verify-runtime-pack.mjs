@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
-const runtime = join(repoRoot, 'packages/dsh-pager-runtime')
+const runtime = join(repoRoot, 'packages/dsh-pager-runtime-apiproxy-v1')
 const dir = mkdtempSync(join(tmpdir(), 'dsh-runtime-pack-'))
 const require = createRequire(import.meta.url)
 
@@ -44,8 +44,11 @@ if (pack.status !== 0) {
 const tarball = pack.stdout.trim().split('\n').at(-1)
 const extract = spawnSync('tar', ['-tzf', join(dir, tarball)], { encoding: 'utf8' })
 const names = extract.stdout.split('\n').filter(Boolean)
-if (!names.includes('package/lib/server/index.js')) {
+if (!names.includes('package/lib/server-entry.js')) {
   fail(`missing server entry: ${names.join(', ')}`)
+}
+if (names.some(name => name.includes('controllers-v2'))) {
+  fail('controllers-v2 files leaked into apiproxy-v1 runtime pack')
 }
 if (names.some(name => name.includes('/recovery'))) fail('retired recovery files leaked into runtime pack')
 if (!names.includes('package/cordis.patch.yml')) {
@@ -60,18 +63,31 @@ const packedJson = spawnSync('tar', ['-xOf', join(dir, tarball), 'package/packag
   encoding: 'utf8',
 })
 const manifest = JSON.parse(packedJson.stdout)
-const deps = JSON.stringify(manifest.dependencies ?? {})
-if (deps.includes('workspace:')) {
-  fail('packed dependencies contain workspace:')
+for (const [name, specifier] of Object.entries(manifest.dependencies ?? {})) {
+  if (/^(?:link|workspace):/.test(String(specifier))) {
+    fail(`packed dependency ${name} contains local specifier ${specifier}`)
+  }
+  if (String(specifier).includes('alpha')) {
+    fail(`packed dependency ${name} contains alpha version ${specifier}`)
+  }
+  if (name.startsWith('@deepseek-ai/dsh') && specifier !== '0.1.1-rc.2') {
+    fail(`packed dependency ${name} must be exact rc.2, got ${specifier}`)
+  }
 }
-if (manifest.dependencies?.['@deepseek-ai/cordis'] !== '4.0.1') {
-  fail('cordis must be pinned to 4.0.1')
+if (manifest.name !== '@dsh-pager-grok/runtime-apiproxy-v1') {
+  fail(`unexpected runtime package name ${manifest.name}`)
 }
-if (manifest.dependencies?.['@deepseek-ai/schemastery'] !== '3.18.1') {
-  fail('schemastery must be pinned to 3.18.1')
+if (manifest.dshPagerGrok?.adapterFamily !== 'apiproxy-v1' || manifest.dshPagerGrok?.profileSchema !== 1) {
+  fail('missing apiproxy-v1 runtime metadata')
 }
 if (manifest.dsh?.bundle?.patch !== './cordis.patch.yml') {
   fail('missing dsh.bundle.patch')
+}
+const jsNames = names.filter(name => name.endsWith('.js'))
+const packedJs = spawnSync('tar', ['-xOf', join(dir, tarball), ...jsNames], { encoding: 'utf8' })
+if (packedJs.status !== 0) fail(`cannot inspect packed JS: ${packedJs.stderr}`)
+for (const forbidden of ['controllers-v2', '0.1.2-alpha.1', '@deepseek-ai/dsh-session/chunk-rows']) {
+  if (packedJs.stdout.includes(forbidden)) fail(`packed JS contains forbidden ${forbidden}`)
 }
 rmSync(dir, { recursive: true, force: true })
 console.log(`verify-runtime-pack: ${tarball} ok`)

@@ -25,7 +25,7 @@ Shared wire protocol for the DeepSeek Harness native TUI client. The package is 
 
 `tui.hello` requires `protocolVersion` `1` and returns `serverInfo.name` `deepseek-harness-tui`. `tui.subscribe` names a `session`, `control-plane`, or `all` scope and returns `resume-accepted` only when the bounded control-plane records cover the requested watermark; otherwise it returns and notifies `baseline-required`. The session history stream still has no cursor replay, so a reconnecting client must refetch `session.history` for presentation content. `generation` increments per hello; frames that carry an older generation are stale.
 
-`classifyMethod` / `isApiProxyMethod` identify unary ApiProxy methods forwarded on the same connection (`session.history`, `session.prompt`, and the rest of `RpcMethodMap`). Those params stay opaque here; the gateway validates them.
+`classifyMethod` / `isTuiUnaryMethod` identify unary business methods forwarded on the same connection (`session.history`, `session.prompt`, and the rest of `RpcMethodMap`). Those params stay opaque here; the gateway validates them.
 
 Application errors use JSON-RPC `error.data.kind` (`protocol-version`, `stale-generation`, `already-resolved`, `unknown-session`, `identity-mismatch`, `baseline-required`, `not-attached`, `capability-denied`) and the codes in `TUI_ERROR_CODES`.
 

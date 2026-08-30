@@ -2,12 +2,15 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 const registryPath = join(repoRoot, 'compat', 'dsh-support.json')
-const runtimeManifestPath = join(repoRoot, 'packages', 'dsh-pager-runtime', 'package.json')
+const runtimeManifestPaths = [
+  join(repoRoot, 'packages', 'dsh-pager-runtime', 'package.json'),
+  join(repoRoot, 'packages', 'dsh-pager-runtime-apiproxy-v1', 'package.json'),
+]
 const cliManifestPath = join(repoRoot, 'packages', 'dsh-pager-cli', 'package.json')
 const registryConsumerPaths = [
   join(repoRoot, 'packages', 'dsh-pager-cli', 'lib', 'launcher.js'),
@@ -172,9 +175,10 @@ function validateCheckout(version, entry) {
   reports.push(`checked ${version} checkout: ${checkout}`)
 }
 
-function validateRuntimeManifest(entries) {
-  const manifest = readJson(runtimeManifestPath, 'runtime manifest')
+function validateRuntimeManifest(path, entries) {
+  const manifest = readJson(path, `runtime manifest ${path}`)
   if (!isRecord(manifest)) return
+  const label = String(manifest.name ?? path)
   const dependencySections = [
     'dependencies',
     'devDependencies',
@@ -186,20 +190,31 @@ function validateRuntimeManifest(entries) {
     const dependencies = manifest[section]
     if (dependencies === undefined) continue
     if (!isRecord(dependencies)) {
-      failures.push(`runtime manifest ${section}: expected an object`)
+      failures.push(`${label} ${section}: expected an object`)
       continue
     }
     for (const [name, specifier] of Object.entries(dependencies)) {
       if (!name.startsWith('@deepseek-ai/')) continue
-      if (typeof specifier !== 'string' || !EXACT_VERSION.test(specifier)) {
-        failures.push(`runtime manifest ${section}.${name}: expected an exact version, got ${JSON.stringify(specifier)}`)
+      let actualVersion = specifier
+      if (typeof specifier === 'string' && specifier.startsWith('link:') && manifest.private === true) {
+        const linkedManifest = readJson(
+          join(resolve(dirname(path), specifier.slice('link:'.length)), 'package.json'),
+          `${label} linked dependency ${name}`,
+        )
+        if (linkedManifest?.name !== name || !EXACT_VERSION.test(linkedManifest?.version ?? '')) {
+          failures.push(`${label} ${section}.${name}: invalid linked package identity/version`)
+          continue
+        }
+        actualVersion = linkedManifest.version
+      } else if (typeof specifier !== 'string' || !EXACT_VERSION.test(specifier)) {
+        failures.push(`${label} ${section}.${name}: expected an exact version or private source link, got ${JSON.stringify(specifier)}`)
         continue
       }
       const previous = deepseekPackages.get(name)
-      if (previous !== undefined && previous.specifier !== specifier) {
-        failures.push(`runtime manifest ${name}: ${previous.section} uses ${previous.specifier}, ${section} uses ${specifier}`)
+      if (previous !== undefined && previous.specifier !== actualVersion) {
+        failures.push(`${label} ${name}: ${previous.section} resolves ${previous.specifier}, ${section} resolves ${actualVersion}`)
       }
-      deepseekPackages.set(name, { section, specifier })
+      deepseekPackages.set(name, { section, specifier: actualVersion })
     }
   }
 
@@ -210,25 +225,38 @@ function validateRuntimeManifest(entries) {
     }
   }
   if (dshVersions.size === 0) {
-    failures.push('runtime manifest: no exact @deepseek-ai/dsh or @deepseek-ai/dsh-* dependency found')
+    failures.push(`${label}: no exact @deepseek-ai/dsh or @deepseek-ai/dsh-* dependency found`)
     return
   }
   if (dshVersions.size > 1) {
-    failures.push(`runtime manifest DSH packages disagree: ${[...dshVersions].sort().join(', ')}`)
+    failures.push(`${label} DSH packages disagree: ${[...dshVersions].sort().join(', ')}`)
   }
   for (const version of [...dshVersions].sort()) {
     const support = entries.get(version)
     if (support === undefined) {
-      failures.push(`runtime manifest DSH version ${version}: missing from compat/dsh-support.json`)
+      failures.push(`${label} DSH version ${version}: missing from compat/dsh-support.json`)
       continue
     }
     if (!DISTRIBUTIONS.has(support.distribution)) {
-      failures.push(`runtime manifest DSH version ${version}: invalid registry distribution ${JSON.stringify(support.distribution)}`)
+      failures.push(`${label} DSH version ${version}: invalid registry distribution ${JSON.stringify(support.distribution)}`)
       continue
     }
-    reports.push(`runtime manifest DSH ${version}: registry distribution=${support.distribution}`)
+    if (manifest.dshPagerGrok?.adapterFamily !== support.family) {
+      failures.push(`${label}: adapter family ${JSON.stringify(manifest.dshPagerGrok?.adapterFamily)} disagrees with ${version} registry family ${support.family}`)
+    }
+    if (support.distribution === 'source-only') {
+      if (manifest.private !== true) failures.push(`${label}: source-only runtime must be private`)
+    } else if (manifest.name !== support.runtimePackage) {
+      failures.push(`${label}: npm registry runtime for ${version} must be ${support.runtimePackage}`)
+    }
+    reports.push(`${label} DSH ${version}: registry distribution=${support.distribution}`)
   }
-  reports.push(`checked ${deepseekPackages.size} exact @deepseek-ai/* runtime dependency declarations`)
+  if (manifest.private !== true) {
+    for (const [name, { specifier }] of deepseekPackages) {
+      if (specifier.includes('alpha')) failures.push(`${label}: publishable dependency ${name}@${specifier} is alpha`)
+    }
+  }
+  reports.push(`checked ${deepseekPackages.size} exact @deepseek-ai/* declarations in ${label}`)
 }
 
 function validateRegistryConsumers(entries) {
@@ -258,12 +286,24 @@ function validateRegistryConsumers(entries) {
   if (isRecord(cliManifest) && !String(cliManifest.scripts?.prepack ?? '').includes('copy-support-registry.mjs')) {
     failures.push('CLI manifest: prepack does not derive its bundled support registry from the canonical file')
   }
+  if (isRecord(cliManifest)) {
+    const dshVersion = cliManifest.dependencies?.['@deepseek-ai/dsh']
+    const support = entries.get(dshVersion)
+    if (support === undefined || support.distribution !== 'npm') {
+      failures.push(`CLI manifest: @deepseek-ai/dsh must be an exact registry npm version, got ${JSON.stringify(dshVersion)}`)
+    }
+    for (const [name, specifier] of Object.entries(cliManifest.dependencies ?? {})) {
+      if (String(specifier).includes('alpha') || /^(?:link|workspace):/.test(String(specifier))) {
+        failures.push(`CLI manifest: public dependency ${name}@${specifier} is not registry publishable`)
+      }
+    }
+  }
   reports.push(`checked ${registryConsumerPaths.length} CLI/script registry consumers for version literals`)
 }
 
 const registry = readJson(registryPath, 'support registry')
 const entries = registry === undefined ? new Map() : validateRegistry(registry)
-validateRuntimeManifest(entries)
+for (const path of runtimeManifestPaths) validateRuntimeManifest(path, entries)
 validateRegistryConsumers(entries)
 for (const [version, entry] of entries) validateCheckout(version, entry)
 

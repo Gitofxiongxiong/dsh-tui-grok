@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import type {
   ApiResult,
@@ -60,6 +61,10 @@ import {
 } from './streams.js'
 import type { PendingInteraction } from './interactions.js'
 import { callControllersV2Unary } from './unary.js'
+import {
+  resolveControllersV2Runtime,
+  type ControllersV2Runtime,
+} from './runtime.js'
 
 export type { TuiHarnessContext } from './context.js'
 
@@ -90,8 +95,14 @@ export class ControllersV2Backend implements TuiBackend {
   private pushSequence = 0
   private disposed = false
 
-  constructor(private readonly ctx: TuiHarnessContext) {
+  private readonly decodeStorageRecord: ControllersV2Runtime['decodeStorageRecord']
+
+  constructor(
+    private readonly ctx: TuiHarnessContext,
+    runtime: ControllersV2Runtime = resolveControllersV2Runtime(createRequire(import.meta.url)),
+  ) {
     assertBackendSelection(this.info)
+    this.decodeStorageRecord = runtime.decodeStorageRecord
     this.installHostEvents()
     this.installInteractionAnswerers()
   }
@@ -381,7 +392,7 @@ export class ControllersV2Backend implements TuiBackend {
     sessionId: SessionId,
     projections?: RecordLike,
   ): RecordLike {
-    const events = recordsToEvents(page.records)
+    const events = recordsToEvents(page.records, this.decodeStorageRecord)
     return {
       events: this.historyEntries(events, sessionId),
       hasMore: page.hasMore,

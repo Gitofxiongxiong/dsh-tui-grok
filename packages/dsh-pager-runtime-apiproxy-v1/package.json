@@ -1,0 +1,90 @@
+{
+  "name": "@dsh-pager-grok/runtime-apiproxy-v1",
+  "version": "0.1.0",
+  "description": "Publishable DSH ApiProxy v1 profile runtime for dsh-pager-grok",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",
+    "directory": "packages/dsh-pager-runtime-apiproxy-v1"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/assemble-runtime.mjs apiproxy-v1",
+    "prepack": "node ../../scripts/assemble-runtime.mjs apiproxy-v1 && node ../../scripts/copy-package-licenses.mjs .",
+    "test": "vitest run tests"
+  },
+  "exports": {
+    "./server": {
+      "types": "./lib/server-entry.d.ts",
+      "default": "./lib/server-entry.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshPagerGrok": {
+    "adapterFamily": "apiproxy-v1",
+    "profileSchema": 1,
+    "dshVersions": [
+      "0.1.1-rc.2"
+    ],
+    "capabilities": {
+      "sessions": true,
+      "workspaces": true,
+      "settings": true,
+      "credentials": true,
+      "agentPresets": true,
+      "goals": true,
+      "subagents": true,
+      "approvals": true,
+      "questions": true,
+      "queue": true,
+      "jobs": true,
+      "skills": true,
+      "fileReferences": true,
+      "directoryPicker": true
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-agent-presets": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-commands": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-cordis-host-runner": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-file-reference": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-file-reference-local": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session-projection-cache": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage-json": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-workspace": "0.1.1-rc.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis-plugin-include": "1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
