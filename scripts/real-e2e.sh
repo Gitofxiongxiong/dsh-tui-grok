@@ -109,6 +109,23 @@ if (( use_env_backend == 0 )); then
   isolated_profile_dir="$pty_dsh_home/profiles/$tui_profile"
   mkdir -p "$isolated_profile_dir"
   cp -a "$source_profile_dir/." "$isolated_profile_dir/"
+
+  # pnpm writes relative link: symlinks whose meaning depends on the profile's
+  # original directory depth.  `cp -a` preserves their raw text, so relocating
+  # the profile under /tmp can turn a valid /home/.../code target into a broken
+  # /tmp/code target.  Preserve the source links' resolved meaning while the
+  # copied profile files, sessions, credentials and storage stay isolated.
+  while IFS= read -r -d '' source_link; do
+    relative_link="${source_link#"$source_profile_dir"/}"
+    isolated_link="$isolated_profile_dir/$relative_link"
+    canonical_target="$(realpath "$source_link")"
+    unlink "$isolated_link"
+    ln -s "$canonical_target" "$isolated_link"
+    if [[ "$(realpath "$isolated_link")" != "$canonical_target" ]]; then
+      printf 'Failed to preserve isolated profile link: %s\n' "$relative_link" >&2
+      exit 2
+    fi
+  done < <(find "$source_profile_dir" -type l -print0)
 fi
 
 DSH_HOME="$pty_dsh_home" python3 scripts/pty-smoke.py \
