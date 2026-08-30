@@ -9,6 +9,7 @@ import type {
   TuiBackendInfo,
   TuiMuxEnvelope,
 } from '../../core/backend.js'
+import { assertBackendSelection } from '../../core/backend-selection.js'
 import type {
   ApiProxyV1Extensions,
   ApiProxyV1Like,
@@ -42,6 +43,7 @@ export class ApiProxyV1Backend implements TuiBackend {
     }
     this.extensions = options.extensions ?? {}
     this.info = apiProxyV1Info(options.dshVersion, this.extensions)
+    assertBackendSelection(this.info)
     this.handler = options.toFetchHandler(options.api)
     if (typeof this.handler?.fetch !== 'function') {
       throw new Error('apiproxy-v1 toFetchHandler must return a fetch-capable handler')

@@ -2,23 +2,30 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { detectLibc, enginesSatisfied, nativeSpec } from './platform.js'
 
 export const PACKAGE = '@dsh-pager-grok/cli'
-export const BUNDLE = '@dsh-pager-grok/runtime'
-export const PROFILE = 'dsh-pager-grok'
+export const PROFILE_PREFIX = 'dsh-pager-grok'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = join(here, '..')
 const require = createRequire(import.meta.url)
+const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const STARTABLE_STATUSES = new Set(['supported', 'maintenance', 'candidate', 'experimental'])
+
+export class UnsupportedDshVersionError extends Error {
+  constructor(message, evidence = {}) {
+    super(message)
+    this.name = 'UnsupportedDshVersionError'
+    this.evidence = evidence
+  }
+}
 
 export function readOwnVersion(root = packageRoot) {
-  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  if (pkg.name !== PACKAGE) {
-    throw new Error(`package.json name must be ${PACKAGE}`)
-  }
+  const pkg = readJson(join(root, 'package.json'), 'CLI package manifest')
+  if (pkg.name !== PACKAGE) throw new Error(`package.json name must be ${PACKAGE}`)
   return pkg.version
 }
 
@@ -26,8 +33,16 @@ export function dshHome(env = process.env) {
   return env.DSH_HOME && env.DSH_HOME.length > 0 ? env.DSH_HOME : join(homedir(), '.dsh')
 }
 
-export function profileDir(env = process.env) {
-  return join(dshHome(env), 'profiles', PROFILE)
+export function profileNameFor(family) {
+  if (family !== 'apiproxy-v1' && family !== 'controllers-v2') {
+    throw new Error(`unsupported adapter family ${JSON.stringify(family)}`)
+  }
+  return `${PROFILE_PREFIX}-${family}`
+}
+
+export function profileDir(env = process.env, selection) {
+  if (selection === undefined) throw new Error('profileDir requires a resolved DSH selection')
+  return join(dshHome(env), 'profiles', selection.profile)
 }
 
 export function userBackendKind(argv, env = process.env) {
@@ -54,21 +69,144 @@ export function commandName(argv) {
   return 'run'
 }
 
-export function needBundle(env = process.env, ownVersion = readOwnVersion()) {
-  const manifestPath = join(profileDir(env), 'package.json')
+export function supportRegistryPath(env = process.env, root = packageRoot) {
+  if (env.DSH_PAGER_SUPPORT_REGISTRY) {
+    if (env.DSH_PAGER_DEV_MODE !== '1') {
+      throw new Error('DSH_PAGER_SUPPORT_REGISTRY requires DSH_PAGER_DEV_MODE=1')
+    }
+    return resolve(env.DSH_PAGER_SUPPORT_REGISTRY)
+  }
+  const candidates = [
+    resolve(root, '..', '..', 'compat', 'dsh-support.json'),
+    join(root, 'lib', 'dsh-support.json'),
+  ]
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found !== undefined) return found
+  throw new Error(`support registry is missing; checked: ${candidates.join(', ')}`)
+}
+
+export function readSupportRegistry(path = supportRegistryPath()) {
+  const registry = readJson(path, 'DSH support registry')
+  if (registry?.schemaVersion !== 1 || !isRecord(registry.versions)) {
+    throw new Error(`invalid DSH support registry: ${path}`)
+  }
+  for (const [version, entry] of Object.entries(registry.versions)) {
+    if (!EXACT_VERSION.test(version) || !isRecord(entry)) {
+      throw new Error(`invalid DSH support entry for ${JSON.stringify(version)}`)
+    }
+    for (const key of ['family', 'runtimePackage', 'profileSchema', 'status', 'distribution']) {
+      if (!Object.hasOwn(entry, key)) throw new Error(`DSH support ${version} is missing ${key}`)
+    }
+  }
+  return registry
+}
+
+export function resolveDshEntry(env = process.env, options = {}) {
+  if (env.DSH_BIN_JS) {
+    if (!existsSync(env.DSH_BIN_JS)) throw new Error(`DSH_BIN_JS does not exist: ${env.DSH_BIN_JS}`)
+    return { node: process.execPath, binJs: resolve(env.DSH_BIN_JS), source: 'DSH_BIN_JS', custom: true }
+  }
+  try {
+    const resolveDefault = options.resolveDefault ?? (() => require.resolve('@deepseek-ai/dsh/lib/bin.js'))
+    return { node: process.execPath, binJs: resolveDefault(), source: 'npm-default', custom: false }
+  } catch (error) {
+    throw new Error(
+      `cannot resolve @deepseek-ai/dsh/lib/bin.js (${error.message}). Reinstall ${PACKAGE}.`,
+    )
+  }
+}
+
+export function readDshIdentity(entry) {
+  let cursor = dirname(resolve(entry.binJs))
+  for (;;) {
+    const manifestPath = join(cursor, 'package.json')
+    if (existsSync(manifestPath)) {
+      const manifest = readJson(manifestPath, 'DSH package manifest')
+      if (manifest.name === '@deepseek-ai/dsh') {
+        if (typeof manifest.version !== 'string' || !EXACT_VERSION.test(manifest.version)) {
+          throw new Error(`DSH package has non-exact version ${JSON.stringify(manifest.version)}: ${manifestPath}`)
+        }
+        return { version: manifest.version, packageJson: manifestPath, packageRoot: cursor }
+      }
+    }
+    const parent = dirname(cursor)
+    if (parent === cursor) break
+    cursor = parent
+  }
+  throw new Error(`cannot locate @deepseek-ai/dsh package.json above ${entry.binJs}`)
+}
+
+export function testedVersionSummary(registry) {
+  return Object.entries(registry.versions)
+    .map(([version, entry]) => `${version} (${entry.status}, ${entry.distribution}, ${entry.family})`)
+    .join(', ')
+}
+
+export function recommendedInstall(registry) {
+  const order = ['supported', 'candidate', 'maintenance', 'experimental']
+  const row = order.flatMap(status => Object.entries(registry.versions)
+    .filter(([, entry]) => entry.status === status))[0]
+  if (row === undefined) return `npm install -g ${PACKAGE}`
+  return `npm install -g @deepseek-ai/dsh@${row[0]} ${PACKAGE}`
+}
+
+export function resolveDshSelection(env = process.env, options = {}) {
+  const entry = options.entry ?? resolveDshEntry(env, options)
+  const identity = options.identity ?? readDshIdentity(entry)
+  const registryPath = options.registry === undefined
+    ? supportRegistryPath(env, options.packageRoot ?? packageRoot)
+    : options.registryPath ?? '<in-memory>'
+  const registry = options.registry ?? readSupportRegistry(registryPath)
+  const support = registry.versions[identity.version]
+  if (support === undefined) {
+    throw new UnsupportedDshVersionError(
+      `unsupported DSH version ${identity.version} from ${identity.packageJson}. ` +
+        `Tested versions: ${testedVersionSummary(registry)}. Recommended: ${recommendedInstall(registry)}`,
+      { entry, identity, registry, registryPath },
+    )
+  }
+  return {
+    entry,
+    identity,
+    registry,
+    registryPath,
+    version: identity.version,
+    family: support.family,
+    runtimePackage: support.runtimePackage,
+    profileSchema: support.profileSchema,
+    status: support.status,
+    distribution: support.distribution,
+    profile: profileNameFor(support.family),
+    startable: STARTABLE_STATUSES.has(support.status),
+  }
+}
+
+export function assertStartableSelection(selection) {
+  if (selection.startable) return selection
+  throw new UnsupportedDshVersionError(
+    `DSH ${selection.version} is listed as ${selection.status} and cannot start. ` +
+      `Tested versions: ${testedVersionSummary(selection.registry)}. ` +
+      `Recommended: ${recommendedInstall(selection.registry)}`,
+    { entry: selection.entry, identity: selection.identity, registry: selection.registry },
+  )
+}
+
+export function needBundle(env = process.env, ownVersion = readOwnVersion(), selection) {
+  const dir = profileDir(env, selection)
+  const manifestPath = join(dir, 'package.json')
   if (!existsSync(manifestPath)) return true
   let manifest
   try {
-    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest = readJson(manifestPath, 'DSH profile manifest')
   } catch {
     return true
   }
   const bundles = manifest?.dsh?.profile?.bundles
-  if (!Array.isArray(bundles) || !bundles.includes(BUNDLE)) return true
-  const installed = join(profileDir(env), 'node_modules', BUNDLE, 'package.json')
+  if (!Array.isArray(bundles) || !bundles.includes(selection.runtimePackage)) return true
+  const installed = join(dir, 'node_modules', ...selection.runtimePackage.split('/'), 'package.json')
   if (!existsSync(installed)) return true
   try {
-    const pkg = JSON.parse(readFileSync(installed, 'utf8'))
+    const pkg = readJson(installed, 'profile runtime manifest')
     return pkg.version !== ownVersion
   } catch {
     return true
@@ -79,12 +217,12 @@ export function helpText() {
   return `Usage: dsh-pager [command] [pager flags]
 
 Commands:
-  doctor       Pre-flight checks (never prints secret values)
-  update       Re-align the profile runtime bundle to this CLI version
-  uninstall    Remove the profile runtime bundle (keeps $DSH_HOME/sessions)
-  repair       Rename a broken profile to a timestamped backup
-  version      Print CLI version
-  help         Show this help
+  doctor [--release]  Version/profile checks; --release reserves registry dependency checks
+  update              Re-align the selected family runtime to this CLI version
+  uninstall           Remove the selected family runtime (keeps $DSH_HOME/sessions)
+  repair              Rename the selected family profile to a timestamped backup
+  version             Print CLI version
+  help                Show this help
 
 Pager flags (forwarded to the native binary):
   --hello | --load-only | --list-sessions | --dashboard
@@ -92,8 +230,8 @@ Pager flags (forwarded to the native binary):
   --smoke-interactions | --smoke-queue | --smoke-lifecycle
   --backend <program> | --backend-arg <arg>   (repeatable; values may start with --)
 
-Default product backend (injected unless argv already has --backend or DSH_TUI_SERVER is set):
-  --backend <node> --backend-arg <dsh lib/bin.js> --backend-arg --profile --backend-arg ${PROFILE}
+Default product backend (unless argv has --backend or DSH_TUI_SERVER is set):
+  exact DSH package version -> compat/dsh-support.json -> family runtime/profile -> native pager
 `
 }
 
@@ -101,36 +239,17 @@ export const LEAF_COMMANDS = new Set(['doctor', 'update', 'uninstall', 'repair']
 
 export function extraArgsError(command, argv) {
   if (!LEAF_COMMANDS.has(command)) return null
-  if (argv.length > 1) return `${command} does not accept extra arguments`
+  if (command === 'doctor' && argv.length === 2 && argv[1] === '--release') return null
+  if (argv.length > 1) return `${command} does not accept ${argv.slice(1).join(' ')}`
   return null
-}
-
-export function resolveDshEntry(env = process.env) {
-  if (env.DSH_BIN_JS) {
-    if (!existsSync(env.DSH_BIN_JS)) {
-      throw new Error(`DSH_BIN_JS does not exist: ${env.DSH_BIN_JS}`)
-    }
-    return { node: process.execPath, binJs: env.DSH_BIN_JS, custom: true }
-  }
-  try {
-    return { node: process.execPath, binJs: require.resolve('@deepseek-ai/dsh/lib/bin.js'), custom: false }
-  } catch (error) {
-    throw new Error(
-      `cannot resolve @deepseek-ai/dsh/lib/bin.js (${error.message}). Reinstall @dsh-pager-grok/cli.`,
-    )
-  }
 }
 
 export function resolvePagerBinary(opts = {}) {
   if (opts.binPath) return opts.binPath
   const env = opts.env ?? process.env
-  if (env.DSH_PAGER_BIN && env.DSH_PAGER_DEV_MODE === '1') {
-    return env.DSH_PAGER_BIN
-  }
+  if (env.DSH_PAGER_BIN && env.DSH_PAGER_DEV_MODE === '1') return env.DSH_PAGER_BIN
   const spec = nativeSpec(process.platform, process.arch, detectLibc(env))
-  if (spec.error) {
-    throw new Error(`dsh-pager: ${spec.error}`)
-  }
+  if (spec.error) throw new Error(`dsh-pager: ${spec.error}`)
   let packageJson
   try {
     packageJson = require.resolve(`${spec.name}/package.json`)
@@ -142,16 +261,18 @@ export function resolvePagerBinary(opts = {}) {
   }
   const binary = join(dirname(packageJson), 'bin', spec.bin)
   if (!existsSync(binary)) {
-    throw new Error(
-      `dsh-pager: ${spec.name} did not include ${spec.bin}. Reinstall:\n` +
-        `  npm install -g ${PACKAGE} --include=optional`,
-    )
+    throw new Error(`dsh-pager: ${spec.name} did not include ${spec.bin}. Reinstall ${PACKAGE}.`)
   }
   return binary
 }
 
-export function productBackendArgs(entry = resolveDshEntry()) {
-  return ['--backend', entry.node, '--backend-arg', entry.binJs, '--backend-arg', '--profile', '--backend-arg', PROFILE]
+export function productBackendArgs(selection) {
+  return [
+    '--backend', selection.entry.node,
+    '--backend-arg', selection.entry.binJs,
+    '--backend-arg', '--profile',
+    '--backend-arg', selection.profile,
+  ]
 }
 
 export function cliBinDir() {
@@ -159,40 +280,45 @@ export function cliBinDir() {
 }
 
 export function runDsh(dshArgs, options = {}) {
-  const entry = resolveDshEntry(options.env ?? process.env)
+  const entry = options.entry ?? resolveDshEntry(options.env ?? process.env)
   const env = { ...(options.env ?? process.env) }
   env.PATH = `${cliBinDir()}${options.pathSep ?? (process.platform === 'win32' ? ';' : ':')}${env.PATH ?? ''}`
-  const result = spawnSync(entry.node, [entry.binJs, ...dshArgs], {
+  return spawnSync(entry.node, [entry.binJs, ...dshArgs], {
     env,
     stdio: options.stdio ?? 'inherit',
     encoding: 'utf8',
   })
-  return result
 }
 
-export function ensureProfileBundle(ownVersion, env = process.env) {
-  const result = runDsh(['plugin', '--profile', PROFILE, 'add', `${BUNDLE}@${ownVersion}`], { env })
-  if (result.status !== 0) {
-    const retry = runDsh(
-      ['plugin', '--profile', PROFILE, 'add', '-w', `${BUNDLE}@${ownVersion}`],
-      { env },
-    )
-    if (retry.status !== 0) {
-      throw new Error(`dsh plugin add ${BUNDLE}@${ownVersion} failed (exit ${retry.status ?? 1})`)
-    }
-  }
-  if (needBundle(env, ownVersion)) {
+export function ensureProfileBundle(ownVersion, selection, env = process.env) {
+  if (selection.distribution === 'source-only') {
     throw new Error(
-      `profile ${PROFILE} did not install ${BUNDLE}@${ownVersion}. ` +
-        `Back up and recreate it with: dsh-pager repair`,
+      `${selection.runtimePackage} is source-only. Prepare ${selection.profile} with the development ` +
+        `setup for DSH ${selection.version}; automatic registry installation is disabled.`,
     )
+  }
+  const spec = `${selection.runtimePackage}@${ownVersion}`
+  const args = ['plugin', '--profile', selection.profile, 'add', spec]
+  let result = runDsh(args, { env, entry: selection.entry })
+  if (result.status !== 0) {
+    result = runDsh(['plugin', '--profile', selection.profile, 'add', '-w', spec], {
+      env,
+      entry: selection.entry,
+    })
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `dsh plugin add ${spec} failed (exit ${result.status ?? 1}). ` +
+        `Install ${spec}, or configure a family runtime explicitly for development.`,
+    )
+  }
+  if (needBundle(env, ownVersion, selection)) {
+    throw new Error(`profile ${selection.profile} did not install ${spec}; run dsh-pager repair`)
   }
 }
 
 export function forwardExit(child) {
-  child.on('error', () => {
-    process.exit(1)
-  })
+  child.on('error', () => process.exit(1))
   child.on('exit', (code, signal) => {
     if (signal) {
       process.kill(process.pid, signal)
@@ -204,13 +330,29 @@ export function forwardExit(child) {
 
 export function spawnPager(argv, options = {}) {
   const env = { ...(options.env ?? process.env), DSH_PAGER_ROLE: 'launcher' }
+  if (options.selection !== undefined) {
+    env.DSH_PAGER_EXPECTED_ADAPTER_FAMILY = options.selection.family
+    env.DSH_PAGER_EXPECTED_DSH_VERSION = options.selection.version
+    env.DSH_PAGER_EXPECTED_PROFILE_SCHEMA = String(options.selection.profileSchema)
+  }
   const binary = resolvePagerBinary(options)
   const child = spawn(binary, argv, { stdio: 'inherit', env })
   forwardExit(child)
   return child
 }
 
-export function printDoctor(ownVersion, env = process.env) {
+export function supportStatusMessage(status) {
+  const messages = {
+    supported: 'supported: full release and E2E gates',
+    maintenance: 'maintenance: compatibility fixes and matrix coverage',
+    candidate: 'candidate: pre-release evidence only; not yet supported',
+    experimental: 'experimental: source-only and not an npm default',
+    unsupported: 'unsupported: startup is blocked; install a tested version',
+  }
+  return messages[status] ?? `unknown status: ${status}`
+}
+
+export function printDoctor(ownVersion, env = process.env, options = {}) {
   const lines = [`dsh-pager doctor · ${PACKAGE} ${ownVersion}`]
   let hardFail = false
   const mark = (ok, label, detail) => {
@@ -220,58 +362,96 @@ export function printDoctor(ownVersion, env = process.env) {
   if (!mark(enginesSatisfied(), 'node', process.versions.node)) hardFail = true
   const spec = nativeSpec(process.platform, process.arch, detectLibc(env))
   if (spec.error) {
-    mark(false, 'platform', spec.error)
+    mark(false, 'native', spec.error)
     hardFail = true
   } else {
     try {
-      resolvePagerBinary({ env })
-      mark(true, 'native', spec.name)
+      const binary = resolvePagerBinary({ env })
+      const manifestPath = require.resolve(`${spec.name}/package.json`)
+      const nativeVersion = readJson(manifestPath, 'native package manifest').version
+      const aligned = nativeVersion === ownVersion
+      mark(aligned, 'pager CLI ↔ native', `${spec.name}@${nativeVersion} binary=${binary}`)
+      if (!aligned) hardFail = true
     } catch (error) {
-      mark(false, 'native', error.message.split('\n')[0])
+      mark(false, 'pager CLI ↔ native', firstLine(error))
       hardFail = true
     }
   }
+
   try {
-    const entry = resolveDshEntry(env)
-    mark(true, 'dsh', entry.custom ? 'DSH_BIN_JS' : '@deepseek-ai/dsh')
+    const selection = resolveDshSelection(env, options)
+    mark(true, 'DSH entry', `${selection.entry.source} ${selection.entry.binJs}`)
+    mark(true, 'DSH package', `${selection.version} ${selection.identity.packageJson}`)
+    mark(selection.startable, 'support',
+      `${selection.status}/${selection.distribution} · ${supportStatusMessage(selection.status)}`)
+    if (!selection.startable) hardFail = true
+    mark(true, 'adapter', `${selection.family} runtime=${selection.runtimePackage}`)
+    mark(true, 'profile', `${profileDir(env, selection)} family=${selection.family} schema=${selection.profileSchema}`)
+    const runtime = runtimeDoctorEvidence(selection, ownVersion, env)
+    mark(runtime.ok, 'pager CLI ↔ runtime', runtime.detail)
+    if (!runtime.ok) hardFail = true
+    mark(runtime.capabilities.length > 0, 'capabilities', runtime.capabilities.length > 0
+      ? runtime.capabilities.join(', ')
+      : `unavailable until ${selection.runtimePackage} is installed and asserts its adapter`)
+    if (runtime.capabilities.length === 0) hardFail = true
   } catch (error) {
-    mark(false, 'dsh', error.message.split('\n')[0])
+    const evidence = error instanceof UnsupportedDshVersionError ? error.evidence : {}
+    if (evidence.entry !== undefined) mark(true, 'DSH entry', `${evidence.entry.source} ${evidence.entry.binJs}`)
+    if (evidence.identity !== undefined) mark(true, 'DSH package', `${evidence.identity.version} ${evidence.identity.packageJson}`)
+    mark(false, 'support', firstLine(error))
     hardFail = true
   }
+
   const stdinTty = Boolean(process.stdin.isTTY)
   const stdoutTty = Boolean(process.stdout.isTTY)
   mark(stdinTty && stdoutTty, 'tty', `stdin=${stdinTty ? 'tty' : 'not a tty'} stdout=${stdoutTty ? 'tty' : 'not a tty'}`)
   mark(Boolean(env.DEEPSEEK_API_KEY), 'DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY ? 'set' : 'not set')
-  mark(existsSync(join(dshHome(env), '.credentials.yaml')), '$DSH_HOME/.credentials.yaml', existsSync(join(dshHome(env), '.credentials.yaml')) ? 'present' : 'missing')
-  const bundled = !needBundle(env, ownVersion)
-  mark(bundled, 'launcher ↔ runtime', bundled ? ownVersion : 'missing or version mismatch')
-  try {
-    const dump = runDsh(['--profile', PROFILE, '--dump-config'], { env, stdio: 'pipe' })
-    if (dump.error) {
-      mark(false, 'dump-config', dump.error.message)
-      hardFail = true
-    } else {
-      const text = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
-      const hasServer = text.includes('@dsh-pager-grok/runtime/server')
-      const hasRetiredRecovery = text.includes('@dsh-pager-grok/runtime/recovery')
-      mark(
-        dump.status === 0 && hasServer && !hasRetiredRecovery,
-        'dump-config',
-        dump.status === 0 ? 'runtime bridge present; retired recovery absent' : 'failed',
-      )
-    }
-  } catch (error) {
-    mark(false, 'dump-config', error.message)
+  mark(existsSync(join(dshHome(env), '.credentials.yaml')), '$DSH_HOME/.credentials.yaml',
+    existsSync(join(dshHome(env), '.credentials.yaml')) ? 'present' : 'missing')
+  if (options.release) {
+    mark(false, 'release registry dependencies', 'Phase 6 gate is not implemented in this batch')
     hardFail = true
+  } else {
+    lines.push('- release registry dependencies  run doctor --release (Phase 6 gate placeholder)')
   }
   console.log(lines.join('\n'))
   return hardFail ? 1 : 0
 }
 
-export function repairProfile(env = process.env) {
-  const dir = profileDir(env)
+function runtimeDoctorEvidence(selection, ownVersion, env) {
+  const candidates = []
+  if (env.DSH_PAGER_RUNTIME_ROOT) candidates.push(join(resolve(env.DSH_PAGER_RUNTIME_ROOT), 'package.json'))
+  candidates.push(join(profileDir(env, selection), 'node_modules', ...selection.runtimePackage.split('/'), 'package.json'))
+  const manifestPath = candidates.find(candidate => existsSync(candidate))
+  if (manifestPath === undefined) {
+    return {
+      ok: false,
+      detail: `missing ${selection.runtimePackage}; install it or set DSH_PAGER_RUNTIME_ROOT in development`,
+      capabilities: [],
+    }
+  }
+  try {
+    const manifest = readJson(manifestPath, 'runtime package manifest')
+    const metadata = manifest.dshPagerGrok
+    const capabilities = isRecord(metadata?.capabilities)
+      ? Object.entries(metadata.capabilities).map(([name, enabled]) => `${name}=${String(enabled)}`)
+      : []
+    const aligned = manifest.name === selection.runtimePackage && manifest.version === ownVersion
+    const familyAligned = metadata?.adapterFamily === selection.family && metadata?.profileSchema === selection.profileSchema
+    return {
+      ok: aligned && familyAligned,
+      detail: `${manifest.name ?? '?'}@${manifest.version ?? '?'} family=${metadata?.adapterFamily ?? '?'} schema=${metadata?.profileSchema ?? '?'} path=${manifestPath}`,
+      capabilities,
+    }
+  } catch (error) {
+    return { ok: false, detail: firstLine(error), capabilities: [] }
+  }
+}
+
+export function repairProfile(selection, env = process.env) {
+  const dir = profileDir(env, selection)
   if (!existsSync(dir)) {
-    console.error(`[dsh-pager] profile ${PROFILE} does not exist`)
+    console.error(`[dsh-pager] profile ${selection.profile} does not exist`)
     return 0
   }
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, '-')
@@ -280,4 +460,20 @@ export function repairProfile(env = process.env) {
   renameSync(dir, backup)
   console.error(`[dsh-pager] renamed ${dir} -> ${backup}`)
   return 0
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function readJson(path, label) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON at ${path}: ${error.message}`)
+  }
+}
+
+function firstLine(error) {
+  return String(error?.message ?? error).split('\n')[0]
 }

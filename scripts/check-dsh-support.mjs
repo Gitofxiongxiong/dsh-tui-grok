@@ -8,6 +8,12 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 const registryPath = join(repoRoot, 'compat', 'dsh-support.json')
 const runtimeManifestPath = join(repoRoot, 'packages', 'dsh-pager-runtime', 'package.json')
+const cliManifestPath = join(repoRoot, 'packages', 'dsh-pager-cli', 'package.json')
+const registryConsumerPaths = [
+  join(repoRoot, 'packages', 'dsh-pager-cli', 'lib', 'launcher.js'),
+  join(repoRoot, 'packages', 'dsh-pager-cli', 'lib', 'main.js'),
+  join(repoRoot, 'scripts', 'dsh-tui-common.sh'),
+]
 const failures = []
 const reports = []
 
@@ -225,9 +231,40 @@ function validateRuntimeManifest(entries) {
   reports.push(`checked ${deepseekPackages.size} exact @deepseek-ai/* runtime dependency declarations`)
 }
 
+function validateRegistryConsumers(entries) {
+  for (const path of registryConsumerPaths) {
+    let source
+    try {
+      source = readFileSync(path, 'utf8')
+    } catch (error) {
+      failures.push(`registry consumer: cannot read ${path}: ${error.message}`)
+      continue
+    }
+    for (const version of entries.keys()) {
+      if (source.includes(version)) {
+        failures.push(`registry consumer ${path}: hard-codes ${version} instead of reading compat/dsh-support.json`)
+      }
+    }
+  }
+  const launcher = readFileSync(registryConsumerPaths[0], 'utf8')
+  if (!launcher.includes('dsh-support.json')) {
+    failures.push('CLI launcher: does not locate the canonical/packed support registry')
+  }
+  const common = readFileSync(registryConsumerPaths[2], 'utf8')
+  if (!common.includes('compat/dsh-support.json')) {
+    failures.push('dsh-tui-common.sh: does not read compat/dsh-support.json')
+  }
+  const cliManifest = readJson(cliManifestPath, 'CLI manifest')
+  if (isRecord(cliManifest) && !String(cliManifest.scripts?.prepack ?? '').includes('copy-support-registry.mjs')) {
+    failures.push('CLI manifest: prepack does not derive its bundled support registry from the canonical file')
+  }
+  reports.push(`checked ${registryConsumerPaths.length} CLI/script registry consumers for version literals`)
+}
+
 const registry = readJson(registryPath, 'support registry')
 const entries = registry === undefined ? new Map() : validateRegistry(registry)
 validateRuntimeManifest(entries)
+validateRegistryConsumers(entries)
 for (const [version, entry] of entries) validateCheckout(version, entry)
 
 for (const report of reports) console.log(`check-dsh-support: ${report}`)
