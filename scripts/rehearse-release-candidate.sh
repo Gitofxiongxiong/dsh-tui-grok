@@ -73,8 +73,19 @@ node "$repo_root/scripts/audit-cold-install.mjs" "$install_root" "$repo_root" \
   | tee "$logs/cold-audit.log"
 
 cli="$install_root/node_modules/.bin/dsh-pager"
-native="$install_root/node_modules/@dsh-pager-grok/native-linux-x64-gnu/bin/dsh-pager"
 cli_manifest="$(readlink -f "$install_root/node_modules/@dsh-pager-grok/cli/package.json")"
+native="$(node --input-type=module - "$cli_manifest" <<'NODE'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+const require = createRequire(process.argv[2])
+const manifest = require.resolve('@dsh-pager-grok/native-linux-x64-gnu/package.json')
+process.stdout.write(path.join(path.dirname(manifest), 'bin', 'dsh-pager'))
+NODE
+)"
+if [[ ! -x "$native" ]]; then
+  printf 'resolved native pager is not executable: %s\n' "$native" >&2
+  exit 1
+fi
 dsh_entry="$(node --input-type=module - "$cli_manifest" <<'NODE'
 import { createRequire } from 'node:module'
 const require = createRequire(process.argv[2])

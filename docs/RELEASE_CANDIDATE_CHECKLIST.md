@@ -1,7 +1,7 @@
 # dsh-pager-grok 0.2.0 发布候选 Checklist
 
-> 状态：发布已获维护者授权；Tag 与部分 `release-candidate` publish 已执行，正式链因
-> workflow shell 解析错误停在 registry cold/PTY 前；恢复批次按本表继续留证据，未执行项
+> 状态：发布已获维护者授权；Tag 与部分 `release-candidate` publish 已执行，正式链已经过
+> workflow shell、runner 工具与 pnpm isolated-layout 三个独立恢复点；恢复批次按本表继续留证据，未执行项
 > 不得提前勾选。
 > 单一 DSH 支持真源：[`compat/dsh-support.json`](../compat/dsh-support.json)
 
@@ -90,6 +90,15 @@ cold-install 或文档工作。
 - 首次 recovery run `33310487508`：metadata、来源 artifacts 恢复、五个平台 native
   与 runtime integrity/staging 校验全绿；registry cold job 因工具准备 step 只断言
   `command -v rg`、未实际安装 `ripgrep` 而 exit 1。CLI publish 与最终 gate 继续未执行。
+- 第二次 recovery run `33311024658`：metadata、来源 artifacts、五平台 native、
+  runtime integrity 和 `ripgrep` 工具门禁全绿；cold install 已安装完 451 个
+  packages，但审计脚本把 CLI 的 optional native 依赖误当成 prefix 根级 hoist，
+  对不存在的根级 symlink 执行 `realpathSync` 而失败。lockfile、dependency graph 和
+  CLI-relative `require.resolve` 均证明 registry native `0.2.0` 与 executable 实际存在。
+- native 解析修复后，本地以来源 run 的精确 CLI tarball 和 registry native/runtime
+  复跑已通过；证据目录 `/tmp/dsh-pager-release-candidate.ujT5UX` 包含 cold audit、
+  doctor/hello/list/load、warm/offline 和 PTY `result.json`。正式 recovery 仍等待本批
+  PR/main CI 通过后重入。
 - 恢复要求：修复 workflow 经 PR/CI 合并后，从默认分支以
   `release_tag=v0.2.0`、`resume_run_id=33309459911`、
   `confirm=publish-v0.2.0` 重入。两次 run candidates 的对比显示 Linux、macOS、runtime

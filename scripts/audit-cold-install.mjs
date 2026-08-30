@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { createRequire } from 'node:module'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 const installRoot = resolve(process.argv[2] ?? '')
 const forbiddenRoot = resolve(process.argv[3] ?? '')
@@ -37,17 +38,26 @@ for (const [name, values] of versions) {
   }
 }
 
-for (const name of [
-  '@dsh-pager-grok/native-linux-x64-gnu',
-  '@dsh-pager-grok/runtime-apiproxy-v1',
-  '@dsh-pager-grok/cli',
-]) {
-  const path = join(installRoot, 'node_modules', ...name.split('/'))
+const nodeModulesRoot = realpathSync(join(installRoot, 'node_modules'))
+const cliPath = join(installRoot, 'node_modules', '@dsh-pager-grok', 'cli')
+const cliManifestPath = realpathSync(join(cliPath, 'package.json'))
+const requireFromCli = createRequire(cliManifestPath)
+const candidatePaths = new Map([
+  [
+    '@dsh-pager-grok/native-linux-x64-gnu',
+    dirname(requireFromCli.resolve('@dsh-pager-grok/native-linux-x64-gnu/package.json')),
+  ],
+  ['@dsh-pager-grok/runtime-apiproxy-v1', join(installRoot, 'node_modules', '@dsh-pager-grok', 'runtime-apiproxy-v1')],
+  ['@dsh-pager-grok/cli', cliPath],
+])
+
+for (const [name, path] of candidatePaths) {
   const real = realpathSync(path)
-  if (!real.startsWith(join(installRoot, 'node_modules'))) {
+  const relativeToNodeModules = relative(nodeModulesRoot, real)
+  if (relativeToNodeModules === '..' || relativeToNodeModules.startsWith(`..${sep}`) || isAbsolute(relativeToNodeModules)) {
     throw new Error(`${name} escaped cold node_modules: ${real}`)
   }
-  const manifest = JSON.parse(readFileSync(join(path, 'package.json'), 'utf8'))
+  const manifest = JSON.parse(readFileSync(join(real, 'package.json'), 'utf8'))
   for (const section of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
     for (const [dependency, specifier] of Object.entries(manifest[section] ?? {})) {
       if (/^(?:link|workspace):/.test(String(specifier))) {
