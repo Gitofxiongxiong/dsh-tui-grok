@@ -17,6 +17,9 @@
 scripts/__pycache__/
 /packages/dsh-tui-*/lib/
 /packages/dsh-tui-*/node_modules/
+/packages/dsh-tui-*/LICENSE-MIT
+/packages/dsh-tui-*/LICENSE-APACHE
+/packages/dsh-tui-*/NOTICE
 /packages/dsh-pager-runtime/lib/
 /packages/dsh-pager-runtime-apiproxy-v1/lib/
 .vitest-dsh-home/

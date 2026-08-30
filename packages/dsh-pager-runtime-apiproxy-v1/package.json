@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pager-grok/runtime-apiproxy-v1",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Publishable DSH ApiProxy v1 profile runtime for dsh-pager-grok",
   "license": "MIT",
   "publishConfig": {

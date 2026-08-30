@@ -205,6 +205,7 @@ function hostPackageId(matrix) {
 function parseArgs(argv) {
   let id = null
   let skipBuild = false
+  let packDestination = repoRoot
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--id') {
@@ -215,14 +216,18 @@ function parseArgs(argv) {
       }
     } else if (arg === '--skip-build') {
       skipBuild = true
+    } else if (arg === '--pack-destination') {
+      packDestination = resolve(argv[index + 1] ?? '')
+      index += 1
+      if (!argv[index]) fail('--pack-destination needs a directory')
     } else if (arg === '-h' || arg === '--help') {
-      console.log('Usage: node scripts/pack-native.mjs [--id <matrix-id>] [--skip-build]')
+      console.log('Usage: node scripts/pack-native.mjs [--id <matrix-id>] [--skip-build] [--pack-destination <dir>]')
       process.exit(0)
     } else {
       fail(`unknown argument: ${arg}`)
     }
   }
-  return { id, skipBuild }
+  return { id, skipBuild, packDestination }
 }
 
 function cargoBinPath(pkg, usedTarget) {
@@ -282,7 +287,8 @@ function main() {
   stripBinary(pkg, dest)
   copyLicenseFiles(packageDir)
 
-  const pack = runNpm(['pack', '--json', '--pack-destination', repoRoot], {
+  mkdirSync(args.packDestination, { recursive: true })
+  const pack = runNpm(['pack', '--json', '--pack-destination', args.packDestination], {
     cwd: packageDir,
   })
   let parsed
@@ -292,7 +298,11 @@ function main() {
     fail(`npm pack did not print JSON:\n${pack.stdout}`)
   }
   const info = packInfo(parsed, pkg)
-  const tarball = packedTarballPath(info, pkg)
+  const filename = info.filename || `${pkg.npm.replace('@', '').replace('/', '-')}-${info.version}.tgz`
+  const tarball = isAbsolute(filename)
+    ? filename
+    : join(args.packDestination, basename(filename))
+  if (!existsSync(tarball)) fail(`packed tarball not found: ${tarball}`)
 
   const names = (info.files || []).map((file) => (typeof file === 'string' ? file : file.path))
   const expectedBin = `bin/${pkg.bin}`

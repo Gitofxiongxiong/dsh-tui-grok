@@ -9,6 +9,8 @@ import {
   extraArgsError,
   hasUserBackend,
   helpText,
+  ensureProfileBundle,
+  ensureProfileBuildPolicy,
   needBundle,
   prepareFamilyProfile,
   printDoctor,
@@ -270,6 +272,33 @@ describe('family runtime warm skip', () => {
     writeFileSync(join(runtime, 'package.json'), JSON.stringify({ version: '0.1.0' }))
     expect(needBundle({ DSH_HOME: home }, '0.1.0', selected)).toBe(false)
     expect(needBundle({ DSH_HOME: home }, '0.1.1', selected)).toBe(true)
+  })
+
+  it('allows a local runtime spec only in explicit development mode', () => {
+    const selected = selection()
+    expect(() => ensureProfileBundle('0.1.0', selected, {
+      DSH_PAGER_RUNTIME_SPEC: '/tmp/runtime.tgz',
+    })).toThrow(/requires DSH_PAGER_DEV_MODE=1/)
+  })
+
+  it('creates the reviewed profile build policy once and preserves an existing policy', () => {
+    const selected = selection()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-pager-profile-policy-'))
+    temporaryRoots.push(home)
+    const first = ensureProfileBuildPolicy(selected, { DSH_HOME: home })
+    expect(first.created).toBe(true)
+    expect(readFileSync(first.path, 'utf8')).toContain("'@deepseek-ai/dsh-subprocess-local': true")
+    writeFileSync(first.path, 'packages:\n  - user-owned\n')
+    const merged = ensureProfileBuildPolicy(selected, { DSH_HOME: home })
+    expect(merged).toMatchObject({ created: false, updated: true })
+    expect(readFileSync(first.path, 'utf8')).toContain('  - user-owned\nallowBuilds:')
+
+    writeFileSync(first.path, `packages:\n  - .\nallowBuilds:\n  node-pty: set this to true or false\n  koffi: false\n`)
+    ensureProfileBuildPolicy(selected, { DSH_HOME: home })
+    expect(readFileSync(first.path, 'utf8')).toContain('node-pty: true')
+    expect(readFileSync(first.path, 'utf8')).toContain('koffi: false')
+    expect(readFileSync(first.path, 'utf8')).toContain("'@deepseek-ai/dsh-subprocess-local': true")
+    expect(readFileSync(first.path, 'utf8')).toContain('protobufjs: false')
   })
 })
 

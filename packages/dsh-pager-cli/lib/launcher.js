@@ -16,6 +16,22 @@ const require = createRequire(import.meta.url)
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
 const STARTABLE_STATUSES = new Set(['supported', 'maintenance', 'candidate', 'experimental'])
 export const PAGER_SETTING_KEYS = Object.freeze(['theme', 'defaultView', 'reducedMotion'])
+export const PROFILE_BUILD_POLICY = `packages:
+  - .
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  koffi: true
+  node-pty: true
+  protobufjs: false
+`
+const PROFILE_BUILD_ALLOW = Object.freeze({
+  '@deepseek-ai/dsh-subprocess-local': true,
+  '@google/genai': false,
+  koffi: true,
+  'node-pty': true,
+  protobufjs: false,
+})
 
 export class UnsupportedDshVersionError extends Error {
   constructor(message, evidence = {}) {
@@ -370,7 +386,21 @@ export function ensureProfileBundle(ownVersion, selection, env = process.env) {
         `setup for DSH ${selection.version}; automatic registry installation is disabled.`,
     )
   }
-  const spec = `${selection.runtimePackage}@${ownVersion}`
+  const runtimeOverride = env.DSH_PAGER_RUNTIME_SPEC
+  if (runtimeOverride && env.DSH_PAGER_DEV_MODE !== '1') {
+    throw new Error('DSH_PAGER_RUNTIME_SPEC requires DSH_PAGER_DEV_MODE=1')
+  }
+  if (!existsSync(join(profileDir(env, selection), 'package.json'))) {
+    const initialized = runDsh(['plugin', '--profile', selection.profile, 'list'], {
+      env,
+      entry: selection.entry,
+    })
+    if (initialized.status !== 0) {
+      throw new Error(`dsh failed to initialize profile ${selection.profile}`)
+    }
+  }
+  ensureProfileBuildPolicy(selection, env)
+  const spec = runtimeOverride || `${selection.runtimePackage}@${ownVersion}`
   const args = ['plugin', '--profile', selection.profile, 'add', spec]
   let result = runDsh(args, { env, entry: selection.entry })
   if (result.status !== 0) {
@@ -389,6 +419,38 @@ export function ensureProfileBundle(ownVersion, selection, env = process.env) {
     throw new Error(`profile ${selection.profile} did not install ${spec}; run dsh-pager repair`)
   }
   writeProfileOwnership(ownVersion, selection, env)
+}
+
+export function ensureProfileBuildPolicy(selection, env = process.env) {
+  const path = join(profileDir(env, selection), 'pnpm-workspace.yaml')
+  mkdirSync(dirname(path), { recursive: true })
+  if (!existsSync(path)) {
+    writeFileSync(path, PROFILE_BUILD_POLICY, { flag: 'wx' })
+    return { path, created: true, updated: false }
+  }
+  const original = readFileSync(path, 'utf8')
+  let next = original
+  if (!/^allowBuilds:\s*$/m.test(next)) {
+    next = `${next.trimEnd()}\n${PROFILE_BUILD_POLICY.slice(PROFILE_BUILD_POLICY.indexOf('allowBuilds:'))}`
+  } else {
+    const missing = []
+    for (const [name, allowed] of Object.entries(PROFILE_BUILD_ALLOW)) {
+      const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const generated = new RegExp(`^(\\s+(?:'${escaped}'|${escaped}):)\\s+set this to true or false\\s*$`, 'm')
+      next = next.replace(generated, `$1 ${String(allowed)}`)
+      const present = new RegExp(`^\\s+(?:'${escaped}'|${escaped}):\\s+.+$`, 'm')
+      if (!present.test(next)) {
+        const key = name.startsWith('@') ? `'${name}'` : name
+        missing.push(`  ${key}: ${String(allowed)}`)
+      }
+    }
+    if (missing.length > 0) {
+      next = next.replace(/^allowBuilds:\s*$/m, `allowBuilds:\n${missing.join('\n')}`)
+    }
+  }
+  if (next === original) return { path, created: false, updated: false }
+  writeFileSync(path, next)
+  return { path, created: false, updated: true }
 }
 
 export function forwardExit(child) {

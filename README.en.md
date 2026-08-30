@@ -51,8 +51,9 @@ npm install -g @dsh-pager-grok/cli
 dsh-pager --new
 ```
 
-On first launch, the CLI prepares an isolated `dsh-pager-grok` profile. You do not need
-to copy or modify a DeepSeek Harness checkout. Before launching public version `0.1.0`,
+On first launch, the CLI prepares an isolated family profile such as
+`dsh-pager-grok-apiproxy-v1`. You do not need to copy or modify a DeepSeek Harness
+checkout. Before launching public version `0.1.0`,
 provide an API key through the DeepSeek Harness credential layer—for example with
 `DEEPSEEK_API_KEY` or an existing `$DSH_HOME/.credentials.yaml`.
 
@@ -128,7 +129,7 @@ DeepSeek Harness backend / profile
               │
               │ JSON-RPC + authoritative DSH state
               ▼
-@dsh-pager-grok/runtime (TypeScript adapter)
+@dsh-pager-grok/runtime-<family> (TypeScript adapter)
               │
               │ DSH-neutral protocol
               ▼
@@ -147,14 +148,12 @@ early-stage. It pins `@deepseek-ai/dsh@0.1.0-rc.8`. The repository source has si
 added `/login`, model/preset selection, and explicit resume semantics, but these changes
 have not yet shipped as a new npm release.
 
-The current upgrade branch has completed its Harness `0.1.2-alpha.1` bridge, profile,
-PTY, real Harness E2E, and browser visual adaptation. See the
-[upgrade analysis](dsh-tui-grok-升级到harness-0.1.2-alpha.1分析.md) (Chinese) for the design basis.
-
-The npm `0.1.0` path above remains the tested rc.8 combination. Running the current
-upgrade-branch source requires an exact Harness `0.1.2-alpha.1` checkout; the launcher
-rejects other Harness versions. A successful launch should not be read as compatibility
-with every future DeepSeek Harness release.
+The repository's `0.2.0` release candidate uses a registry-driven multi-version
+architecture: rc.2 is the default supported npm family, rc.8 remains in maintenance,
+and alpha.1 is the experimental/source-only controllers-v2 development family. See the
+generated [support table](docs/DSH_SUPPORT.md) for exact tags, commits, distribution,
+and profile schemas. Unlisted versions fail closed before the pager starts. npm `0.1.0`
+remains the existing rc.8 release; `0.2.0` still requires the maintainer release steps.
 
 ## Local development
 
@@ -170,9 +169,9 @@ cargo test --workspace --locked
 pnpm run verify:ts
 ```
 
-Connect a local DeepSeek Harness checkout:
-
-On this upgrade branch, the checkout's CLI package version must be exactly `0.1.2-alpha.1`.
+For source-only controllers-v2 development, the checkout must match the support table's
+exact alpha tag and commit. npm ApiProxy versions use their isolated fixtures. See
+[`compat/README.md`](compat/README.md) for all three repeatable matrix commands.
 
 ```bash
 DSH_HARNESS_ROOT=/path/to/deepseek-harness \

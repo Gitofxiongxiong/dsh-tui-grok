@@ -326,8 +326,8 @@ node scripts/verify-cli-pack.mjs
 ~~~
 
 实际发布还需按 [TESTING.md](TESTING.md) 和
-[PRODUCT_PLUGIN_LAUNCHER.md](PRODUCT_PLUGIN_LAUNCHER.md) 运行当前版本适用的
-clean-prefix、cold/warm/offline、PTY、真实 Harness 和平台门禁。
+[RELEASE_CANDIDATE_CHECKLIST.md](RELEASE_CANDIDATE_CHECKLIST.md) 运行当前版本适用的
+clean-prefix、cold/warm/offline、PTY、真实 DSH 和平台门禁。
 
 ### 7.4 创建和 push Tag
 
@@ -358,7 +358,7 @@ git push origin refs/tags/vX.Y.Z
 
 1. 从同一 Tag/commit 构建、strip 并测试各平台原生程序；
 2. 发布 <code>@dsh-pager-grok/native-*</code> 平台包；
-3. 发布 <code>@dsh-pager-grok/runtime</code>；
+3. 发布 <code>@dsh-pager-grok/runtime-apiproxy-v1</code>；
 4. 在干净 npm prefix 中完成 cold/warm/offline 安装与运行验收；
 5. 最后发布 <code>@dsh-pager-grok/cli</code>；
 6. 验证 npm dist-tag、provenance 和实际安装；
@@ -381,7 +381,7 @@ gh run list --workflow release.yml --limit 10
 gh run list --workflow publish.yml --limit 10
 gh release view vX.Y.Z
 npm view @dsh-pager-grok/cli version dist-tags --json
-npm view @dsh-pager-grok/runtime version dist-tags --json
+npm view @dsh-pager-grok/runtime-apiproxy-v1 version dist-tags --json
 ~~~
 
 发布记录必须回写：Tag、commit、Actions run、每个包的实际 version/dist-tag、

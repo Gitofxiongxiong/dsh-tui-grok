@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pager-grok/native-darwin-arm64",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Prebuilt dsh-pager binary for macOS arm64",
   "license": "MIT",
   "publishConfig": {

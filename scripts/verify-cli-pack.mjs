@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { copyPackageLicenses, LICENSE_FILES } from './copy-package-licenses.mjs'
@@ -9,6 +10,7 @@ import { copyPackageLicenses, LICENSE_FILES } from './copy-package-licenses.mjs'
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 const cli = join(repoRoot, 'packages/dsh-pager-cli')
 const dir = mkdtempSync(join(tmpdir(), 'dsh-cli-pack-'))
+const require = createRequire(import.meta.url)
 
 function fail(message) {
   rmSync(dir, { recursive: true, force: true })
@@ -16,20 +18,26 @@ function fail(message) {
   process.exit(1)
 }
 
-function resolvePnpmCli() {
+function resolveNpmCli() {
+  try {
+    return require.resolve('npm/bin/npm-cli.js')
+  } catch {
+    // Node distributions normally place npm beside the executable.
+  }
+  const prefix = dirname(process.execPath)
   const candidates = [
-    join(cli, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
-    join(repoRoot, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    join(prefix, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(prefix, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   ]
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
   }
-  fail('cannot resolve pnpm/bin/pnpm.cjs from @dsh-pager-grok/cli; refusing PATH pnpm')
+  fail('cannot resolve npm/bin/npm-cli.js next to node; refusing PATH npm')
 }
 
 copyPackageLicenses(cli)
 
-const pack = spawnSync(process.execPath, [resolvePnpmCli(), 'pack', '--pack-destination', dir], {
+const pack = spawnSync(process.execPath, [resolveNpmCli(), 'pack', '--pack-destination', dir], {
   cwd: cli,
   encoding: 'utf8',
 })
@@ -42,7 +50,7 @@ const tarballLine = pack.stdout
   .filter((line) => line.endsWith('.tgz'))
   .at(-1)
 if (!tarballLine) {
-  fail(`pnpm pack printed no tarball:\n${pack.stdout}\n${pack.stderr}`)
+  fail(`npm pack printed no tarball:\n${pack.stdout}\n${pack.stderr}`)
 }
 const tarballPath = tarballLine.startsWith('/') ? tarballLine : join(dir, tarballLine)
 const listing = spawnSync('tar', ['-tzf', tarballPath], { encoding: 'utf8' })

@@ -14,9 +14,13 @@ OS-portable; `scripts/pty-smoke.py` remains Unix-only and is not in that job.
 Native pager tarballs are built with `node scripts/pack-native.mjs` (and the
 `release-native` workflow). Pack with `npm pack`, not `pnpm pack`.
 
-The v2 runtime tarball is assembled by `node scripts/assemble-runtime.mjs` and
-checked by `node scripts/verify-runtime-pack.mjs` (zero `workspace:*`, server
-and recovery entries present). CLI launcher unit tests live in
+The source-only controllers-v2 runtime tarball is assembled by
+`node scripts/assemble-runtime.mjs` and checked by
+`node scripts/verify-runtime-pack.mjs`; the publishable ApiProxy family is
+packed and audited together with the other candidates by
+`node scripts/pack-release-candidates.mjs <output-directory>`.
+Both paths reject local dependency specs, while the public candidate audit also
+rejects alpha dependencies. CLI launcher unit tests live in
 `packages/dsh-pager-cli/tests`.
 
 M0/M1 的可重建基线使用仓库脚本：
@@ -97,20 +101,20 @@ node scripts/playwright-esc-parity.mjs \
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-  DSH_TUI_PROFILE=dsh-pager-grok-e2e scripts/real-e2e.sh
+  DSH_TUI_PROFILE=dsh-pager-grok-controllers-v2-e2e scripts/real-e2e.sh
 ```
 
 `real-e2e.sh` 在未设置 `DSH_TUI_INSTALL_LOCAL=1` 时只检查 profile，并在 profile
 缺失或不包含本项目 bundle 时提前失败；不会把 Node 的 profile 堆栈错误留给用户。
-开发期没有发布 npm 包时，使用 `DSH_TUI_INSTALL_LOCAL=1`，脚本会自动构建并一次性
-link 本仓库的 protocol、server、embedded 和 session-projection-recovery 源码包。不要把
-packed tarball 分次安装，因为 packed manifest 中的 `workspace:*` 会变成 registry semver，
-最后一个包会触发
-npm 404：
+开发期没有发布 npm 包时，controllers-v2/alpha family 使用
+`DSH_TUI_INSTALL_LOCAL=1`；脚本会构建并一次性 link 本仓库的 protocol、server 与
+embedded 源码包。`session-projection-recovery` 没有可重建源码，已退出该组合；不要把
+旧的 projection cache 当作可迁移数据。ApiProxy/rc family 使用它自己的独立 fixture
+和 `runtime-apiproxy-v1`，不得混装 controllers-v2 插件图：
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-  DSH_TUI_PROFILE=dsh-pager-grok-e2e \
+  DSH_TUI_PROFILE=dsh-pager-grok-controllers-v2-e2e \
   DSH_TUI_INSTALL_LOCAL=1 \
   scripts/real-e2e.sh
 ```
@@ -119,7 +123,7 @@ DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
 
 ```bash
 DSH_HARNESS_ROOT=/home/leo/code/deepseek-harness \
-  DSH_TUI_PROFILE=dsh-pager-grok-dev \
+  DSH_TUI_PROFILE=dsh-pager-grok-controllers-v2-dev \
   scripts/setup-dev-profile.sh
 ```
 
@@ -144,7 +148,7 @@ REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
 --backend <node>
 --backend-arg <DSH_HARNESS_ROOT>/apps/cli/lib/bin.js
 --backend-arg --profile
---backend-arg dsh-pager-grok-dev
+--backend-arg dsh-pager-grok-controllers-v2-dev
 ```
 
 配置从 Harness 自己的 `$DSH_HOME` credentials/settings 层读取；密钥不写入本仓库。
@@ -159,4 +163,15 @@ REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
 mutation 或 lifecycle 时，应在确认会话和费用边界后显式运行对应 binary smoke
 flag，而不是让只读门禁隐式改变已有 session。
 
-DSH 多版本测试矩阵及 CI/发布门禁规划见 [多版本兼容方案 §16–§17](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md#16-测试架构)。
+三个精确版本各自的 install/build/E2E/PTY 等价本地入口见
+[`compat/README.md`](../compat/README.md)。发布候选可用下列命令执行隔离
+pack、cold/warm/offline、doctor 与真实 DSH PTY 演练；脚本会保留并打印
+`/tmp/dsh-pager-release-candidate.*` 证据目录，不会 publish：
+
+```bash
+bash scripts/rehearse-release-candidate.sh
+```
+
+DSH 多版本测试矩阵及 CI/发布门禁规格见
+[多版本兼容方案 §16–§17](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md#16-测试架构)，
+当前生成的支持表见 [DSH_SUPPORT.md](DSH_SUPPORT.md)。
