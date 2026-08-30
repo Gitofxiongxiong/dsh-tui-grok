@@ -239,21 +239,26 @@ git fetch origin --prune
 | push <code>main</code> | 运行 | 不运行 | 不运行 | 无 |
 | push 普通开发分支 | 默认不运行 | 不运行 | 不运行 | 无 |
 | push <code>ci/trust-smoke</code> | 默认不运行 | 不运行 | 不运行 | 无 |
-| push <code>v*</code> Tag | 不运行 | 构建并上传原生 tarball artifact | 不运行 | 无 npm publish |
+| push <code>v*</code> Tag | 不运行 | 构建并上传五平台 native 与 runtime/CLI 候选 artifact | 不运行 | 无 npm publish |
 | 每周 scheduled | core + 三版本完整矩阵 | 不运行 | 不运行 | 仅 registry/read-only npm view |
-| 手动运行 <code>release-native</code> | 不变 | 构建 artifact | 不运行 | 无 npm publish |
+| 从 <code>v*</code> Tag 手动运行 <code>release</code> 并输入精确确认值 | 不变 | OIDC 发布 native → runtime，registry cold/PTY 后发布 CLI | 不运行 | 发布到 <code>release-candidate</code> |
 | 手动运行 <code>publish-smoke</code> 并输入确认值 | 不变 | 不运行 | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
 
 必须特别注意：
 
-- <code>release.yml</code> 当前只打包 artifact，**不执行 npm publish**。
+- <code>release.yml</code> 是两阶段正式链：Tag push 只打包 artifact；只有从同一 Tag
+  手动 dispatch 且输入 <code>publish-vX.Y.Z</code>，才使用 <code>npm-release</code>
+  environment 的 Trusted Publishing/OIDC 发布。
+- 正式链先把包放在隔离的 <code>release-candidate</code> dist-tag，完成精确 version、
+  provenance、registry cold/warm/offline 与 PTY 验收后才结束。OIDC 不承担最终
+  <code>latest</code> 移动；该动作仍由已认证维护者在全绿后显式执行。
 - <code>publish.yml</code> 只保留手动 <code>workflow_dispatch</code>；必须输入
   <code>publish-trust-test</code> 才会继续。它会发布
   <code>@dsh-pager-grok/tui-protocol@0.1.1-trust.&lt;run_id&gt;.&lt;run_attempt&gt;</code>
   并使用 <code>trust-test</code> dist-tag。
 - <code>main</code>、开发分支和 <code>v*</code> Tag 的 push 都不会触发
-  <code>publish.yml</code>。该手动烟测仍不是 native → runtime → CLI 的
-  正式发布链。
+  <code>publish.yml</code>。该手动烟测不是 native → runtime → CLI 的正式发布链；
+  正式发布只使用 <code>release.yml</code>。
 - <code>ci.yml</code> 的 compatibility path filter 只减少普通 PR/main 的真实 DSH
   重复构建；每周 scheduled 固定运行 rc.8、rc.2、alpha.1 全矩阵。每个矩阵 job
   调用同一等价本地入口 <code>scripts/run-dsh-compat-matrix.sh &lt;exact-version&gt;</code>，
@@ -349,8 +354,8 @@ git push origin refs/tags/vX.Y.Z
 - Tag 必须指向已合并且 CI 通过的 <code>main</code> commit；
 - Tag 名必须与 package/Cargo 版本一致；
 - 只 push 本次单个 Tag，不使用 <code>git push --tags</code>；
-- 当前 Tag 只触发 <code>release.yml</code> 构建 artifact，不触发 npm publish；
-  后续正式发布 workflow 改变该契约时，必须在同一 PR 更新本文。
+- Tag push 只触发 <code>release.yml</code> 构建 artifact，不触发 npm publish；必须等
+  artifact run 全绿，再从该 Tag 手动 dispatch 并输入精确确认值。
 
 ### 7.5 发布顺序
 
@@ -364,15 +369,28 @@ git push origin refs/tags/vX.Y.Z
 6. 验证 npm dist-tag、provenance 和实际安装；
 7. 创建 GitHub Release 作为发布记录和人工镜像。
 
+正式 dispatch 示例（必须通过 <code>--ref</code> 锁定已 push 的 Tag）：
+
+~~~bash
+gh workflow run release.yml --ref vX.Y.Z -f confirm=publish-vX.Y.Z
+gh run list --workflow release.yml --limit 10
+~~~
+
+新 npm package 在首次创建前无法配置 Trusted Publishing。只允许该新包从最终 Tag
+候选 tarball 进行一次已认证 bootstrap publish，并使用
+<code>release-candidate</code>；随后立即把该 package 的 trusted publisher 绑定到
+<code>release.yml</code>、准确仓库与 <code>npm-release</code> environment。正式 workflow
+会把 registry tarball 的 SHA-512 integrity 与同 Tag 重建候选逐字节核对，不一致时
+停止 CLI 发布。已有 package 和后续版本不得走此例外。
+
 创建 GitHub Release 的命令示例：
 
 ~~~bash
 gh release create vX.Y.Z --verify-tag --generate-notes
 ~~~
 
-直到新的正式发布 workflow 实现上述完整链路、版本一致校验和
-environment 批准门禁之前，当前 workflow 只能称为“Tag 原生 artifact +
-手动 Trusted Publishing 烟测”，不能称为正式发布。
+<code>release.yml</code> 实现版本/Tag 一致性、精确人工确认、OIDC、顺序依赖、
+registry cold/warm/offline/PTY 和 provenance 门禁；任一步失败时，后续 job 不运行。
 
 ### 7.6 发布后检查
 
