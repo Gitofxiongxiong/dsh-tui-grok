@@ -5,7 +5,7 @@
  */
 
 import type { Readable, Writable } from 'node:stream'
-import { TuiHarnessBridge } from './bridge.js'
+import type { TuiBackend } from './backend.js'
 import { TuiGateway } from './gateway.js'
 import { TuiLineTransport, type TuiLineTransportOptions } from './transport.js'
 
@@ -21,7 +21,7 @@ export interface TuiServeOptions extends TuiLineTransportOptions {
  * @returns a disposer that aborts pumps and detaches listeners.
  */
 export function serve(
-  bridge: TuiHarnessBridge,
+  bridge: TuiBackend,
   input: Readable,
   output: Writable,
   options: TuiServeOptions = {},

@@ -20,6 +20,7 @@ import type {
   ToolEventView,
   WorkspaceView,
 } from '@dsh-pager-grok/tui-protocol'
+import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from './backend.js'
 
 const HARNESS_VERSION = '0.1.2-alpha.1'
 const DEFAULT_MAX_MESSAGES = 50
@@ -195,10 +196,8 @@ type WorkspaceFollowFrame =
   | { type: 'order'; workspaceIds: string[] }
   | { type: 'archived'; archivedSessionIds: SessionId[] }
 
-export interface BridgeMuxEnvelope {
-  frame: MuxFrame
-  requestId: string
-}
+/** Compatibility alias retained for existing direct bridge consumers. */
+export type BridgeMuxEnvelope = TuiMuxEnvelope
 
 interface OpeningSnapshot {
   header: RecordLike
@@ -241,7 +240,29 @@ type PendingInteraction =
 /**
  * Direct in-process adapter for Harness 0.1.2-alpha.1 controllers.
  */
-export class TuiHarnessBridge {
+export class TuiHarnessBridge implements TuiBackend {
+  readonly info: TuiBackendInfo = {
+    adapterFamily: 'controllers-v2',
+    dshVersion: HARNESS_VERSION,
+    profileSchema: 2,
+    capabilities: {
+      sessions: true,
+      workspaces: true,
+      settings: true,
+      credentials: true,
+      agentPresets: true,
+      goals: true,
+      subagents: true,
+      approvals: true,
+      questions: true,
+      queue: true,
+      jobs: true,
+      skills: true,
+      fileReferences: true,
+      directoryPicker: true,
+    },
+  }
+
   private readonly attached = new Set<string>()
   private readonly followers = new Map<string, FollowerState>()
   private readonly subagentOpenings = new Map<string, OpeningSnapshot>()

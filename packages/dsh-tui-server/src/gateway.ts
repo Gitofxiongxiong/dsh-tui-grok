@@ -27,8 +27,8 @@ import {
   type TuiMuxFrame,
   type TuiSubscribeResult,
 } from '@dsh-pager-grok/tui-protocol'
+import type { TuiBackend } from './backend.js'
 import { ControlPlaneRouter } from './control-plane.js'
-import type { TuiHarnessBridge } from './bridge.js'
 import { dispatchRespond, dispatchUnary } from './dispatch.js'
 import { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
 
@@ -100,7 +100,7 @@ export class TuiGateway {
   private readonly respondedRequests = new Map<string, { fingerprint: string; promise: Promise<unknown> }>()
 
   constructor(
-    private readonly bridge: TuiHarnessBridge,
+    private readonly bridge: TuiBackend,
     private readonly peer: TuiNotifyPeer,
   ) {}
 

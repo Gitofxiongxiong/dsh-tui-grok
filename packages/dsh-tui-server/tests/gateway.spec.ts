@@ -9,7 +9,7 @@ import {
   type ApiResult,
   type HostFrame,
 } from '@dsh-pager-grok/tui-protocol'
-import type { BridgeMuxEnvelope, TuiHarnessBridge } from '../src/bridge.ts'
+import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from '../src/backend.ts'
 import { dispatchUnary } from '../src/dispatch.ts'
 import { TuiMethodNotFoundError, TuiRpcError } from '../src/errors.ts'
 import { TuiGateway, TUI_SERVER_VERSION } from '../src/gateway.ts'
@@ -46,9 +46,30 @@ function wait(ms: number): Promise<void> {
 type FollowFactory = (
   sessionId: ReturnType<typeof SessionId>,
   signal: AbortSignal,
-) => AsyncIterable<BridgeMuxEnvelope>
+) => AsyncIterable<TuiMuxEnvelope>
 
-class FakeBridge {
+class FakeBridge implements TuiBackend {
+  readonly info: TuiBackendInfo = {
+    adapterFamily: 'controllers-v2',
+    dshVersion: 'test',
+    profileSchema: 2,
+    capabilities: {
+      sessions: true,
+      workspaces: true,
+      settings: true,
+      credentials: true,
+      agentPresets: true,
+      goals: true,
+      subagents: true,
+      approvals: true,
+      questions: true,
+      queue: true,
+      jobs: true,
+      skills: true,
+      fileReferences: true,
+      directoryPicker: true,
+    },
+  }
   readonly calls: Array<{ method: string; params: unknown; operationId: string }> = []
   readonly attached = new Set<string>()
   resetCount = 0
@@ -68,9 +89,12 @@ class FakeBridge {
           ? { events: [], hasMore: false }
           : {},
   })
-  respondHandler: (requestId: string, value: unknown) => Promise<unknown> = async () => ({ accepted: true })
+  respondHandler: (
+    requestId: string,
+    value: unknown,
+  ) => Promise<{ accepted: boolean; reason?: string }> = async () => ({ accepted: true })
   followFactory: FollowFactory = (_sessionId, signal) => this.hangingFollow(signal)
-  muxFactory: (signal: AbortSignal) => AsyncIterable<BridgeMuxEnvelope> = signal => this.hangingMux(signal)
+  muxFactory: (signal: AbortSignal) => AsyncIterable<TuiMuxEnvelope> = signal => this.hangingMux(signal)
   hostFactory: (signal: AbortSignal) => AsyncIterable<HostFrame> = signal => this.hangingHost(signal)
 
   async call(method: string, params: unknown, operationId: string, signal: AbortSignal): Promise<ApiResult> {
@@ -78,7 +102,7 @@ class FakeBridge {
     return await this.callHandler(method, params, operationId, signal)
   }
 
-  async respond(requestId: string, value: unknown): Promise<unknown> {
+  async respond(requestId: string, value: unknown): Promise<{ accepted: boolean; reason?: string }> {
     return await this.respondHandler(requestId, value)
   }
 
@@ -99,11 +123,11 @@ class FakeBridge {
     this.disposed = true
   }
 
-  followSession(id: ReturnType<typeof SessionId>, signal: AbortSignal): AsyncIterable<BridgeMuxEnvelope> {
+  followSession(id: ReturnType<typeof SessionId>, signal: AbortSignal): AsyncIterable<TuiMuxEnvelope> {
     return this.followFactory(id, signal)
   }
 
-  muxFrames(signal: AbortSignal): AsyncIterable<BridgeMuxEnvelope> {
+  muxFrames(signal: AbortSignal): AsyncIterable<TuiMuxEnvelope> {
     return this.muxFactory(signal)
   }
 
@@ -111,21 +135,17 @@ class FakeBridge {
     return this.hostFactory(signal)
   }
 
-  private async *hangingFollow(signal: AbortSignal): AsyncIterable<BridgeMuxEnvelope> {
+  private async *hangingFollow(signal: AbortSignal): AsyncIterable<TuiMuxEnvelope> {
     await hang(signal)
   }
 
-  private async *hangingMux(signal: AbortSignal): AsyncIterable<BridgeMuxEnvelope> {
+  private async *hangingMux(signal: AbortSignal): AsyncIterable<TuiMuxEnvelope> {
     await hang(signal)
   }
 
   private async *hangingHost(signal: AbortSignal): AsyncIterable<HostFrame> {
     await hang(signal)
   }
-}
-
-function asBridge(fake = new FakeBridge()): TuiHarnessBridge {
-  return fake as unknown as TuiHarnessBridge
 }
 
 class Notifications {
@@ -152,7 +172,7 @@ describe('TuiGateway', () => {
   it('requires hello and forwards unary calls through the new bridge', async () => {
     const fake = new FakeBridge()
     const notes = new Notifications()
-    const gateway = new TuiGateway(asBridge(fake), notes)
+    const gateway = new TuiGateway(fake, notes)
     await expect(gateway.handleRequest('session.list', {}, '1')).rejects.toBeInstanceOf(TuiRpcError)
     const result = await hello(gateway)
     await gateway.handleRequest('session.list', {}, 'list-1')
@@ -166,7 +186,7 @@ describe('TuiGateway', () => {
   })
 
   it('rejects a mismatched protocol version and invalid control payloads', async () => {
-    const gateway = new TuiGateway(asBridge(), new Notifications())
+    const gateway = new TuiGateway(new FakeBridge(), new Notifications())
     await expect(gateway.handleRequest('tui.hello', {
       protocolVersion: TUI_PROTOCOL_VERSION + 1,
       clientType: 'test',
@@ -201,7 +221,7 @@ describe('TuiGateway', () => {
         }
       }
     }
-    const gateway = new TuiGateway(asBridge(fake), new Notifications())
+    const gateway = new TuiGateway(fake, new Notifications())
     await hello(gateway)
     const pending = gateway.handleRequest('commands/execute', {
       agentId: sessionId,
@@ -248,7 +268,7 @@ describe('TuiGateway', () => {
       await hang(signal)
     }
 
-    const gateway = new TuiGateway(asBridge(fake), notes)
+    const gateway = new TuiGateway(fake, notes)
     const { generation } = await hello(gateway)
     await gateway.handleRequest('tui.attach', { sessionId, generation }, '2')
     await wait(10)
@@ -298,7 +318,7 @@ describe('TuiGateway', () => {
       ? { ok: false, error: { code: 'session-not-found', message: 'missing', details: {} } }
       : { ok: true, value: {} }
     const notes = new Notifications()
-    const gateway = new TuiGateway(asBridge(fake), notes)
+    const gateway = new TuiGateway(fake, notes)
     const { generation } = await hello(gateway)
     await gateway.handleRequest('tui.attach', { sessionId, generation }, '2')
     await wait(5)
@@ -312,7 +332,7 @@ describe('TuiGateway', () => {
 
   it('rejects stale generations, resets attachments on hello, and rejects unknown methods', async () => {
     const fake = new FakeBridge()
-    const gateway = new TuiGateway(asBridge(fake), new Notifications())
+    const gateway = new TuiGateway(fake, new Notifications())
     const first = await hello(gateway)
     await expect(gateway.handleRequest('tui.attach', {
       sessionId, generation: first.generation + 1,
@@ -339,7 +359,7 @@ describe('TuiGateway', () => {
       attempts += 1
       return attempts === 1 ? { accepted: false, reason: 'bad-response' } : { accepted: true }
     }
-    const gateway = new TuiGateway(asBridge(fake), new Notifications())
+    const gateway = new TuiGateway(fake, new Notifications())
     const { generation } = await hello(gateway)
     const base = { sessionId, generation, requestId: 'interaction-1' }
     await expect(gateway.handleRequest('tui.respond', {
@@ -365,7 +385,7 @@ describe('TuiGateway', () => {
       received.push({ requestId, value })
       return { accepted: true }
     }
-    const gateway = new TuiGateway(asBridge(fake), new Notifications())
+    const gateway = new TuiGateway(fake, new Notifications())
     const { generation } = await hello(gateway)
     await expect(gateway.handleRequest('tui.respond', {
       sessionId,
@@ -410,7 +430,7 @@ describe('TuiGateway', () => {
       await hang(signal)
     }
     const notes = new Notifications()
-    const gateway = new TuiGateway(asBridge(fake), notes)
+    const gateway = new TuiGateway(fake, notes)
     const { generation } = await hello(gateway)
     const baseline = await gateway.handleRequest('tui.subscribe', {
       generation, scope: 'all',
@@ -437,7 +457,7 @@ describe('TuiGateway', () => {
     fake.muxFactory = async function* () { throw new Error('mux died') }
     fake.hostFactory = async function* () { yield* [] }
     const notes = new Notifications()
-    const gateway = new TuiGateway(asBridge(fake), notes)
+    const gateway = new TuiGateway(fake, notes)
     const { generation } = await hello(gateway)
     await gateway.handleRequest('tui.subscribe', { generation, scope: 'all' }, '2')
     await wait(5)
@@ -455,7 +475,7 @@ describe('serve / transport', () => {
     const inbound = new PassThrough()
     const outbound = new PassThrough()
     const fake = new FakeBridge()
-    const stop = serve(asBridge(fake), inbound, outbound)
+    const stop = serve(fake, inbound, outbound)
     inbound.write('not-json\n\n')
     inbound.write(`${JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'tui.hello',
@@ -516,7 +536,7 @@ describe('dispatchUnary', () => {
   it('passes the caller operation identity and cancellation signal to the bridge', async () => {
     const fake = new FakeBridge()
     const controller = new AbortController()
-    await expect(dispatchUnary(asBridge(fake), 'session.list', { cursor: 1 }, 'operation-7', controller.signal))
+    await expect(dispatchUnary(fake, 'session.list', { cursor: 1 }, 'operation-7', controller.signal))
       .resolves.toMatchObject({ ok: true })
     expect(fake.calls).toEqual([{
       method: 'session.list', params: { cursor: 1 }, operationId: 'operation-7',
