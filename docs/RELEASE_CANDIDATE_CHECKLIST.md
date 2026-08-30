@@ -1,8 +1,8 @@
 # dsh-pager-grok 0.2.0 发布候选 Checklist
 
-> 状态：发布已获维护者授权；Tag 与部分 `release-candidate` publish 已执行，正式链已经过
-> workflow shell、runner 工具与 pnpm isolated-layout 三个独立恢复点；恢复批次按本表继续留证据，未执行项
-> 不得提前勾选。
+> 状态：七个公开包的 `0.2.0` 已发布，正式 recovery workflow 与 registry cold/PTY/final
+> gate 已全绿；默认 `latest` 只完成部分移动。维护者于 2026-08-30 决定暂停剩余网页认证，
+> 后续严格按本文“延期 TODO”逐包串行完成；未执行项不得提前勾选。
 > 单一 DSH 支持真源：[`compat/dsh-support.json`](../compat/dsh-support.json)
 
 ## 候选范围与发布边界
@@ -24,7 +24,7 @@
 - [x] rc.2 公开候选 17 个唯一 non-optional dependencies 均可由 registry 精确解析。
 - [x] 独立临时目录从本地 tarball + registry rc.2 cold install，无 Harness checkout。
 - [x] cold doctor、hello、list、load、warm/offline hello 与真实 DSH PTY dogfood 通过。
-- [ ] 维护者批准后，按下述顺序执行 Trusted Publishing/OIDC。
+- [x] 维护者批准后，按下述顺序执行 Trusted Publishing/OIDC。
 - [ ] 所有 npm 包实际可见后再移动 dist-tag 并创建 GitHub Release。
 
 ## 维护者人工发布顺序
@@ -68,7 +68,7 @@
 
 - [x] 维护者审批 `0.2.0` stable、`latest`、公开包列表和发布副作用。
 - [x] push 分支/合并 PR/创建并 push 单一 `v0.2.0` Tag。
-- [ ] Trusted Publishing 按 native → runtime → registry cold → CLI 执行。
+- [x] Trusted Publishing 按 native → runtime → registry cold → CLI 执行。
 - [ ] 移动 npm dist-tag。
 - [ ] 创建 GitHub Release。
 
@@ -119,3 +119,38 @@ cold-install 或文档工作。
   与 CLI 字节级一致，Windows native tarball 不同；因此 recovery 必须复用来源 run 的
   确切 artifacts。所有已存在 package 只走 integrity/staging-tag 校验；最终门禁未绿前
   不统一移动其余 `latest`、不创建 Release。
+
+## 正式 recovery 结果与延期 TODO（2026-08-30）
+
+- 正式 recovery run `33313278488` 的 11 个 jobs 全绿：复用来源 run
+  `33309459911` 的确切 artifacts，完成五平台 native/runtime integrity 校验、registry
+  cold/warm/offline、doctor/hello/list/load、真实 DSH PTY、CLI OIDC publish 和最终
+  registry/provenance gate。
+- 七个公开 package 的 `0.2.0` 均已存在。五个平台 native 与 CLI 带 provenance；首次
+  bootstrap 的 runtime 没有 provenance，但 registry SHA-512 与来源候选完全一致，属于
+  本 checklist 已批准的一次性新 package bootstrap 例外。
+- 暂停时逐包读取 registry 的精确状态：
+  - `latest=0.2.0` 且 `release-candidate=0.2.0`：
+    `native-linux-x64-gnu`、`native-linux-arm64-gnu`、`native-darwin-x64`、
+    `runtime-apiproxy-v1`；
+  - `latest=0.1.0` 且 `release-candidate=0.2.0`：
+    `cli`、`native-darwin-arm64`、`native-win32-x64`。
+- `release-candidate=0.2.0` 可作为无害别名保留，不是 stable 安装或 GitHub Release 的
+  阻塞项；本轮不再为删除该别名触发七次额外认证。
+
+后续由已认证维护者严格串行执行，每次只打开一个网页认证会话，并在开始下一项前先用
+`npm view` 验证当前项：
+
+1. 优先执行
+   `npx --yes npm@11.19.0 dist-tag add '@dsh-pager-grok/cli@0.2.0' latest`，随后确认
+   `npm view '@dsh-pager-grok/cli' dist-tags --json` 返回 `latest=0.2.0`。CLI 是默认
+   `npx @dsh-pager-grok/cli` 的用户入口，因此必须先完成。
+2. 以相同步骤依次移动 `@dsh-pager-grok/native-darwin-arm64@0.2.0` 和
+   `@dsh-pager-grok/native-win32-x64@0.2.0`；两项之间不得并行创建认证会话。
+3. 对七个 package 做最终只读 `version`、`dist-tags`、`dist.integrity` 和 provenance
+   核验；确认所有 `latest` 均为 `0.2.0`，并重跑默认 CLI registry install/doctor/PTY
+   smoke。不得重发、覆盖或 unpublish `0.2.0`。
+4. 仅在第 3 项全绿后创建 `v0.2.0` GitHub Release，附 DSH 支持表、projection cache
+   不迁移限制、来源/recovery run 和回退说明。
+5. 用单独的 post-release 进度记录回写最终 tag、Release URL、实际核验命令和结果，再将
+   本表剩余 checkbox 勾选完成。
