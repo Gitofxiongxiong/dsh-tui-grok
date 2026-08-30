@@ -1,7 +1,8 @@
 # dsh-pager-grok 0.2.0 发布候选 Checklist
 
-> 状态：发布已获维护者授权；正式 workflow PR/CI、Tag、publish、dist-tag 与 Release
-> 仍按本表顺序留证据，未执行项不得提前勾选。
+> 状态：发布已获维护者授权；Tag 与部分 `release-candidate` publish 已执行，正式链因
+> workflow shell 解析错误停在 registry cold/PTY 前；恢复批次按本表继续留证据，未执行项
+> 不得提前勾选。
 > 单一 DSH 支持真源：[`compat/dsh-support.json`](../compat/dsh-support.json)
 
 ## 候选范围与发布边界
@@ -29,14 +30,16 @@
 ## 维护者人工发布顺序
 
 以下步骤只在明确授权发布之后执行。`release.yml` 的 Tag push 只生成候选；实际发布
-必须从同一 Tag 手动 dispatch 并输入 `publish-v0.2.0`。
+必须从默认分支手动 dispatch，同时输入 `release_tag=v0.2.0` 与
+`confirm=publish-v0.2.0`。workflow 的 package build 与 cold rehearsal 必须 checkout
+该不可变 Tag。
 
 1. 审批 `0.2.0`、目标 commit、stable/prerelease 与目标 dist-tag；确认 PR/main CI
    三平台 Rust + 三 DSH 版本矩阵全绿。
 2. push 已审批分支/PR，合并后从同一 main commit 创建并 push `v0.2.0` Tag。
 3. 等待 Tag artifact run 全绿；从该 run 下载 runtime 候选并对新 package 做一次
    `release-candidate` bootstrap，随后立即绑定 `release.yml` Trusted Publisher。
-4. 从 `v0.2.0` dispatch 正式 workflow；各 runner 先构建/发布五个
+4. 从默认分支 dispatch 正式 workflow，并显式指定 `v0.2.0`；各 runner 先构建/发布五个
    `@dsh-pager-grok/native-*@0.2.0`，验证 executable bit、provenance 与平台 metadata；
    workflow 再核对 bootstrap runtime 与同 Tag 候选的 SHA-512 integrity。
 5. workflow 用 registry 上的 native/runtime + 同 Tag CLI 候选跑 clean-prefix
@@ -50,8 +53,12 @@
 
 - Tag/publish 前：停止 workflow，修复后以新 commit 重新演练；无需变更 registry。
 - Tag 已 push、npm 未发布：暂停发布，记录已完成平台；不重定位 Tag。
-- 部分包已经发布：已发布 version 不可覆盖/复用。未发布后续单元保持停止；通过新的
-  patch version 修复。必要时由维护者对有问题版本执行 `npm deprecate`。
+- 部分包已经发布：已发布 version 不可覆盖/复用。若失败仅在发布编排、指定 Tag 的
+  package 内容没有变化，则允许修复默认分支 workflow 后安全重入；已存在 version 必须
+  比对 registry integrity 与经过身份核验的来源 release run 确切 artifact，并确认
+  staging tag，绝不再次 publish。
+  若 package 内容或 Tag 本身有缺陷，未发布后续单元保持停止，通过新的 patch version
+  修复，必要时由维护者对有问题版本执行 `npm deprecate`。
 - dist-tag 尚未移动：保留旧 dist-tag 即为首选回退。已移动时由维护者将 dist-tag
   指回最后已知良好版本；不自动 unpublish。
 - GitHub Release 只在完整 npm 链验证后创建；失败 Release 应记录为 prerelease/draft
@@ -60,10 +67,29 @@
 ## 发布前最后人工确认
 
 - [x] 维护者审批 `0.2.0` stable、`latest`、公开包列表和发布副作用。
-- [ ] push 分支/合并 PR/创建并 push 单一 `v0.2.0` Tag。
+- [x] push 分支/合并 PR/创建并 push 单一 `v0.2.0` Tag。
 - [ ] Trusted Publishing 按 native → runtime → registry cold → CLI 执行。
 - [ ] 移动 npm dist-tag。
 - [ ] 创建 GitHub Release。
 
 除以上审批、push、publish、dist-tag、Release 外，不应再剩代码、依赖、fixture、
 cold-install 或文档工作。
+
+## v0.2.0 实际发布与恢复事实
+
+- Tag artifact run `33308926704`：`v0.2.0` metadata、五平台 native 与 runtime/CLI
+  candidates 全绿；publish jobs 按 tag-push 规则跳过。
+- runtime bootstrap tarball SHA-512 为
+  `f3d7d0c008f3d8077f7f14c17b42ad240b2682fe7b096f1590f06451f9f7067723a94fb223fb66cec2aeab3c8c9289928ba46b84caa7b0ecf2bb3e9acbe4b1a2`，
+  registry `dist.integrity` 与之匹配。作为 registry 首个/唯一版本，npm 自动建立
+  `latest=0.2.0`；删除唯一版本默认 tag 返回 400，因此暂时与
+  `release-candidate=0.2.0` 并存。
+- 首次正式 run `33309459911`：五个平台 native 已通过 OIDC 发布到
+  `release-candidate`；runtime integrity job 因 workflow heredoc 解析错误 exit 2，
+  registry cold/PTY、CLI publish 与最终 registry/provenance gate 未执行。
+- 恢复要求：修复 workflow 经 PR/CI 合并后，从默认分支以
+  `release_tag=v0.2.0`、`resume_run_id=33309459911`、
+  `confirm=publish-v0.2.0` 重入。两次 run candidates 的对比显示 Linux、macOS、runtime
+  与 CLI 字节级一致，Windows native tarball 不同；因此 recovery 必须复用来源 run 的
+  确切 artifacts。所有已存在 package 只走 integrity/staging-tag 校验；最终门禁未绿前
+  不统一移动其余 `latest`、不创建 Release。

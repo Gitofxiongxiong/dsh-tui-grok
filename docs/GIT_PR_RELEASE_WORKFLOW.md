@@ -241,14 +241,24 @@ git fetch origin --prune
 | push <code>ci/trust-smoke</code> | 默认不运行 | 不运行 | 不运行 | 无 |
 | push <code>v*</code> Tag | 不运行 | 构建并上传五平台 native 与 runtime/CLI 候选 artifact | 不运行 | 无 npm publish |
 | 每周 scheduled | core + 三版本完整矩阵 | 不运行 | 不运行 | 仅 registry/read-only npm view |
-| 从 <code>v*</code> Tag 手动运行 <code>release</code> 并输入精确确认值 | 不变 | OIDC 发布 native → runtime，registry cold/PTY 后发布 CLI | 不运行 | 发布到 <code>release-candidate</code> |
+| 从默认分支手动运行 <code>release</code>，输入不可变 <code>release_tag</code> 与精确确认值 | 不变 | checkout 指定 Tag；OIDC 发布/校验 native → runtime，registry cold/PTY 后发布/校验 CLI；恢复时可指定先前 release run 并复用确切 artifacts | 不运行 | 发布到 <code>release-candidate</code> |
 | 手动运行 <code>publish-smoke</code> 并输入确认值 | 不变 | 不运行 | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
 
 必须特别注意：
 
-- <code>release.yml</code> 是两阶段正式链：Tag push 只打包 artifact；只有从同一 Tag
-  手动 dispatch 且输入 <code>publish-vX.Y.Z</code>，才使用 <code>npm-release</code>
-  environment 的 Trusted Publishing/OIDC 发布。
+- <code>release.yml</code> 是两阶段正式链：Tag push 只打包 artifact；只有从默认分支
+  手动 dispatch，同时输入不可变 <code>release_tag=vX.Y.Z</code> 与
+  <code>confirm=publish-vX.Y.Z</code>，才使用 <code>npm-release</code> environment 的
+  Trusted Publishing/OIDC 发布。metadata、native/JS build 与 registry cold job 都会
+  checkout 指定 Tag；workflow 本身可以在不可变 Tag 发布后从 <code>main</code> 修复。
+- 正式链可安全重入：native、runtime 或 CLI version 已存在时，必须将 registry
+  <code>dist.integrity</code> 与来源 tarball 的 SHA-512 完整比对，并确认
+  <code>release-candidate</code> 指向该精确 version；只有 E404 才执行 publish。任何
+  integrity 或 dist-tag 不一致都立即停止，不覆盖已有 version。
+- 部分发布后的 recovery dispatch 还必须提供 <code>resume_run_id</code>。metadata 会核对
+  来源 run 的 <code>head_sha</code>、Tag、workflow path、event 与完成状态；native 与 JS
+  jobs 从该 run 下载当次实际使用并保留的 artifacts，不以新的 native rebuild 冒充已发布
+  制品。正常首次发布不填写该 input，仍从指定 Tag 重新构建。
 - 正式链先把包放在隔离的 <code>release-candidate</code> dist-tag，完成精确 version、
   provenance、registry cold/warm/offline 与 PTY 验收后才结束。OIDC 不承担最终
   <code>latest</code> 移动；该动作仍由已认证维护者在全绿后显式执行。
@@ -355,7 +365,7 @@ git push origin refs/tags/vX.Y.Z
 - Tag 名必须与 package/Cargo 版本一致；
 - 只 push 本次单个 Tag，不使用 <code>git push --tags</code>；
 - Tag push 只触发 <code>release.yml</code> 构建 artifact，不触发 npm publish；必须等
-  artifact run 全绿，再从该 Tag 手动 dispatch 并输入精确确认值。
+  artifact run 全绿，再从默认分支手动 dispatch，输入该不可变 Tag 与精确确认值。
 
 ### 7.5 发布顺序
 
@@ -369,19 +379,32 @@ git push origin refs/tags/vX.Y.Z
 6. 验证 npm dist-tag、provenance 和实际安装；
 7. 创建 GitHub Release 作为发布记录和人工镜像。
 
-正式 dispatch 示例（必须通过 <code>--ref</code> 锁定已 push 的 Tag）：
+正式 dispatch 示例（workflow definition 取已审核的默认分支，package source 由
+<code>release_tag</code> 锁定到已 push 的不可变 Tag）：
 
 ~~~bash
-gh workflow run release.yml --ref vX.Y.Z -f confirm=publish-vX.Y.Z
+gh workflow run release.yml --ref main \
+  -f release_tag=vX.Y.Z \
+  -f confirm=publish-vX.Y.Z
 gh run list --workflow release.yml --limit 10
+~~~
+
+仅在部分发布后的编排恢复中增加来源 run；不得给正常首次发布随意指定旧 run：
+
+~~~bash
+gh workflow run release.yml --ref main \
+  -f release_tag=vX.Y.Z \
+  -f resume_run_id=<failed-release-run-id> \
+  -f confirm=publish-vX.Y.Z
 ~~~
 
 新 npm package 在首次创建前无法配置 Trusted Publishing。只允许该新包从最终 Tag
 候选 tarball 进行一次已认证 bootstrap publish，并使用
 <code>release-candidate</code>；随后立即把该 package 的 trusted publisher 绑定到
 <code>release.yml</code>、准确仓库与 <code>npm-release</code> environment。正式 workflow
-会把 registry tarball 的 SHA-512 integrity 与同 Tag 重建候选逐字节核对，不一致时
-停止 CLI 发布。已有 package 和后续版本不得走此例外。
+会把 registry tarball 的 SHA-512 integrity 与候选逐字节核对；正常 run 使用同 Tag
+重建候选，recovery run 使用经过 metadata 身份核验的来源 release run 确切 artifact。
+不一致时停止 CLI 发布。已有 package 和后续版本不得走 bootstrap 例外。
 
 创建 GitHub Release 的命令示例：
 
@@ -409,7 +432,9 @@ npm view @dsh-pager-grok/runtime-apiproxy-v1 version dist-tags --json
 
 - Tag 尚未 push：修正发布 PR/commit，必要时删除本地错误 Tag 后重建。
 - Tag 已 push 但 npm 尚未发布：暂停 workflow，记录状态；默认不重定位该 Tag。
-- npm 某个 version 已公开：不覆盖、不复用同版本号；通过新的 patch 版本修复。
+- npm 某个 version 已公开：不覆盖、不复用同版本号。纯编排故障可以在来源 run
+  artifacts 与 registry integrity 完全一致时安全重入；package/Tag 内容有缺陷时必须
+  通过新的 patch 版本修复。
 - 有问题的包可在审批后使用 <code>npm deprecate</code> 或调整 dist-tag；不在普通
   修复流程自动 unpublish。
 - 发布失败不回滚 <code>main</code> 上已审核的功能历史；单独修复发布链或发布新版本。
