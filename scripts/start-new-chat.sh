@@ -25,7 +25,7 @@ usage() {
     'Optional overrides:' \
     '  DSH_HARNESS_ROOT  DeepSeek Harness checkout' \
     '  DSH_HOME          Harness home (default: $HOME/.dsh)' \
-    '  DSH_TUI_PROFILE   DSH profile (default: dsh-pager-grok-dev)' \
+    '  DSH_TUI_PROFILE   DSH profile (default: dsh-pager-grok-controllers-v2-dev)' \
     '  DSH_TUI_PROFILE_ALLOW_UPDATE=1  allow updating a non-project profile' \
     '  DSH_TUI_SERVER    advanced override of the complete backend command;' \
     '                    split on whitespace, so paths must not contain spaces.' \

@@ -6,6 +6,7 @@ import {
   extraArgsError,
   helpText,
   needBundle,
+  prepareFamilyProfile,
   printDoctor,
   productBackendArgs,
   readOwnVersion,
@@ -60,6 +61,7 @@ function run() {
     try {
       const selection = assertStartableSelection(resolveDshSelection())
       if (command === 'repair') process.exit(repairProfile(selection))
+      prepareFamilyProfile(ownVersion, selection)
       if (command === 'uninstall') {
         const result = runDsh([
           'plugin', '--profile', selection.profile, 'remove', selection.runtimePackage,
@@ -100,6 +102,7 @@ function run() {
   }
   try {
     const selection = assertStartableSelection(resolveDshSelection())
+    prepareFamilyProfile(ownVersion, selection)
     if (needBundle(process.env, ownVersion, selection)) {
       ensureProfileBundle(ownVersion, selection)
     }

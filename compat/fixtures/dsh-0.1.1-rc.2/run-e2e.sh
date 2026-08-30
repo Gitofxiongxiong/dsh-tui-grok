@@ -27,9 +27,18 @@ if [[ ! -r "$dsh_entry" ]]; then
 fi
 
 e2e_parent="${TMPDIR:-/tmp}"
-e2e_home="$(mktemp -d "$e2e_parent/dsh-pager-phase4b-${version_label}.XXXXXX")"
+owns_e2e_home=1
+if [[ -n "${DSH_COMPAT_E2E_HOME:-}" ]]; then
+  e2e_home="$DSH_COMPAT_E2E_HOME"
+  mkdir -p "$e2e_home"
+  owns_e2e_home=0
+else
+  e2e_home="$(mktemp -d "$e2e_parent/dsh-pager-phase4b-${version_label}.XXXXXX")"
+fi
 cleanup() {
-  if [[ "${KEEP_DSH_HOME:-0}" == "1" ]]; then
+  if (( owns_e2e_home == 0 )); then
+    printf 'Caller-owned %s DSH_HOME retained: %s\n' "$compat_version" "$e2e_home" >&2
+  elif [[ "${KEEP_DSH_HOME:-0}" == "1" ]]; then
     printf 'Preserved %s DSH_HOME: %s\n' "$compat_version" "$e2e_home" >&2
   elif [[ -n "${e2e_home:-}" && -d "$e2e_home" \
     && "$e2e_home" == "$e2e_parent"/dsh-pager-phase4b-"$version_label".* ]]; then
@@ -48,6 +57,28 @@ corepack pnpm@11.7.0 --pm-on-fail=ignore --dir "$fixture_dir" run build
 "$node_program" "$dsh_entry" plugin --profile "$profile" list
 cp "$fixture_dir/profile-pnpm-workspace.yaml" "$DSH_HOME/profiles/$profile/pnpm-workspace.yaml"
 "$node_program" "$dsh_entry" plugin --profile "$profile" add "$fixture_dir"
+"$node_program" --input-type=module - \
+  "$repo_root/packages/dsh-pager-cli/lib/launcher.js" \
+  "$repo_root/packages/dsh-pager-cli/package.json" \
+  "$repo_root/compat/dsh-support.json" \
+  "$profile" \
+  "$compat_version" <<'NODE'
+import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+
+const [, , launcherPath, cliManifestPath, registryPath, profile, version] = process.argv
+const { writeProfileOwnership } = await import(pathToFileURL(launcherPath))
+const cli = JSON.parse(fs.readFileSync(cliManifestPath, 'utf8'))
+const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'))
+const support = registry?.versions?.[version]
+if (support === undefined) throw new Error(`DSH ${version} is absent from the support registry`)
+writeProfileOwnership(cli.version, {
+  family: support.family,
+  version,
+  profileSchema: support.profileSchema,
+  profile,
+}, process.env)
+NODE
 
 cargo build --manifest-path "$repo_root/Cargo.toml" -p dsh-pager-bin --locked
 binary="$repo_root/target/debug/dsh-pager"
