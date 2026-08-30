@@ -1,5 +1,5 @@
 import type { SessionId } from '@dsh-pager-grok/tui-protocol'
-import type { TuiBackend } from '../../src/core/backend.ts'
+import type { TuiBackend, TuiMuxEnvelope } from '../../src/core/backend.ts'
 
 export type RecordLike = Record<string, unknown>
 
@@ -19,6 +19,7 @@ export interface AdapterConformanceFixture {
   agent: { id: SessionId }
   calls: ConformanceCalls
   setSessionFollow(frames: readonly RecordLike[]): void
+  sessionFrames(signal: AbortSignal): AsyncIterator<TuiMuxEnvelope>
   setControl(frames: readonly RecordLike[]): void
   setWorkspace(frames: readonly RecordLike[]): void
   setPromptMode(mode: 'resolve' | 'hang'): void

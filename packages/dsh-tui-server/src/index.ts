@@ -23,6 +23,15 @@ export {
   TuiHarnessBridge,
 } from './adapters/controllers-v2/backend.js'
 export type { TuiHarnessContext } from './adapters/controllers-v2/backend.js'
+export { ApiProxyV1Backend } from './adapters/apiproxy-v1/backend.js'
+export type {
+  ApiProxyV1BackendOptions,
+  ApiProxyV1Extensions,
+  ApiProxyV1Like,
+  ProfileRequireLike,
+  ToFetchHandlerLike,
+} from './adapters/apiproxy-v1/backend.js'
+export { resolveApiProxyV1Runtime } from './adapters/apiproxy-v1/backend.js'
 export type {
   TuiBackend,
   TuiBackendInfo,
