@@ -16,6 +16,8 @@ const registryConsumerPaths = [
   join(repoRoot, 'packages', 'dsh-pager-cli', 'lib', 'launcher.js'),
   join(repoRoot, 'packages', 'dsh-pager-cli', 'lib', 'main.js'),
   join(repoRoot, 'scripts', 'dsh-tui-common.sh'),
+  join(repoRoot, 'scripts', 'dsh-matrix-config.mjs'),
+  join(repoRoot, 'scripts', 'run-dsh-compat-matrix.sh'),
 ]
 const failures = []
 const reports = []

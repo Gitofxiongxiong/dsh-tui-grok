@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { detectLibc, enginesSatisfied, nativeSpec } from './platform.js'
+import { runRegistryDependencyGate } from './registry-gate.js'
 
 export const PACKAGE = '@dsh-pager-grok/cli'
 export const PROFILE_PREFIX = 'dsh-pager-grok'
@@ -289,7 +290,7 @@ export function helpText() {
   return `Usage: dsh-pager [command] [pager flags]
 
 Commands:
-  doctor [--release]  Version/profile checks; --release reserves registry dependency checks
+  doctor [--release]  Version/profile checks; --release verifies registry dependencies
   update              Re-align the selected family runtime to this CLI version
   uninstall           Remove the selected family runtime (keeps $DSH_HOME/sessions)
   repair              Rename the selected family profile to a timestamped backup
@@ -484,10 +485,26 @@ export function printDoctor(ownVersion, env = process.env, options = {}) {
   mark(existsSync(join(dshHome(env), '.credentials.yaml')), '$DSH_HOME/.credentials.yaml',
     existsSync(join(dshHome(env), '.credentials.yaml')) ? 'present' : 'missing')
   if (options.release) {
-    mark(false, 'release registry dependencies', 'Phase 6 gate is not implemented in this batch')
-    hardFail = true
+    try {
+      const selection = resolveDshSelection(env, options)
+      const runtimeManifest = findRuntimeManifest(selection, env)
+      if (runtimeManifest === undefined) {
+        throw new Error(`missing ${selection.runtimePackage}; cannot inspect release dependencies`)
+      }
+      const gate = runRegistryDependencyGate([join(packageRoot, 'package.json'), runtimeManifest], {
+        runner: options.registryRunner,
+        env,
+      })
+      mark(gate.ok, 'release registry dependencies', gate.ok
+        ? `${gate.checks.length} exact non-optional dependencies available`
+        : gate.failures.join('; '))
+      if (!gate.ok) hardFail = true
+    } catch (error) {
+      mark(false, 'release registry dependencies', firstLine(error))
+      hardFail = true
+    }
   } else {
-    lines.push('- release registry dependencies  run doctor --release (Phase 6 gate placeholder)')
+    lines.push('- release registry dependencies  run doctor --release')
   }
   console.log(lines.join('\n'))
   return hardFail ? 1 : 0
@@ -519,10 +536,7 @@ function profileDoctorEvidence(selection, ownVersion, env) {
 }
 
 function runtimeDoctorEvidence(selection, ownVersion, env) {
-  const candidates = []
-  if (env.DSH_PAGER_RUNTIME_ROOT) candidates.push(join(resolve(env.DSH_PAGER_RUNTIME_ROOT), 'package.json'))
-  candidates.push(join(profileDir(env, selection), 'node_modules', ...selection.runtimePackage.split('/'), 'package.json'))
-  const manifestPath = candidates.find(candidate => existsSync(candidate))
+  const manifestPath = findRuntimeManifest(selection, env)
   if (manifestPath === undefined) {
     return {
       ok: false,
@@ -546,6 +560,13 @@ function runtimeDoctorEvidence(selection, ownVersion, env) {
   } catch (error) {
     return { ok: false, detail: firstLine(error), capabilities: [] }
   }
+}
+
+function findRuntimeManifest(selection, env) {
+  const candidates = []
+  if (env.DSH_PAGER_RUNTIME_ROOT) candidates.push(join(resolve(env.DSH_PAGER_RUNTIME_ROOT), 'package.json'))
+  candidates.push(join(profileDir(env, selection), 'node_modules', ...selection.runtimePackage.split('/'), 'package.json'))
+  return candidates.find(candidate => existsSync(candidate))
 }
 
 export function repairProfile(selection, env = process.env) {

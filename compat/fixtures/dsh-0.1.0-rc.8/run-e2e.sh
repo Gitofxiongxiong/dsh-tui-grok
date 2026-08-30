@@ -4,9 +4,8 @@ set -euo pipefail
 fixture_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="${DSH_PAGER_GROK_ROOT:-$(cd "$fixture_dir/../../.." && pwd)}"
 export DSH_PAGER_GROK_ROOT="$repo_root"
-compat_version="${DSH_COMPAT_VERSION:-0.1.1-rc.2}"
+compat_version="${DSH_COMPAT_VERSION:-0.1.0-rc.8}"
 case "$compat_version" in
-  0.1.1-rc.2) version_label="rc2" ;;
   0.1.0-rc.8) version_label="rc8" ;;
   *)
     printf 'Unsupported fixture version: %s\n' "$compat_version" >&2
@@ -21,7 +20,7 @@ dsh_entry="$fixture_dir/node_modules/@deepseek-ai/dsh/lib/bin.js"
 export PATH="$fixture_dir/bin:$PATH"
 
 if [[ ! -r "$dsh_entry" ]]; then
-  printf 'rc.2 fixture is not installed: %s\n' "$dsh_entry" >&2
+  printf '%s fixture is not installed: %s\n' "$compat_version" "$dsh_entry" >&2
   printf 'Run pnpm --dir %s install --frozen-lockfile first.\n' "$fixture_dir" >&2
   exit 2
 fi

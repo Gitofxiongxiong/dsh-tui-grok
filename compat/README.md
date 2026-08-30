@@ -42,6 +42,47 @@ package manifest 中无法动态生效的 exact dependencies 仍保留，但必�
 [`scripts/check-dsh-support.mjs`](../scripts/check-dsh-support.mjs) 检查，避免形成
 不受约束的第二真源。
 
+## 隔离 fixture 与三版本矩阵
+
+两个 npm ApiProxy 版本各有独立目录、lockfile、`node_modules`、profile 与临时
+`DSH_HOME`，不能互换 lockfile：
+
+```bash
+corepack pnpm@11.7.0 --pm-on-fail=ignore \
+  --dir compat/fixtures/dsh-0.1.0-rc.8 install --frozen-lockfile
+corepack pnpm@11.7.0 --pm-on-fail=ignore \
+  --dir compat/fixtures/dsh-0.1.0-rc.8 run build
+corepack pnpm@11.7.0 --pm-on-fail=ignore \
+  --dir compat/fixtures/dsh-0.1.0-rc.8 run e2e
+
+corepack pnpm@11.7.0 --pm-on-fail=ignore \
+  --dir compat/fixtures/dsh-0.1.1-rc.2 install --frozen-lockfile
+corepack pnpm@11.7.0 --pm-on-fail=ignore \
+  --dir compat/fixtures/dsh-0.1.1-rc.2 run e2e
+```
+
+CI 的三个 exact-version job 与本地使用同一个入口。每条命令要求对应环境变量指向
+registry 中 tag/commit 完全一致的 checkout，并自行创建和清理 `/tmp` 沙箱：
+
+```bash
+DSH_CHECKOUT_0_1_0_RC_8_ROOT=/path/to/dsh-rc8 \
+  bash scripts/run-dsh-compat-matrix.sh 0.1.0-rc.8
+DSH_CHECKOUT_0_1_1_RC_2_ROOT=/path/to/dsh-rc2 \
+  bash scripts/run-dsh-compat-matrix.sh 0.1.1-rc.2
+DSH_CHECKOUT_0_1_2_ALPHA_1_ROOT=/path/to/dsh-alpha1 \
+  bash scripts/run-dsh-compat-matrix.sh 0.1.2-alpha.1
+```
+
+发布候选的 read-only registry availability gate 为：
+
+```bash
+node scripts/check-registry-dependencies.mjs
+```
+
+它对 candidate manifest 的 `dependencies` 与非 optional peers 逐项执行等价于
+`npm view <package>@<exact-version> version` 的查询；range、本地 spec、冲突版本和
+registry 缺失都会在上传任何包前失败。CLI 的 `doctor --release` 复用同一实现。
+
 ## 本地检查
 
 无 checkout 参数时，检查器仍校验 JSON 形状和当前 runtime manifest，并逐个打印

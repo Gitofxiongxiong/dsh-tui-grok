@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -21,39 +26,146 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - name: cargo test
         run: cargo test --workspace --locked
 
+  compat-paths:
+    name: compatibility path filter
+    runs-on: ubuntu-24.04
+    outputs:
+      full-matrix: ${{ github.event_name == 'schedule' || steps.filter.outputs.compat }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        if: github.event_name != 'schedule'
+        id: filter
+        with:
+          filters: |
+            compat:
+              - '.github/workflows/ci.yml'
+              - 'compat/**'
+              - 'crates/dsh-pager-protocol/**'
+              - 'packages/dsh-pager-cli/**'
+              - 'packages/dsh-pager-runtime*/**'
+              - 'packages/dsh-tui-*/**'
+              - 'scripts/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+      - name: derive exact matrix from support registry
+        id: matrix
+        run: echo "matrix=$(node scripts/dsh-matrix-config.mjs)" >> "$GITHUB_OUTPUT"
+
   verify-ts:
-    name: verify-ts (ubuntu)
+    name: verify-ts + contracts (ubuntu)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - name: enable Corepack
         run: corepack enable
-      - name: checkout exact Harness alpha
-        env:
-          HARNESS_REF: dsh-v0.1.2-alpha.1
-          HARNESS_COMMIT: cd5ef8148158c3a752a658978873241fdf8e2bbc
+      - name: checkout exact DSH alpha build graph
         run: |
           set -euo pipefail
-          git clone --branch "${HARNESS_REF}" --depth 1 \
+          IFS=$'\t' read -r DSH_VERSION DSH_FAMILY DSH_REF DSH_COMMIT \
+            DSH_PACKAGE_MANAGER DSH_CHECKOUT_ENV DSH_CHECKOUT_DIR DSH_SOURCE \
+            DSH_FIXTURE DSH_LABEL \
+            < <(node scripts/dsh-matrix-config.mjs --source-only-tsv)
+          git clone --branch "${DSH_REF}" --depth 1 \
             https://github.com/deepseek-ai/deepseek-harness.git \
-            ../deepseek-harness-latest
-          test "$(git -C ../deepseek-harness-latest rev-parse HEAD)" = "${HARNESS_COMMIT}"
-      - name: build Harness libraries
-        working-directory: ../deepseek-harness-latest
+            "../${DSH_CHECKOUT_DIR}"
+          test "$(git -C "../${DSH_CHECKOUT_DIR}" rev-parse HEAD)" = "${DSH_COMMIT}"
+          {
+            echo "DSH_SOURCE_PACKAGE_MANAGER=${DSH_PACKAGE_MANAGER}"
+            echo "DSH_SOURCE_CHECKOUT_ENV=${DSH_CHECKOUT_ENV}"
+            echo "DSH_SOURCE_CHECKOUT_DIR=${DSH_CHECKOUT_DIR}"
+          } >> "$GITHUB_ENV"
+      - name: build exact DSH alpha libraries
         run: |
-          corepack pnpm@11.7.0 install --frozen-lockfile
-          corepack pnpm@11.7.0 run build:lib:host
-          corepack pnpm@11.7.0 run build:lib:client
-      - name: pnpm install
-        run: corepack pnpm@11.20.0 install --frozen-lockfile
-      - name: verify ts
-        run: corepack pnpm@11.20.0 run verify:ts
+          corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
+            --dir "../${DSH_SOURCE_CHECKOUT_DIR}" install --frozen-lockfile
+          corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
+            --dir "../${DSH_SOURCE_CHECKOUT_DIR}" run build:lib:host
+          corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
+            --dir "../${DSH_SOURCE_CHECKOUT_DIR}" run build:lib:client
+      - name: install pager workspace
+        run: corepack pnpm@11.20.0 --pm-on-fail=ignore install --frozen-lockfile
+      - name: TypeScript, conformance and pack gates
+        run: corepack pnpm@11.20.0 --pm-on-fail=ignore run verify:ts
+      - name: protocol fixture gate
+        run: python3 scripts/check-protocol-fixtures.py
+      - name: support registry gate
+        run: |
+          export "${DSH_SOURCE_CHECKOUT_ENV}=${GITHUB_WORKSPACE}/../${DSH_SOURCE_CHECKOUT_DIR}"
+          node scripts/check-dsh-support.mjs
+      - name: registry dependency availability
+        run: node scripts/check-registry-dependencies.mjs
+      - name: build matrix native binary
+        run: cargo build -p dsh-pager-bin --locked
+      - name: assemble reusable matrix build
+        run: |
+          tar -czf /tmp/dsh-matrix-build.tgz \
+            packages/dsh-tui-protocol/lib \
+            packages/dsh-tui-server/lib \
+            packages/dsh-pager-cli/lib \
+            target/debug/dsh-pager
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-matrix-build
+          path: /tmp/dsh-matrix-build.tgz
+          if-no-files-found: error
+
+  dsh-matrix:
+    name: DSH ${{ matrix.version }} (${{ matrix.family }})
+    needs: [compat-paths, verify-ts]
+    if: github.event_name == 'schedule' || needs.compat-paths.outputs.full-matrix == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.compat-paths.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: enable Corepack
+        run: corepack enable
+      - name: checkout exact DSH tag and commit
+        env:
+          DSH_TAG: ${{ matrix.tag }}
+          DSH_COMMIT: ${{ matrix.commit }}
+        run: |
+          set -euo pipefail
+          checkout_dir="${GITHUB_WORKSPACE}/../${{ matrix.checkout_dir }}"
+          git clone --branch "${DSH_TAG}" --depth 1 \
+            https://github.com/deepseek-ai/deepseek-harness.git "${checkout_dir}"
+          test "$(git -C "${checkout_dir}" rev-parse HEAD)" = "${DSH_COMMIT}"
+      - uses: actions/download-artifact@v4
+        if: matrix.source == 'npm'
+        with:
+          name: dsh-matrix-build
+          path: /tmp/dsh-matrix-artifact
+      - name: restore version-independent pager build
+        if: matrix.source == 'npm'
+        run: |
+          tar -xzf /tmp/dsh-matrix-artifact/dsh-matrix-build.tgz
+          chmod +x target/debug/dsh-pager
+      - name: exact install/build/real E2E/PTY
+        env:
+          MATRIX_CHECKOUT_ENV: ${{ matrix.checkout_env }}
+          MATRIX_VERSION: ${{ matrix.version }}
+          DSH_COMPAT_SKIP_REPO_BUILD: ${{ matrix.source == 'npm' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          checkout_dir="${GITHUB_WORKSPACE}/../${{ matrix.checkout_dir }}"
+          export "${MATRIX_CHECKOUT_ENV}=${checkout_dir}"
+          bash scripts/run-dsh-compat-matrix.sh "${MATRIX_VERSION}"

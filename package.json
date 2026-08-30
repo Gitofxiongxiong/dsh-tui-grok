@@ -17,7 +17,9 @@
     "build:ts": "pnpm --filter './packages/dsh-tui-*' run build && pnpm --filter @dsh-pager-grok/runtime run build && pnpm --filter @dsh-pager-grok/runtime-apiproxy-v1 run build",
     "typecheck:ts": "pnpm --filter './packages/dsh-tui-*' run typecheck",
     "test:ts": "pnpm --filter './packages/dsh-tui-*' run test && pnpm --filter @dsh-pager-grok/runtime test && pnpm --filter @dsh-pager-grok/runtime-apiproxy-v1 test && pnpm --filter @dsh-pager-grok/cli test",
-    "verify:ts": "pnpm run build:ts && pnpm run typecheck:ts && pnpm run test:ts && node scripts/verify-runtime-pack.mjs && node scripts/verify-cli-pack.mjs && node scripts/verify-native-matrix.mjs"
+    "verify:ts": "pnpm run build:ts && pnpm run typecheck:ts && pnpm run test:ts && node scripts/verify-runtime-pack.mjs && node scripts/verify-cli-pack.mjs && node scripts/verify-native-matrix.mjs",
+    "check:registry-deps": "node scripts/check-registry-dependencies.mjs",
+    "compat:matrix": "bash scripts/run-dsh-compat-matrix.sh"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
