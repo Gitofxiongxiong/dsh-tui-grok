@@ -308,6 +308,15 @@ const entries = registry === undefined ? new Map() : validateRegistry(registry)
 for (const path of runtimeManifestPaths) validateRuntimeManifest(path, entries)
 validateRegistryConsumers(entries)
 for (const [version, entry] of entries) validateCheckout(version, entry)
+try {
+  execFileSync(process.execPath, [join(repoRoot, 'scripts', 'render-dsh-support.mjs'), '--check'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  reports.push('checked generated docs/DSH_SUPPORT.md')
+} catch (error) {
+  failures.push(`generated support table: ${error.stderr?.trim() || error.message}`)
+}
 
 for (const report of reports) console.log(`check-dsh-support: ${report}`)
 if (failures.length > 0) {

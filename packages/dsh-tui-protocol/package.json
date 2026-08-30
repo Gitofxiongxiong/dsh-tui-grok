@@ -1,7 +1,7 @@
 {
   "name": "@dsh-pager-grok/tui-protocol",
   "description": "External native-TUI wire protocol used by dsh-pager-grok",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "repository": {
     "type": "git",
@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --pretty false",
-    "test": "vitest run tests"
+    "test": "vitest run tests",
+    "prepack": "node ../../scripts/copy-package-licenses.mjs ."
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -29,7 +30,10 @@
   },
   "files": [
     "lib/**/*.js",
-    "lib/**/*.d.ts"
+    "lib/**/*.d.ts",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE"
   ],
   "license": "MIT"
 }

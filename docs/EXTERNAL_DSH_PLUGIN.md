@@ -1,10 +1,12 @@
 # 外置 DSH 插件套件
 
 > [!IMPORTANT]
-> **状态：rc.8 历史基线。** 本文描述的是 `0.1.0-rc.8` Host ApiProxy 时代的
-> 树外接缝；当前 main 已采用 `0.1.2-alpha.1` controllers 架构。本文后续仅作为
+> **状态：rc.8 历史基线，请勿照抄执行。** 本文描述的是 `0.1.0-rc.8` Host
+> ApiProxy 时代的树外接缝；当前实现已采用 registry 驱动的多 family 架构，且
+> `session-projection-recovery` 已退役。本文后续仅作为
 > [DSH 多版本兼容方案](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md) 中
-> `apiproxy-v1` adapter family 的恢复与对照基线。
+> `apiproxy-v1` adapter family 的恢复与对照基线。可执行命令以
+> [`compat/README.md`](../compat/README.md) 和 [TESTING.md](TESTING.md) 为准。
 
 本仓库中的 TypeScript 目录是外置集成层，不是 `deepseek-harness` 的 fork：
 

@@ -48,7 +48,7 @@ npm install -g @dsh-pager-grok/cli
 dsh-pager --new
 ```
 
-首次启动会在独立的 `dsh-pager-grok` profile 中准备所需 runtime，不会要求你
+首次启动会在独立的 family profile（例如 `dsh-pager-grok-apiproxy-v1`）中准备所需 runtime，不会要求你
 手工复制 Harness 仓库。公开版 `0.1.0` 启动前需要由 DeepSeek Harness 的凭据层
 提供 API Key，例如设置 `DEEPSEEK_API_KEY` 或使用已有的 `$DSH_HOME/.credentials.yaml`。
 
@@ -124,7 +124,7 @@ DeepSeek Harness backend / profile
               │
               │ JSON-RPC + DSH authoritative state
               ▼
-@dsh-pager-grok/runtime (TypeScript adapter)
+@dsh-pager-grok/runtime-<family> (TypeScript adapter)
               │
               │ DSH-neutral protocol
               ▼
@@ -141,13 +141,11 @@ Harness 整仓。详细边界见 [架构文档](docs/ARCHITECTURE.md) 和
 `@deepseek-ai/dsh@0.1.0-rc.8`。当前仓库源码已经继续加入 `/login`、模型/preset
 选择和显式恢复语义，但尚未发布为新的 npm 版本。
 
-当前升级分支已经完成 Harness `0.1.2-alpha.1` 的 bridge、profile、PTY、真实
-Harness E2E 和浏览器视觉适配；设计依据见
-[升级差异分析](dsh-tui-grok-升级到harness-0.1.2-alpha.1分析.md)。
-
-这意味着：npm `0.1.0` 仍使用已验证的 rc.8 组合；从当前升级分支启动源码时必须
-使用精确的 Harness `0.1.2-alpha.1` checkout。启动脚本会拒绝其他 Harness 版本，
-也不要把“能启动”理解为已经兼容任意未来版本。
+仓库中的 `0.2.0` 发布候选已经采用 registry 驱动的多版本架构：rc.2 是默认
+supported npm family，rc.8 保持 maintenance，alpha.1 是 controllers-v2 的
+experimental/source-only 开发 family。精确 tag、commit、distribution 与 profile
+schema 见自动生成的[支持表](docs/DSH_SUPPORT.md)；未列版本会在启动 pager 前
+fail closed。npm `0.1.0` 仍是既有 rc.8 公开版，`0.2.0` 尚待维护者执行发布步骤。
 
 ## 本地开发
 
@@ -163,11 +161,9 @@ cargo test --workspace --locked
 pnpm run verify:ts
 ```
 
-连接本地 DeepSeek Harness：
-
-当前升级分支要求该 checkout 的 CLI package version 精确为 `0.1.2-alpha.1`。
-多版本兼容方案已立项，面向 `0.1.1-rc.2` 的 npm 支持已纳入
-[迁移路线](docs/DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md)。
+连接 source-only controllers-v2 开发 family 时，checkout 必须与支持表中的 alpha
+tag/commit 精确一致；npm ApiProxy 版本使用各自隔离 fixture。三版本可重复命令见
+[`compat/README.md`](compat/README.md)，不要用 sibling checkout 猜测版本。
 
 ```bash
 DSH_HARNESS_ROOT=/path/to/deepseek-harness \

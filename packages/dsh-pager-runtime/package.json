@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pager-grok/runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Source-only controllers-v2 development runtime for dsh-pager-grok",
   "private": true,
   "license": "MIT",
