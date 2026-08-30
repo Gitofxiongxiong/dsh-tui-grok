@@ -352,6 +352,47 @@ describe('TuiGateway', () => {
     gateway.dispose()
   })
 
+  it('aborts follower and control streams on reconnect and dispose', async () => {
+    const fake = new FakeBridge()
+    const followerSignals: AbortSignal[] = []
+    const muxSignals: AbortSignal[] = []
+    const hostSignals: AbortSignal[] = []
+    fake.followFactory = async function* (_id, signal) {
+      followerSignals.push(signal)
+      await hang(signal)
+    }
+    fake.muxFactory = async function* (signal) {
+      muxSignals.push(signal)
+      await hang(signal)
+    }
+    fake.hostFactory = async function* (signal) {
+      hostSignals.push(signal)
+      await hang(signal)
+    }
+
+    const gateway = new TuiGateway(fake, new Notifications())
+    const first = await hello(gateway)
+    await gateway.handleRequest('tui.attach', { sessionId, generation: first.generation }, '2')
+    await wait(5)
+    expect([followerSignals[0], muxSignals[0], hostSignals[0]].every(signal => !signal.aborted))
+      .toBe(true)
+
+    const second = await hello(gateway)
+    await wait(5)
+    expect([followerSignals[0], muxSignals[0], hostSignals[0]].every(signal => signal.aborted))
+      .toBe(true)
+    expect(fake.attached.size).toBe(0)
+
+    await gateway.handleRequest('tui.attach', { sessionId, generation: second.generation }, '3')
+    await wait(5)
+    expect([followerSignals[1], muxSignals[1], hostSignals[1]].every(signal => !signal.aborted))
+      .toBe(true)
+    gateway.dispose()
+    expect([followerSignals[1], muxSignals[1], hostSignals[1]].every(signal => signal.aborted))
+      .toBe(true)
+    expect(fake.attached.size).toBe(0)
+  })
+
   it('deduplicates accepted interaction replies but permits correction after rejection', async () => {
     const fake = new FakeBridge()
     let attempts = 0
@@ -375,6 +416,40 @@ describe('TuiGateway', () => {
       interaction: { type: 'question', answers: { answers: [{ id: 'q', selected: ['three'] }] } },
     }, '4')).rejects.toMatchObject({ kind: 'already-resolved' })
     expect(attempts).toBe(2)
+    gateway.dispose()
+  })
+
+  it('reuses identical in-flight and completed interaction responses at most once', async () => {
+    const fake = new FakeBridge()
+    let attempts = 0
+    let resolveResponse!: (value: { accepted: boolean }) => void
+    const response = new Promise<{ accepted: boolean }>(resolve => {
+      resolveResponse = resolve
+    })
+    fake.respondHandler = async () => {
+      attempts += 1
+      return await response
+    }
+    const gateway = new TuiGateway(fake, new Notifications())
+    const { generation } = await hello(gateway)
+    const params = {
+      sessionId,
+      generation,
+      requestId: 'interaction-identical',
+      interaction: { type: 'question', answers: { answers: [{ id: 'q', selected: ['one'] }] } },
+    }
+
+    const first = gateway.handleRequest('tui.respond', params, '2')
+    const duplicate = gateway.handleRequest('tui.respond', params, '3')
+    expect(attempts).toBe(1)
+    resolveResponse({ accepted: true })
+    await expect(Promise.all([first, duplicate])).resolves.toEqual([
+      { accepted: true },
+      { accepted: true },
+    ])
+    await expect(gateway.handleRequest('tui.respond', params, '4'))
+      .resolves.toEqual({ accepted: true })
+    expect(attempts).toBe(1)
     gateway.dispose()
   })
 
