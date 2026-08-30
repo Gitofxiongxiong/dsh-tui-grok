@@ -26,7 +26,8 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "prepack": "node ../../scripts/copy-package-licenses.mjs .",
+    "prepack": "node ../../scripts/copy-support-registry.mjs . && node ../../scripts/copy-package-licenses.mjs .",
+    "postpack": "node ../../scripts/copy-support-registry.mjs . --clean",
     "test": "vitest run tests"
   },
   "devDependencies": {

@@ -14,7 +14,27 @@ dsh_tui_repo_root() {
 }
 
 dsh_tui_default_profile="dsh-pager-grok-dev"
-dsh_tui_required_harness_version="0.1.2-alpha.1"
+
+# The source-only development profile is controllers-v2-specific. Resolve its
+# exact DSH version from the canonical support registry instead of maintaining
+# a shell version constant.
+dsh_tui_required_harness_version() {
+  local repo_root="${1:-$(dsh_tui_repo_root)}"
+  local registry="$repo_root/compat/dsh-support.json"
+  local node_program
+  node_program="$(dsh_tui_resolve_node)" || return
+  "$node_program" - "$registry" <<'NODE'
+const fs = require('node:fs')
+const registry = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const matches = Object.entries(registry?.versions ?? {})
+  .filter(([, entry]) => entry.family === 'controllers-v2' && entry.distribution === 'source-only')
+if (matches.length !== 1) {
+  console.error(`Expected exactly one controllers-v2/source-only registry entry, found ${matches.length}`)
+  process.exit(2)
+}
+process.stdout.write(`${matches[0][0]}\n`)
+NODE
+}
 
 # Filled by dsh_tui_prepare_pager_backend for launchers.
 dsh_tui_node_program=""
@@ -25,6 +45,8 @@ dsh_tui_pager_backend_argv=()
 dsh_tui_resolve_harness_root() {
   local repo_root="$1"
   local candidate
+  local required_version
+  required_version="$(dsh_tui_required_harness_version "$repo_root")" || return
 
   if [[ -n "${DSH_HARNESS_ROOT:-}" ]]; then
     dsh_tui_require_harness_checkout "$DSH_HARNESS_ROOT"
@@ -42,7 +64,7 @@ dsh_tui_resolve_harness_root() {
   done
 
   printf 'DeepSeek Harness %s checkout was not found. Set DSH_HARNESS_ROOT.\n' \
-    "$dsh_tui_required_harness_version" >&2
+    "$required_version" >&2
   return 2
 }
 
@@ -66,10 +88,14 @@ NODE
 dsh_tui_require_harness_checkout() {
   local harness_root="$1"
   local actual_version
+  local required_version
+  local repo_root
+  repo_root="$(dsh_tui_repo_root)"
+  required_version="$(dsh_tui_required_harness_version "$repo_root")" || return
   actual_version="$(dsh_tui_harness_version "$harness_root")" || return
-  if [[ "$actual_version" != "$dsh_tui_required_harness_version" ]]; then
+  if [[ "$actual_version" != "$required_version" ]]; then
     printf 'Unsupported DeepSeek Harness version at %s: expected %s, found %s.\n' \
-      "$harness_root" "$dsh_tui_required_harness_version" "$actual_version" >&2
+      "$harness_root" "$required_version" "$actual_version" >&2
     return 2
   fi
   dsh_tui_require_harness_entry "$harness_root" >/dev/null || return

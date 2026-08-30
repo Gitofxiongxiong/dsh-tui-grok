@@ -1,4 +1,20 @@
-import { PACKAGE, PROFILE, BUNDLE, commandName, extraArgsError, helpText, needBundle, printDoctor, productBackendArgs, readOwnVersion, repairProfile, resolveDshEntry, runDsh, spawnPager, ensureProfileBundle, userBackendKind } from './launcher.js'
+import {
+  PACKAGE,
+  assertStartableSelection,
+  commandName,
+  ensureProfileBundle,
+  extraArgsError,
+  helpText,
+  needBundle,
+  printDoctor,
+  productBackendArgs,
+  readOwnVersion,
+  repairProfile,
+  resolveDshSelection,
+  runDsh,
+  spawnPager,
+  userBackendKind,
+} from './launcher.js'
 import { enginesSatisfied, nativeSpec } from './platform.js'
 
 function refuseNested() {
@@ -38,24 +54,28 @@ function run() {
     return
   }
   if (command === 'doctor') {
-    process.exit(printDoctor(ownVersion))
+    process.exit(printDoctor(ownVersion, process.env, { release: argv.includes('--release') }))
   }
-  if (command === 'repair') {
-    process.exit(repairProfile())
-  }
-  if (command === 'uninstall') {
-    const result = runDsh(['plugin', '--profile', PROFILE, 'remove', BUNDLE])
-    process.exit(result.status ?? 1)
-  }
-  if (command === 'update') {
+  if (command === 'repair' || command === 'uninstall' || command === 'update') {
     try {
-      ensureProfileBundle(ownVersion)
+      const selection = assertStartableSelection(resolveDshSelection())
+      if (command === 'repair') process.exit(repairProfile(selection))
+      if (command === 'uninstall') {
+        const result = runDsh([
+          'plugin', '--profile', selection.profile, 'remove', selection.runtimePackage,
+        ], { entry: selection.entry })
+        process.exit(result.status ?? 1)
+      }
+      ensureProfileBundle(ownVersion, selection)
+      console.error(
+        `[dsh-pager] ${selection.runtimePackage} aligned to ${ownVersion}. ` +
+          `To upgrade the CLI itself:\n  npm install -g ${PACKAGE}@${ownVersion}`,
+      )
+      return
     } catch (error) {
       console.error(`dsh-pager: ${error.message}`)
       process.exit(1)
     }
-    console.error(`[dsh-pager] runtime aligned to ${ownVersion}. To upgrade the CLI itself:\n  npm install -g ${PACKAGE}@${ownVersion}`)
-    return
   }
 
   if (!enginesSatisfied()) {
@@ -78,11 +98,17 @@ function run() {
     spawnPager(argv)
     return
   }
-  if (needBundle(process.env, ownVersion)) {
-    ensureProfileBundle(ownVersion)
+  try {
+    const selection = assertStartableSelection(resolveDshSelection())
+    if (needBundle(process.env, ownVersion, selection)) {
+      ensureProfileBundle(ownVersion, selection)
+    }
+    const backend = productBackendArgs(selection)
+    spawnPager([...argv, ...backend], { selection })
+  } catch (error) {
+    console.error(`dsh-pager: ${error.message}`)
+    process.exit(1)
   }
-  const backend = productBackendArgs(resolveDshEntry())
-  spawnPager([...argv, ...backend])
 }
 
 run()

@@ -18,6 +18,7 @@ import type {
   ToolEventView,
 } from '@dsh-pager-grok/tui-protocol'
 import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from '../../core/backend.js'
+import { assertBackendSelection } from '../../core/backend-selection.js'
 import type {
   AgentLike,
   GoalServiceLike,
@@ -90,6 +91,7 @@ export class ControllersV2Backend implements TuiBackend {
   private disposed = false
 
   constructor(private readonly ctx: TuiHarnessContext) {
+    assertBackendSelection(this.info)
     this.installHostEvents()
     this.installInteractionAnswerers()
   }

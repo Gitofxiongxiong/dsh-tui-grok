@@ -38,6 +38,7 @@ export type {
   TuiCapabilities,
   TuiMuxEnvelope,
 } from './core/backend.js'
+export { assertBackendSelection } from './core/backend-selection.js'
 export {
   ControlPlaneRouter,
   ControlPlaneStore,
