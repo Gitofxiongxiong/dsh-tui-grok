@@ -218,20 +218,7 @@ importers:
         specifier: workspace:*
         version: link:../dsh-tui-server
 
-  packages/dsh-tui-protocol:
-    dependencies:
-      '@deepseek-ai/cordis':
-        specifier: link:../../../deepseek-harness-latest/vendor/cordis
-        version: link:../../../deepseek-harness-latest/vendor/cordis
-      '@deepseek-ai/dsh-brand':
-        specifier: link:../../../deepseek-harness-latest/packages/util/brand
-        version: link:../../../deepseek-harness-latest/packages/util/brand
-      '@deepseek-ai/dsh-invariants':
-        specifier: link:../../../deepseek-harness-latest/packages/runtime-diagnostics/invariants
-        version: link:../../../deepseek-harness-latest/packages/runtime-diagnostics/invariants
-      '@deepseek-ai/dsh-session':
-        specifier: link:../../../deepseek-harness-latest/packages/core/session
-        version: link:../../../deepseek-harness-latest/packages/core/session
+  packages/dsh-tui-protocol: {}
 
   packages/dsh-tui-server:
     dependencies:

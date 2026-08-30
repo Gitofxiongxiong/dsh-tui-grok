@@ -4,8 +4,15 @@
  */
 
 /* jscpd:ignore-start */
-import type { Context } from '@deepseek-ai/cordis'
-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
+/** Runtime invariant installer accepted by the profile invariant registry. */
+export type TuiProtocolInvariantInstaller = () => void
+
+/** Structural context required by this package's invariant companion. */
+export interface TuiProtocolInvariantContext {
+  invariants: {
+    register(name: string, installer: TuiProtocolInvariantInstaller): () => void
+  }
+}
 
 const PACKAGE_NAME = '@dsh-pager-grok/tui-protocol'
 
@@ -19,13 +26,13 @@ export const inject = ['invariants']
  * with no event stream or mutable data relation of its own; both wire
  * ends own their protocol behavior.
  */
-const install: InvariantInstaller = () => {}
+const install: TuiProtocolInvariantInstaller = () => {}
 
 /**
  * Register this package's invariant companion.
  * @param ctx - Cordis context carrying the invariant service.
  * @returns the installed registration's disposer after setup succeeds.
  */
-export const apply = (ctx: Context): Promise<() => void> =>
+export const apply = (ctx: TuiProtocolInvariantContext): Promise<() => void> =>
   Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
 /* jscpd:ignore-end */
