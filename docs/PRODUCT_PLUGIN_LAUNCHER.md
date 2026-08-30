@@ -1,5 +1,12 @@
 # 树外 DSH 插件 + 产品启动器：`dsh-pager`（dsh-tui-grok）
 
+> [!IMPORTANT]
+> **状态：历史方案参考。** 本文中“peer 钉死 `0.1.0-rc.8`、单一 runtime
+> Bundle”的设计已被 [DSH 多版本兼容方案](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md)
+> 的 D1/D3 决策取代：首个 npm 默认后端迁移到 `0.1.1-rc.2`，并由
+> family-specific runtime 与 support registry 管理支持窗口。正文保留用于历史审计，
+> 不代表多版本架构的当前规范。
+
 | 字段 | 值 |
 |---|---|
 | 标题 | 树外 DSH 插件 + 产品启动器：`dsh-pager`（dsh-tui-grok） |

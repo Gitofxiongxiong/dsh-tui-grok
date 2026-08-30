@@ -158,3 +158,5 @@ REAL_E2E_SESSION=session-71569f6b-4d1f-4f4f-a13b-7f1613897a1b \
 设置后启动脚本不再注入默认 `--backend` 链。需要验证真实模型 prompt、queue
 mutation 或 lifecycle 时，应在确认会话和费用边界后显式运行对应 binary smoke
 flag，而不是让只读门禁隐式改变已有 session。
+
+DSH 多版本测试矩阵及 CI/发布门禁规划见 [多版本兼容方案 §16–§17](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md#16-测试架构)。

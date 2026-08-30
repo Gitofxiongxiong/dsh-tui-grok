@@ -166,6 +166,8 @@ pnpm run verify:ts
 连接本地 DeepSeek Harness：
 
 当前升级分支要求该 checkout 的 CLI package version 精确为 `0.1.2-alpha.1`。
+多版本兼容方案已立项，面向 `0.1.1-rc.2` 的 npm 支持已纳入
+[迁移路线](docs/DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md)。
 
 ```bash
 DSH_HARNESS_ROOT=/path/to/deepseek-harness \

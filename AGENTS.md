@@ -7,10 +7,11 @@
 先阅读：
 
 1. docs/GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md；
-2. docs/ARCHITECTURE.md；
-3. docs/SOURCE_POLICY.md；
-4. docs/TESTING.md；
-5. docs/开发进度记录/README.md。
+2. docs/DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md（涉及 DSH 适配、桥接或协议边界的工作）；
+3. docs/ARCHITECTURE.md；
+4. docs/SOURCE_POLICY.md；
+5. docs/TESTING.md；
+6. docs/开发进度记录/README.md。
 
 如果任务涉及 Grok 源码，先核对：
 
