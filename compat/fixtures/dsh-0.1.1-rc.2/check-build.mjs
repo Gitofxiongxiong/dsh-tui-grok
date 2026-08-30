@@ -16,8 +16,9 @@ for (const packageName of ['@deepseek-ai/dsh', '@deepseek-ai/dsh-host-apiproxy']
   process.stdout.write(`${packageName}@${manifest.version}: ${manifestPath}\n`)
 }
 
-const adapterPath = resolve(repoRoot, 'packages/dsh-tui-server/lib/adapters/apiproxy-v1/backend.js')
-const corePath = resolve(repoRoot, 'packages/dsh-tui-server/lib/core/serve.js')
+const runtimeLib = resolve(repoRoot, 'packages/dsh-pager-runtime-apiproxy-v1/lib')
+const adapterPath = resolve(runtimeLib, 'server/adapters/apiproxy-v1/backend.js')
+const corePath = resolve(runtimeLib, 'server/core/serve.js')
 const [{ ApiProxyV1Backend, resolveApiProxyV1Runtime }, { serve }] = await Promise.all([
   import(pathToFileURL(adapterPath).href),
   import(pathToFileURL(corePath).href),

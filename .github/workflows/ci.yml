@@ -111,8 +111,7 @@ jobs:
       - name: assemble reusable matrix build
         run: |
           tar -czf /tmp/dsh-matrix-build.tgz \
-            packages/dsh-tui-protocol/lib \
-            packages/dsh-tui-server/lib \
+            packages/dsh-pager-runtime-apiproxy-v1/lib \
             packages/dsh-pager-cli/lib \
             target/debug/dsh-pager
       - uses: actions/upload-artifact@v4

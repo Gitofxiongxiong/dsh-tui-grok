@@ -5,9 +5,10 @@ import { createApiRemoteAgentResolver } from '@deepseek-ai/dsh-api-remotes'
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = process.env.DSH_PAGER_GROK_ROOT ?? resolve(fixtureDir, '../../..')
+const runtimeLib = resolve(repoRoot, 'packages/dsh-pager-runtime-apiproxy-v1/lib')
 const [{ ApiProxyV1Backend, resolveApiProxyV1Runtime }, { serve }] = await Promise.all([
-  import(pathToFileURL(resolve(repoRoot, 'packages/dsh-tui-server/lib/adapters/apiproxy-v1/backend.js')).href),
-  import(pathToFileURL(resolve(repoRoot, 'packages/dsh-tui-server/lib/core/serve.js')).href),
+  import(pathToFileURL(resolve(runtimeLib, 'server/adapters/apiproxy-v1/backend.js')).href),
+  import(pathToFileURL(resolve(runtimeLib, 'server/core/serve.js')).href),
 ])
 
 export const name = 'tui-server-apiproxy-v1'

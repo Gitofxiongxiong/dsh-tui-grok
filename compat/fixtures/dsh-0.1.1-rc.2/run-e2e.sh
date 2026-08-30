@@ -55,8 +55,8 @@ printf '%s CLI: %s %s\n' "$compat_version" "$node_program" "$dsh_entry"
 if [[ "${DSH_COMPAT_SKIP_REPO_BUILD:-0}" != "1" ]]; then
   corepack pnpm@11.20.0 --pm-on-fail=ignore --dir "$repo_root" run build:ts
 else
-  test -r "$repo_root/packages/dsh-tui-server/lib/core/serve.js"
-  test -r "$repo_root/packages/dsh-tui-server/lib/adapters/apiproxy-v1/backend.js"
+  test -r "$repo_root/packages/dsh-pager-runtime-apiproxy-v1/lib/server/core/serve.js"
+  test -r "$repo_root/packages/dsh-pager-runtime-apiproxy-v1/lib/server/adapters/apiproxy-v1/backend.js"
 fi
 corepack pnpm@11.7.0 --pm-on-fail=ignore --dir "$fixture_dir" run build
 "$node_program" "$dsh_entry" plugin --profile "$profile" list
