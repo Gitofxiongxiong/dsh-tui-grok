@@ -35,9 +35,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: enable pnpm
-        run: corepack enable && corepack prepare pnpm@11.20.0 --activate
+      - name: enable Corepack
+        run: corepack enable
+      - name: checkout exact Harness alpha
+        env:
+          HARNESS_REF: dsh-v0.1.2-alpha.1
+          HARNESS_COMMIT: cd5ef8148158c3a752a658978873241fdf8e2bbc
+        run: |
+          set -euo pipefail
+          git clone --branch "${HARNESS_REF}" --depth 1 \
+            https://github.com/deepseek-ai/deepseek-harness.git \
+            ../deepseek-harness-latest
+          test "$(git -C ../deepseek-harness-latest rev-parse HEAD)" = "${HARNESS_COMMIT}"
+      - name: build Harness libraries
+        working-directory: ../deepseek-harness-latest
+        run: |
+          corepack pnpm@11.7.0 install --frozen-lockfile
+          corepack pnpm@11.7.0 run build:lib:host
+          corepack pnpm@11.7.0 run build:lib:client
       - name: pnpm install
-        run: pnpm install --frozen-lockfile
+        run: corepack pnpm@11.20.0 install --frozen-lockfile
       - name: verify ts
-        run: pnpm run verify:ts
+        run: corepack pnpm@11.20.0 run verify:ts
