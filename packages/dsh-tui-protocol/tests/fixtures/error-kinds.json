@@ -1,0 +1,12 @@
+{
+  "errorKinds": [
+    "protocol-version",
+    "stale-generation",
+    "already-resolved",
+    "unknown-session",
+    "identity-mismatch",
+    "baseline-required",
+    "not-attached",
+    "capability-denied"
+  ]
+}
