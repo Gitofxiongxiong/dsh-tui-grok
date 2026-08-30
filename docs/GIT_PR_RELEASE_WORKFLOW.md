@@ -251,6 +251,12 @@ git fetch origin --prune
   <code>confirm=publish-vX.Y.Z</code>，才使用 <code>npm-release</code> environment 的
   Trusted Publishing/OIDC 发布。metadata、native/JS build 与 registry cold job 都会
   checkout 指定 Tag；workflow 本身可以在不可变 Tag 发布后从 <code>main</code> 修复。
+- registry cold job 的根工作树始终是指定 Tag。为了在不重定位 Tag 的前提下恢复
+  纯编排故障，它会把当前 workflow definition 的精确
+  <code>github.workflow_sha</code> 检出到独立 <code>release-orchestration/</code>
+  目录，只从该目录运行 cold audit/rehearsal/PTY 工具。该 checkout 不参与 package
+  build/pack，不替换 Tag/source run artifacts；job 在执行前同时校验 Tag commit 与
+  orchestration commit。
 - 正式链可安全重入：native、runtime 或 CLI version 已存在时，必须将 registry
   <code>dist.integrity</code> 与来源 tarball 的 SHA-512 完整比对，并确认
   <code>release-candidate</code> 指向该精确 version；只有 E404 才执行 publish。任何
