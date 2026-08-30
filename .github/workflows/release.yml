@@ -1,9 +1,11 @@
 # Two-stage release workflow.
 #
 # A v* tag push only rebuilds and retains immutable candidate artifacts. Actual
-# npm publication requires a second, explicit workflow_dispatch from that tag
-# with confirm=publish-<tag>. Published packages remain on release-candidate
-# until the maintainer completes registry verification and moves latest.
+# npm publication requires a second, explicit workflow_dispatch with the
+# immutable release_tag and confirm=publish-<tag>. Package builds always check
+# out that Tag even when a recovery dispatch uses the fixed workflow on main.
+# Published packages remain on release-candidate until the maintainer completes
+# registry verification and moves latest.
 name: release
 
 on:
@@ -11,16 +13,25 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: "Immutable vX.Y.Z Tag to build and publish"
+        required: true
+        type: string
+      resume_run_id:
+        description: "Prior release run whose exact artifacts must be reused (recovery only)"
+        required: false
+        type: string
       confirm:
-        description: "Type publish-vX.Y.Z while dispatching from the matching vX.Y.Z tag"
+        description: "Type publish-vX.Y.Z for the immutable release Tag"
         required: true
         type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -30,22 +41,45 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
+      resume_run_id: ${{ steps.release.outputs.resume_run_id }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: validate immutable tag and package versions
         id: release
         shell: bash
         env:
           CONFIRM: ${{ inputs.confirm }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "${GITHUB_REF_TYPE}" = tag
-          tag="${GITHUB_REF_NAME}"
-          [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
-          version="${tag#v}"
-          if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+          if [ "${GITHUB_EVENT_NAME}" = push ]; then
+            test "${GITHUB_REF_TYPE}" = tag
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${RELEASE_TAG}"
             test "${CONFIRM}" = "publish-${tag}"
           fi
+          [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
+          version="${tag#v}"
+          release_commit="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          resume_run_id="${RESUME_RUN_ID}"
+          if [ -n "${resume_run_id}" ]; then
+            [[ "${resume_run_id}" =~ ^[0-9]+$ ]]
+            IFS=$'\t' read -r source_sha source_tag source_path source_event source_status \
+              < <(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${resume_run_id}" \
+                --jq '[.head_sha, .head_branch, .path, .event, .status] | @tsv')
+            test "${source_sha}" = "${release_commit}"
+            test "${source_tag}" = "${tag}"
+            test "${source_path}" = '.github/workflows/release.yml'
+            test "${source_event}" = workflow_dispatch
+            test "${source_status}" = completed
+          fi
+          git switch --detach "${release_commit}"
+          test "$(git rev-parse HEAD)" = "${release_commit}"
           node --input-type=module - "${version}" <<'NODE'
           import fs from 'node:fs'
           const expected = process.argv[2]
@@ -66,6 +100,7 @@ jobs:
           NODE
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "resume_run_id=${resume_run_id}" >> "${GITHUB_OUTPUT}"
 
   pack-native:
     name: native ${{ matrix.id }}
@@ -73,6 +108,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     environment: npm-release
     permissions:
+      actions: read
       contents: read
       id-token: write
     strategy:
@@ -96,7 +132,11 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        if: needs.metadata.outputs.resume_run_id == ''
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
       - uses: dtolnay/rust-toolchain@master
+        if: needs.metadata.outputs.resume_run_id == ''
         with:
           toolchain: 1.98.0
           targets: ${{ matrix.rust_target }}
@@ -108,17 +148,42 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: npm install --global npm@11.13.0
       - name: pack native tarball
+        if: needs.metadata.outputs.resume_run_id == ''
         shell: bash
         run: node scripts/pack-native.mjs --id ${{ matrix.id }}
+      - name: restore exact native candidate from prior release run
+        if: needs.metadata.outputs.resume_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.id }}
+          path: ${{ github.workspace }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.metadata.outputs.resume_run_id }}
       - name: publish native via OIDC
         if: github.event_name == 'workflow_dispatch'
         shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
+          package='@dsh-pager-grok/native-${{ matrix.id }}'
           tarballs=("${GITHUB_WORKSPACE}"/*.tgz)
           test -f "${tarballs[0]}"
           test "${#tarballs[@]}" -eq 1
-          npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+          lookup_log="${RUNNER_TEMP}/native-view.log"
+          if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
+            local_integrity="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "${tarballs[0]}")"
+            test "${local_integrity}" = "${registry_integrity}"
+            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
+            echo "verified existing ${package}@${VERSION} integrity=${registry_integrity}"
+          else
+            if ! grep -q 'E404' "${lookup_log}"; then
+              cat "${lookup_log}" >&2
+              exit 1
+            fi
+            npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+          fi
       - name: upload native candidate
         uses: actions/upload-artifact@v4
         with:
@@ -132,15 +197,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        if: needs.metadata.outputs.resume_run_id == ''
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
       - uses: actions/setup-node@v4
+        if: needs.metadata.outputs.resume_run_id == ''
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
       - name: use audited npm CLI and pnpm
+        if: needs.metadata.outputs.resume_run_id == ''
         run: |
           npm install --global npm@11.13.0
           corepack enable
       - name: checkout exact DSH alpha build graph
+        if: needs.metadata.outputs.resume_run_id == ''
         run: |
           set -euo pipefail
           IFS=$'\t' read -r DSH_VERSION DSH_FAMILY DSH_REF DSH_COMMIT \
@@ -156,6 +227,7 @@ jobs:
             echo "DSH_SOURCE_CHECKOUT_DIR=${DSH_CHECKOUT_DIR}"
           } >> "${GITHUB_ENV}"
       - name: build exact DSH alpha libraries
+        if: needs.metadata.outputs.resume_run_id == ''
         run: |
           corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
             --dir "../${DSH_SOURCE_CHECKOUT_DIR}" install --frozen-lockfile
@@ -164,6 +236,7 @@ jobs:
           corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
             --dir "../${DSH_SOURCE_CHECKOUT_DIR}" run build:lib:client
       - name: build and pack runtime and CLI
+        if: needs.metadata.outputs.resume_run_id == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -174,6 +247,15 @@ jobs:
             ./packages/dsh-pager-runtime-apiproxy-v1
           npm pack --pack-destination "${RUNNER_TEMP}/js-candidates" \
             ./packages/dsh-pager-cli
+      - name: restore exact JS candidates from prior release run
+        if: needs.metadata.outputs.resume_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: js-candidates
+          path: ${{ runner.temp }}/js-candidates
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.metadata.outputs.resume_run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: js-candidates
@@ -211,14 +293,9 @@ jobs:
           test "${#tarballs[@]}" -eq 1
           lookup_log="${RUNNER_TEMP}/runtime-view.log"
           if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
-            local_integrity="$(node --input-type=module - "${tarballs[0]}" <<'NODE'
-            import fs from 'node:fs'
-            import crypto from 'node:crypto'
-            const bytes = fs.readFileSync(process.argv[2])
-            process.stdout.write(`sha512-${crypto.createHash('sha512').update(bytes).digest('base64')}`)
-            NODE
-            )"
+            local_integrity="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "${tarballs[0]}")"
             test "${local_integrity}" = "${registry_integrity}"
+            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
             echo "verified bootstrap ${package}@${VERSION} integrity=${registry_integrity}"
           else
             if ! grep -q 'E404' "${lookup_log}"; then
@@ -235,6 +312,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -311,12 +390,27 @@ jobs:
       - run: npm install --global npm@11.13.0
       - name: publish CLI via OIDC
         shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
+          package='@dsh-pager-grok/cli'
           mapfile -t tarballs < <(find "${RUNNER_TEMP}/js-candidates" -maxdepth 1 \
             -type f -name 'dsh-pager-grok-cli-*.tgz')
           test "${#tarballs[@]}" -eq 1
-          npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+          lookup_log="${RUNNER_TEMP}/cli-view.log"
+          if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
+            local_integrity="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "${tarballs[0]}")"
+            test "${local_integrity}" = "${registry_integrity}"
+            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
+            echo "verified existing ${package}@${VERSION} integrity=${registry_integrity}"
+          else
+            if ! grep -q 'E404' "${lookup_log}"; then
+              cat "${lookup_log}" >&2
+              exit 1
+            fi
+            npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+          fi
 
   verify-registry:
     name: verify registry publication
