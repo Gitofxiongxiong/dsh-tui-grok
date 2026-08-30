@@ -87,6 +87,9 @@ cold-install 或文档工作。
 - 首次正式 run `33309459911`：五个平台 native 已通过 OIDC 发布到
   `release-candidate`；runtime integrity job 因 workflow heredoc 解析错误 exit 2，
   registry cold/PTY、CLI publish 与最终 registry/provenance gate 未执行。
+- 首次 recovery run `33310487508`：metadata、来源 artifacts 恢复、五个平台 native
+  与 runtime integrity/staging 校验全绿；registry cold job 因工具准备 step 只断言
+  `command -v rg`、未实际安装 `ripgrep` 而 exit 1。CLI publish 与最终 gate 继续未执行。
 - 恢复要求：修复 workflow 经 PR/CI 合并后，从默认分支以
   `release_tag=v0.2.0`、`resume_run_id=33309459911`、
   `confirm=publish-v0.2.0` 重入。两次 run candidates 的对比显示 Linux、macOS、runtime
