@@ -4239,7 +4239,7 @@ impl UiState {
             return Ok(());
         }
         let line = self.prompt.text().to_string();
-        if !line.starts_with('/') {
+        if !line.starts_with('/') || !crate::slash::is_command_candidate(&line) {
             return self.submit_prompt(transport, session);
         }
         if crate::slash::is_host_command(&line, &self.command_catalog) {

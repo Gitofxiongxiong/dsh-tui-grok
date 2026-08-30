@@ -569,6 +569,15 @@ fn visible_host_command_name(name: &str) -> bool {
     valid_command_name(name) && name != "preset"
 }
 
+/// Return whether the leading token has slash-command syntax.
+///
+/// Local and Host command registries both use [`valid_command_name`].  Keep
+/// inputs such as `/home/leo/project explain this` on the ordinary prompt
+/// plane instead of treating an absolute path as an unavailable command.
+pub fn is_command_candidate(line: &str) -> bool {
+    parse_invocation(line).is_some_and(|invocation| valid_command_name(invocation.token))
+}
+
 /// Return whether `line` names one of the commands currently advertised by
 /// the official DSH command runtime. Local TUI commands keep precedence and
 /// `/preset` stays excluded because it is fixed before the first turn.
@@ -945,6 +954,19 @@ mod tests {
         ));
         assert!(!is_host_command("/model DeepSeek-V4-Pro", &commands));
         assert!(!is_host_command("/preset", &commands));
+    }
+
+    #[test]
+    fn command_candidate_rejects_absolute_paths_but_keeps_command_typos() {
+        assert!(is_command_candidate("/plan off"));
+        assert!(is_command_candidate("/plna off"));
+        assert!(!is_command_candidate(
+            "/home/leo/code/dsh-pager-grok explain this"
+        ));
+        assert!(!is_command_candidate("/usr/bin/env"));
+        assert!(!is_command_candidate("/路径/项目 请分析"));
+        assert!(!is_command_candidate("/"));
+        assert!(!is_command_candidate("plain prompt"));
     }
 
     #[test]
