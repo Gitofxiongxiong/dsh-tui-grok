@@ -37,6 +37,19 @@ UiEffect 仍是迁移中的最小 scaffold，不应被当作最终 Grok parity �
 
 `crates/dsh-pager-bin` 只负责参数解析、后端启动、非交互 smoke 和把已加载的 runtime 交给 `dsh-pager-grok-ui::run_interactive`。它不实现布局。
 
+## TypeScript server 边界
+
+TypeScript server 的目标分层是稳定 core 与可替换 DSH adapter。core 拥有
+gateway、连接级 control-plane、JSON-RPC line transport、buffering、错误载体和
+lifecycle；它只依赖项目自有的 `TuiBackend` SPI，不导入具体 Controller、ApiProxy
+或 Cordis service 类型。
+
+DSH 的精确版本差异由 adapter family 隔离：`apiproxy-v1` 承载 rc.8/rc.2，
+`controllers-v2` 承载 alpha.1 及经验证的后续同族版本。adapter 负责 service
+typing、上游事件和稳定 DTO 的归一化、history/follow 语义、交互 waterfall 与启动
+断言；profile/runtime 只负责组合，不拥有 TUI 业务语义。详细依赖方向、稳定协议和
+SPI 契约见 [DSH 多版本兼容方案 §5–§7](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md#5-目标架构)。
+
 ## 数据流
 
 ```text

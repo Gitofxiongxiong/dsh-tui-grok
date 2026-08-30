@@ -4,6 +4,7 @@
 grok build 的代码仓库在/home/leo/code/grok-build
 
 - [GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md](GROK_BUILD_TUI_DEEPSEEK_ADAPTATION_PLAN.md)：长期总控计划、不可破坏的设计契约、Grok 源码复用地图、细化里程碑、工作包、验收矩阵和风险登记；这是后续实现的最高优先级入口。
+- [DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md)：DSH 多版本兼容的总控方案，定义稳定协议、adapter family、支持矩阵、测试与迁移路线。
 - [GROK_SCROLLBACK_CLOSURE_PLAN.md](GROK_SCROLLBACK_CLOSURE_PLAN.md)：N2/档 3 执行细则。冻结 `transcript.rs` 自造视觉算法，按 Grok `scrollback/` 闭包 vendor，并把该神文件的职责按切片删掉。
 - [开发进度记录](开发进度记录/README.md)：每个工作批次在修改仓库前必须创建的时间戳记录，以及一份记录对应一个 Git commit 的提交规则。
 - [GIT_PR_RELEASE_WORKFLOW.md](GIT_PR_RELEASE_WORKFLOW.md)：日常分支、push、Pull Request、rebase merge、Tag 与 npm/GitHub Release 规范，包含 `git`/`gh` 可执行命令和当前 Actions 副作用。
