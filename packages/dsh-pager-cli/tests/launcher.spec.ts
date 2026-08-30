@@ -133,6 +133,54 @@ describe('cli argv', () => {
     }
   })
 
+  it('doctor --release uses the exact registry dependency gate', () => {
+    const dsh = fakeDsh()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-pager-doctor-release-'))
+    temporaryRoots.push(home)
+    const selectedProfile = join(home, 'profiles', profileNameFor('apiproxy-v1'))
+    const runtime = join(selectedProfile, 'node_modules', ...FAMILY_RUNTIME.split('/'))
+    mkdirSync(runtime, { recursive: true })
+    writeFileSync(join(selectedProfile, 'package.json'), JSON.stringify({
+      dshPagerGrok: {
+        managed: true,
+        adapterFamily: 'apiproxy-v1',
+        dshVersion: '1.2.3',
+        profileSchema: 1,
+        runtimeVersion: '0.1.0',
+      },
+    }))
+    writeFileSync(join(runtime, 'package.json'), JSON.stringify({
+      name: FAMILY_RUNTIME,
+      version: '0.1.0',
+      dependencies: { available: '1.2.3' },
+      dshPagerGrok: {
+        adapterFamily: 'apiproxy-v1',
+        profileSchema: 1,
+        capabilities: { sessions: true },
+      },
+    }))
+    const lines: string[] = []
+    const orig = console.log
+    console.log = (msg) => lines.push(String(msg))
+    try {
+      printDoctor('0.1.0', {
+        ...process.env,
+        DSH_BIN_JS: dsh.binJs,
+        DSH_HOME: home,
+        DSH_PAGER_BIN: process.execPath,
+        DSH_PAGER_DEV_MODE: '1',
+      }, {
+        release: true,
+        registry: registry(),
+        registryRunner: () => ({ ok: true, detail: 'test registry row' }),
+      })
+      expect(lines.join('\n')).toContain('✓ release registry dependencies')
+      expect(lines.join('\n')).toContain('exact non-optional dependencies available')
+    } finally {
+      console.log = orig
+    }
+  })
+
   it('injects node + bin.js + the selected family profile', () => {
     const selected = selection()
     const args = productBackendArgs({

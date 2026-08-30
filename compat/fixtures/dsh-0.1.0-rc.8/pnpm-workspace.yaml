@@ -1,0 +1,12 @@
+packages:
+  - .
+
+# Mirror the reviewed rc.8 checkout policy for dependencies whose lifecycle
+# scripts are required by the real subprocess/PTY runtime. Denied entries are
+# explicit so strictDepBuilds does not turn an expected no-op into ambiguity.
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  koffi: true
+  node-pty: true
+  protobufjs: false

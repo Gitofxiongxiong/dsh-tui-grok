@@ -219,8 +219,9 @@ git fetch origin --prune
 
 - Require a pull request before merging；
 - Require status checks to pass before merging；
-- 要求当前 <code>ci.yml</code> 的三平台 <code>test</code> 和
-  <code>verify-ts (ubuntu)</code>；
+- 要求当前 <code>ci.yml</code> 的三平台 <code>test</code>、
+  <code>verify-ts + contracts (ubuntu)</code>；adapter/support/compat 路径变化时还要求
+  三个精确版本的 <code>DSH ...</code> job；
 - Require conversation resolution before merging；
 - Block force pushes 和 branch deletion；
 - 个人仓库可先不要求第二人 approval，但仍保留 PR + CI 门禁；
@@ -239,6 +240,7 @@ git fetch origin --prune
 | push 普通开发分支 | 默认不运行 | 不运行 | 不运行 | 无 |
 | push <code>ci/trust-smoke</code> | 默认不运行 | 不运行 | 不运行 | 无 |
 | push <code>v*</code> Tag | 不运行 | 构建并上传原生 tarball artifact | 不运行 | 无 npm publish |
+| 每周 scheduled | core + 三版本完整矩阵 | 不运行 | 不运行 | 仅 registry/read-only npm view |
 | 手动运行 <code>release-native</code> | 不变 | 构建 artifact | 不运行 | 无 npm publish |
 | 手动运行 <code>publish-smoke</code> 并输入确认值 | 不变 | 不运行 | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
 
@@ -252,6 +254,10 @@ git fetch origin --prune
 - <code>main</code>、开发分支和 <code>v*</code> Tag 的 push 都不会触发
   <code>publish.yml</code>。该手动烟测仍不是 native → runtime → CLI 的
   正式发布链。
+- <code>ci.yml</code> 的 compatibility path filter 只减少普通 PR/main 的真实 DSH
+  重复构建；每周 scheduled 固定运行 rc.8、rc.2、alpha.1 全矩阵。每个矩阵 job
+  调用同一等价本地入口 <code>scripts/run-dsh-compat-matrix.sh &lt;exact-version&gt;</code>，
+  不执行 publish、dist-tag、Release 或 workflow dispatch。
 
 手动烟测可从 GitHub Actions 页面运行，或使用：
 
