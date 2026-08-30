@@ -9,12 +9,12 @@ import {
   type ApiResult,
   type HostFrame,
 } from '@dsh-pager-grok/tui-protocol'
-import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from '../src/backend.ts'
-import { dispatchUnary } from '../src/dispatch.ts'
-import { TuiMethodNotFoundError, TuiRpcError } from '../src/errors.ts'
-import { TuiGateway, TUI_SERVER_VERSION } from '../src/gateway.ts'
-import { serve } from '../src/serve.ts'
-import { TuiLineTransport } from '../src/transport.ts'
+import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from '../src/core/backend.ts'
+import { dispatchUnary } from '../src/core/dispatch.ts'
+import { TuiMethodNotFoundError, TuiRpcError } from '../src/core/errors.ts'
+import { TuiGateway, TUI_SERVER_VERSION } from '../src/core/gateway.ts'
+import { serve } from '../src/core/serve.ts'
+import { TuiLineTransport } from '../src/core/transport.ts'
 
 const sessionId = SessionId('sess-1')
 

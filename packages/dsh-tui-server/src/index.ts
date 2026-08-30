@@ -10,22 +10,29 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Readable, Writable } from 'node:stream'
 import Schema from '@deepseek-ai/schemastery'
-import { serve } from './serve.js'
-import { TuiHarnessBridge, type TuiHarnessContext } from './bridge.js'
+import { serve } from './core/serve.js'
+import {
+  ControllersV2Backend,
+  type TuiHarnessContext,
+} from './adapters/controllers-v2/backend.js'
+import { CONTROLLERS_V2_INJECT } from './adapters/controllers-v2/plugin.js'
 
-export { TuiGateway, TUI_SERVER_VERSION } from './gateway.js'
-export { TuiHarnessBridge } from './bridge.js'
-export type { TuiHarnessContext } from './bridge.js'
+export { TuiGateway, TUI_SERVER_VERSION } from './core/gateway.js'
+export {
+  ControllersV2Backend,
+  TuiHarnessBridge,
+} from './adapters/controllers-v2/backend.js'
+export type { TuiHarnessContext } from './adapters/controllers-v2/backend.js'
 export type {
   TuiBackend,
   TuiBackendInfo,
   TuiCapabilities,
   TuiMuxEnvelope,
-} from './backend.js'
+} from './core/backend.js'
 export {
   ControlPlaneRouter,
   ControlPlaneStore,
-} from './control-plane.js'
+} from './core/control-plane.js'
 export type {
   ControlPlaneApplyResult,
   ControlPlaneBaseline,
@@ -36,30 +43,15 @@ export type {
   SessionControlSnapshot,
   SessionProjectionSnapshot,
   WorkspaceControlSnapshot,
-} from './control-plane.js'
-export { TuiLineTransport } from './transport.js'
-export type { TuiLineTransportOptions } from './transport.js'
-export type { TuiServeOptions } from './serve.js'
-export { TuiMethodNotFoundError, TuiRpcError } from './errors.js'
-export { serve } from './serve.js'
+} from './core/control-plane.js'
+export { TuiLineTransport } from './core/transport.js'
+export type { TuiLineTransportOptions } from './core/transport.js'
+export type { TuiServeOptions } from './core/serve.js'
+export { TuiMethodNotFoundError, TuiRpcError } from './core/errors.js'
+export { serve } from './core/serve.js'
 
 export const name = 'tui-server'
-export const inject = [
-  'sessionController',
-  'settingsController',
-  'credentialsController',
-  'workspaceController',
-  'directoryPickerController',
-  'agents',
-  'commands',
-  'llm',
-  'subagents',
-  'agentPresets',
-  'goals',
-  'sessionFileReferences',
-  'sessionSkillCatalog',
-  'tools',
-]
+export const inject = [...CONTROLLERS_V2_INJECT]
 
 /** Runtime stream overrides used by tests. */
 export interface TuiServerConfig {
@@ -84,7 +76,7 @@ export function apply(ctx: Context, config: TuiServerConfig): void {
     const input = config.input ?? process.stdin
     /* v8 ignore next -- production stdio wiring; tests inject streams */
     const output = config.output ?? process.stdout
-    const bridge = new TuiHarnessBridge(ctx as unknown as TuiHarnessContext)
+    const bridge = new ControllersV2Backend(ctx as unknown as TuiHarnessContext)
     return serve(bridge, input, output, {
       ...config.maxQueuedFrames === undefined ? {} : { maxQueuedFrames: config.maxQueuedFrames },
     })

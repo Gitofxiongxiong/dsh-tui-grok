@@ -1,7 +1,7 @@
 import { Writable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { parseJsonRpcLine } from '@dsh-pager-grok/tui-protocol'
-import { TuiLineTransport } from '../src/transport.ts'
+import { TuiLineTransport } from '../src/core/transport.ts'
 
 describe('TuiLineTransport backpressure', () => {
   it('bounds queued notifications and reports one drop per pressure episode', async () => {

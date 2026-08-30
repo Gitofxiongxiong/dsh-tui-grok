@@ -10,202 +10,60 @@
 
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session/chunk-rows'
 import type {
-  ApiError,
   ApiResult,
   HostFrame,
   MuxFrame,
   SessionId,
   ToolEventView,
-  WorkspaceView,
 } from '@dsh-pager-grok/tui-protocol'
-import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from './backend.js'
+import type { TuiBackend, TuiBackendInfo, TuiMuxEnvelope } from '../../core/backend.js'
+import type {
+  AgentLike,
+  GoalServiceLike,
+  HistoryPage,
+  RecordLike,
+  ToolsLike,
+  TuiHarnessContext,
+  WorkspaceFollowFrame,
+} from './context.js'
+import { CONTROLLERS_V2_DSH_VERSION, CONTROLLERS_V2_INFO } from './plugin.js'
+import {
+  DEFAULT_MAX_MESSAGES,
+  backscanArgs,
+  paginate,
+  recordsToEvents,
+  rememberToolCall,
+  stableJson,
+  type OpeningSnapshot,
+} from './history.js'
+import {
+  apiError,
+  asArray,
+  asOptionalRecord,
+  asRecord,
+  failure,
+  optionalNumber,
+  requireArray,
+  requireMode,
+  requireString,
+  sessionAddedFrame,
+} from './normalize.js'
+import {
+  cloneWorkspaceBaseline,
+  updateWorkspaceBaseline,
+  type WorkspaceBaseline,
+} from './workspace.js'
+import {
+  AsyncQueue,
+} from './streams.js'
+import type { PendingInteraction } from './interactions.js'
+import { callControllersV2Unary } from './unary.js'
 
-const HARNESS_VERSION = '0.1.2-alpha.1'
-const DEFAULT_MAX_MESSAGES = 50
-const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
-
-type RecordLike = Record<string, unknown>
-
-interface SessionControllerLike {
-  list(request: RecordLike, signal: AbortSignal): Promise<{ items: RecordLike[] }>
-  search(request: RecordLike, signal: AbortSignal): Promise<unknown>
-  create(request: RecordLike): Promise<unknown>
-  selectModel(request: RecordLike): Promise<unknown>
-  modelCatalog(): Promise<RecordLike>
-  canOpenWorkspacePath(): boolean
-  openWorkspacePath(request: RecordLike, signal: AbortSignal): Promise<unknown>
-  rename(request: RecordLike): Promise<unknown>
-  fork(request: RecordLike): Promise<unknown>
-  prompt(request: RecordLike, signal: AbortSignal): Promise<unknown>
-  attachment(request: RecordLike): Promise<unknown>
-  updateQueue(request: RecordLike): unknown
-  cancel(request: RecordLike): unknown
-  inspect(sessionId: SessionId, signal?: AbortSignal): Promise<{ meta: RecordLike; events: RecordLike[] }>
-  page(request: RecordLike, signal: AbortSignal): Promise<HistoryPage>
-  follow(request: RecordLike, signal: AbortSignal): AsyncIterable<FollowFrame>
-  control(signal: AbortSignal): AsyncIterable<ControlFrame>
-  resolveAgent(sessionId: SessionId): Promise<{ agent: AgentLike } | { error: ApiError }>
-}
-
-interface WorkspaceControllerLike {
-  create(request: RecordLike): Promise<unknown>
-  rename(request: RecordLike): Promise<unknown>
-  delete(request: RecordLike): Promise<unknown>
-  insertBefore(request: RecordLike): Promise<unknown>
-  insertSessionBefore(request: RecordLike): Promise<unknown>
-  archiveSession(request: RecordLike): Promise<unknown>
-  follow(signal: AbortSignal): AsyncIterable<WorkspaceFollowFrame>
-}
-
-interface DirectoryPickerControllerLike {
-  pick(signal: AbortSignal): Promise<string | null>
-  list(path: string | undefined, signal: AbortSignal): Promise<unknown>
-  createDirectory(path: string, name: string): Promise<string>
-}
-
-interface SettingsControllerLike {
-  describe(): unknown
-  canOpenAgentPresetDirectory(): boolean
-  update(ns: string, patch: RecordLike, expectedRevision: number | undefined): Promise<unknown>
-  replace(ns: string, section: RecordLike, expectedRevision: number | undefined): Promise<unknown>
-  mutate(ns: string, ops: unknown[], expectedRevision: number | undefined): Promise<unknown>
-  openSettingsDocument(signal: AbortSignal): Promise<unknown>
-  openAgentPresetDirectory(agentPreset: string, signal: AbortSignal): Promise<unknown>
-}
-
-interface CredentialsControllerLike {
-  describe(refs: string[]): Promise<Record<string, unknown>>
-  set(ref: string, value: string): Promise<void>
-  unset(ref: string): Promise<void>
-}
-
-interface AgentPresetServiceLike {
-  remoteExportList(): Promise<RecordLike>
-  readDocument(agentPreset: string): Promise<unknown>
-  remoteExportCopy(from: string, id: string, name?: string): Promise<void>
-  remoteExportDelete(id: string): Promise<void>
-  select(agent: AgentLike, agentPreset: string): Promise<string>
-  serviceFor?(agent: AgentLike, name: string): unknown
-}
-
-interface GoalServiceLike {
-  remoteExportCreate(agent: AgentLike, request: RecordLike): unknown
-  edit(agent: AgentLike, ref: unknown, request: RecordLike): RecordLike
-  pause(agent: AgentLike, ref: unknown): RecordLike
-  resume(agent: AgentLike, ref: unknown): RecordLike
-  complete(agent: AgentLike, ref: unknown): RecordLike
-  clear(agent: AgentLike, ref: unknown): unknown
-}
-
-interface LlmServiceLike {
-  listProviders(): RecordLike[]
-  listConfigurableProviders(): RecordLike[]
-  remoteDiscoverModels(settingsNs: string, request: RecordLike, signal: AbortSignal): Promise<unknown[]>
-}
-
-interface SubagentServiceLike {
-  remoteExportList(parentSessionId: SessionId, signal: AbortSignal): Promise<unknown>
-  prompt(request: RecordLike, signal: AbortSignal): Promise<unknown>
-  interruptByParent(childSessionId: SessionId, parentSessionId: SessionId, mode: 'continuable'): unknown
-}
-
-interface CommandsServiceLike {
-  list(agent: AgentLike): readonly unknown[]
-  execute(agent: AgentLike, line: string, images: readonly unknown[], signal: AbortSignal): Promise<unknown>
-}
-
-interface SessionFileReferencesLike {
-  list(agent: AgentLike, query: string, signal: AbortSignal): Promise<unknown[]>
-}
-
-interface SessionSkillCatalogLike {
-  list(request: RecordLike, signal: AbortSignal): Promise<unknown>
-}
-
-interface AgentLike {
-  id: SessionId
-  session?: { events?: readonly RecordLike[] }
-}
-
-interface AgentsLike {
-  get(sessionId: SessionId): AgentLike | undefined
-  list?(): readonly AgentLike[]
-  roots?(): readonly AgentLike[]
-}
-
-interface ToolsLike {
-  get(name: string, scope?: unknown): {
-    presentCall?: (args: unknown) => unknown
-    presentResult?: (args: unknown, result: RecordLike) => unknown
-  } | undefined
-}
-
-/** Structural Host context kept deliberately independent of generated Remote types. */
-export interface TuiHarnessContext {
-  sessionController: SessionControllerLike
-  workspaceController: WorkspaceControllerLike
-  directoryPickerController: DirectoryPickerControllerLike
-  settingsController: SettingsControllerLike
-  credentialsController: CredentialsControllerLike
-  agentPresets?: AgentPresetServiceLike
-  goals?: GoalServiceLike
-  llm: LlmServiceLike
-  subagents: SubagentServiceLike
-  commands: CommandsServiceLike
-  sessionFileReferences?: SessionFileReferencesLike
-  sessionSkillCatalog?: SessionSkillCatalogLike
-  agents: AgentsLike
-  tools?: ToolsLike
-  get?(name: string): unknown
-  on(event: string, listener: (...args: any[]) => unknown): () => void
-}
-
-interface HistoryRecord {
-  type: 'event' | 'chunks'
-  event: RecordLike
-}
-
-interface HistoryPage {
-  records: readonly HistoryRecord[]
-  hasMore: boolean
-}
-
-type FollowFrame =
-  | {
-    type: 'snapshot'
-    header: RecordLike
-    cursor: number
-    records: readonly HistoryRecord[]
-    hasMore: boolean
-    projections: RecordLike
-  }
-  | { type: 'event'; event: RecordLike }
-
-type ControlFrame =
-  | { type: 'baseline'; value: RecordLike }
-  | { type: 'queue'; sessionId: SessionId; items: unknown[] }
-  | { type: 'jobs'; sessionId: SessionId; jobs: unknown[] }
-  | { type: 'projection'; sessionId: SessionId; key: string; value: unknown; seq: number }
-
-type WorkspaceFollowFrame =
-  | { type: 'baseline'; value: { items: WorkspaceView[]; archivedSessionIds: SessionId[] } }
-  | { type: 'upsert'; workspace: WorkspaceView }
-  | { type: 'remove'; workspaceId: string }
-  | { type: 'order'; workspaceIds: string[] }
-  | { type: 'archived'; archivedSessionIds: SessionId[] }
+export type { TuiHarnessContext } from './context.js'
 
 /** Compatibility alias retained for existing direct bridge consumers. */
 export type BridgeMuxEnvelope = TuiMuxEnvelope
-
-interface OpeningSnapshot {
-  header: RecordLike
-  cursor: number
-  records: readonly HistoryRecord[]
-  hasMore: boolean
-  projections: RecordLike
-}
 
 interface FollowerState {
   readonly opening: Promise<OpeningSnapshot>
@@ -214,54 +72,11 @@ interface FollowerState {
   snapshot?: OpeningSnapshot
 }
 
-type PendingInteraction =
-  | {
-    kind: 'approval'
-    id: string
-    sessionId: SessionId
-    approvalId: string
-    request: RecordLike
-    resolve: (value: unknown) => void
-    reject: (error: unknown) => void
-    next: () => unknown
-    disposeAbort?: () => void
-  }
-  | {
-    kind: 'question'
-    id: string
-    sessionId: SessionId
-    request: RecordLike
-    resolve: (value: unknown) => void
-    reject: (error: unknown) => void
-    next: () => unknown
-    disposeAbort?: () => void
-  }
-
 /**
  * Direct in-process adapter for Harness 0.1.2-alpha.1 controllers.
  */
-export class TuiHarnessBridge implements TuiBackend {
-  readonly info: TuiBackendInfo = {
-    adapterFamily: 'controllers-v2',
-    dshVersion: HARNESS_VERSION,
-    profileSchema: 2,
-    capabilities: {
-      sessions: true,
-      workspaces: true,
-      settings: true,
-      credentials: true,
-      agentPresets: true,
-      goals: true,
-      subagents: true,
-      approvals: true,
-      questions: true,
-      queue: true,
-      jobs: true,
-      skills: true,
-      fileReferences: true,
-      directoryPicker: true,
-    },
-  }
+export class ControllersV2Backend implements TuiBackend {
+  readonly info: TuiBackendInfo = CONTROLLERS_V2_INFO
 
   private readonly attached = new Set<string>()
   private readonly followers = new Map<string, FollowerState>()
@@ -270,7 +85,7 @@ export class TuiHarnessBridge implements TuiBackend {
   private readonly hostSubscribers = new Set<AsyncQueue<HostFrame>>()
   private readonly pending = new Map<string, PendingInteraction>()
   private readonly disposers: Array<() => void> = []
-  private workspaceBaselineValue: { items: WorkspaceView[]; archivedSessionIds: SessionId[] } | undefined
+  private workspaceBaselineValue: WorkspaceBaseline | undefined
   private pushSequence = 0
   private disposed = false
 
@@ -343,182 +158,18 @@ export class TuiHarnessBridge implements TuiBackend {
     _operationId: string,
     signal: AbortSignal,
   ): Promise<unknown> {
-    const session = this.ctx.sessionController
-    switch (method) {
-      case 'session.list':
-        return flattenSessionList(await session.list(params, signal))
-      case 'session.search':
-        return await session.search(params, signal)
-      case 'session.create':
-        return await session.create(params)
-      case 'session.history':
-        return await this.sessionHistory(params, signal)
-      case 'session.models':
-        return await this.sessionModels(requireString(params, 'sessionId'), signal)
-      case 'session.selectModel':
-        return await session.selectModel(params)
-      case 'session.rename':
-        return await session.rename(params)
-      case 'session.fork':
-        return await session.fork(params)
-      case 'session.prompt':
-        requireString(params, 'requestId')
-        return await session.prompt(params, signal)
-      case 'session.attachment':
-        return await session.attachment(params)
-      case 'session.updateQueue':
-        return await session.updateQueue(params)
-      case 'session.cancel':
-        return await session.cancel(params)
-      case 'subagent.list':
-        return await this.ctx.subagents.remoteExportList(
-          requireString(params, 'parentSessionId') as SessionId,
-          signal,
-        )
-      case 'subagent.history':
-        return await this.subagentHistory(params, signal)
-      case 'subagent.prompt':
-        requireString(params, 'requestId')
-        return await this.ctx.subagents.prompt(params, signal)
-      case 'subagent.interrupt':
-        return this.ctx.subagents.interruptByParent(
-          requireString(params, 'childSessionId') as SessionId,
-          requireString(params, 'parentSessionId') as SessionId,
-          requireContinuable(params),
-        )
-      case 'host.describe':
-        return await this.hostDescription()
-      case 'host.pickDirectory':
-        return { path: await this.ctx.directoryPickerController.pick(signal) }
-      case 'host.listDirectory':
-        return await this.ctx.directoryPickerController.list(optionalString(params, 'path'), signal)
-      case 'host.createDirectory':
-        return {
-          path: await this.ctx.directoryPickerController.createDirectory(
-            requireString(params, 'path'),
-            requireString(params, 'name'),
-          ),
-        }
-      case 'host.openPath':
-        return await session.openWorkspacePath({ path: requireString(params, 'path') }, signal)
-      case 'workspace.list':
-        return await this.workspaceBaseline(signal)
-      case 'workspace.create':
-        return await this.ctx.workspaceController.create(params)
-      case 'workspace.rename':
-        return await this.ctx.workspaceController.rename(params)
-      case 'workspace.delete':
-        return await this.ctx.workspaceController.delete(params)
-      case 'workspace.insertBefore':
-        return await this.ctx.workspaceController.insertBefore(params)
-      case 'workspace.insertSessionBefore':
-        return await this.ctx.workspaceController.insertSessionBefore(params)
-      case 'workspace.archiveSession':
-        return await this.ctx.workspaceController.archiveSession(params)
-      case 'skill.list':
-        return await this.requireService(this.ctx.sessionSkillCatalog, 'session skill catalog')
-          .list({ sessionId: requireString(params, 'sessionId') }, signal)
-      case 'fileReferences.list': {
-        const agent = await this.resolveAgent(requireString(params, 'sessionId') as SessionId)
-        const items = await this.requireService(this.ctx.sessionFileReferences, 'file reference service')
-          .list(agent, requireString(params, 'query'), signal)
-        return { items }
-      }
-      case 'commands/list': {
-        const agent = await this.resolveAgent(agentId(params))
-        return this.ctx.commands.list(agent)
-      }
-      case 'commands/execute': {
-        const agent = await this.resolveAgent(agentId(params))
-        const line = requireString(params, 'line')
-        const images = Array.isArray(params.images) ? params.images : []
-        const execution = await this.ctx.commands.execute(agent, line, images, signal)
-        return { matched: execution !== undefined, execution: execution ?? null }
-      }
-      case 'agentPreset.list':
-        return await this.agentPresetList()
-      case 'agentPreset.select': {
-        const presets = this.requireService(this.ctx.agentPresets, 'agent preset service')
-        const agent = await this.resolveAgent(requireString(params, 'sessionId') as SessionId)
-        return { agentPreset: await presets.select(agent, requireString(params, 'agentPreset')) }
-      }
-      case 'agentPreset.read':
-        return await this.requireService(this.ctx.agentPresets, 'agent preset service')
-          .readDocument(requireString(params, 'agentPreset'))
-      case 'agentPreset.copy': {
-        const presets = this.requireService(this.ctx.agentPresets, 'agent preset service')
-        const id = requireString(params, 'agentPreset')
-        await presets.remoteExportCopy(
-          requireString(params, 'from'), id, optionalString(params, 'name'),
-        )
-        return { agentPreset: id }
-      }
-      case 'agentPreset.openDocument':
-        return await this.ctx.settingsController.openAgentPresetDirectory(
-          requireString(params, 'agentPreset'), signal,
-        )
-      case 'agentPreset.remove':
-        await this.requireService(this.ctx.agentPresets, 'agent preset service')
-          .remoteExportDelete(requireString(params, 'agentPreset'))
-        return {}
-      case 'goal.create':
-        return await this.mutateGoal(params, (goals, agent) => goals.remoteExportCreate(agent, {
-          objective: requireString(params, 'objective'),
-          ...params.maxGoalRounds === undefined ? {} : { maxGoalRounds: params.maxGoalRounds },
-        }), true)
-      case 'goal.edit':
-        return await this.mutateGoal(params, (goals, agent) => goals.edit(agent, params.ref, {
-          ...params.objective === undefined ? {} : { objective: params.objective },
-          ...params.maxGoalRounds === undefined ? {} : { maxGoalRounds: params.maxGoalRounds },
-        }))
-      case 'goal.pause':
-        return await this.mutateGoal(params, (goals, agent) => goals.pause(agent, params.ref))
-      case 'goal.resume':
-        return await this.mutateGoal(params, (goals, agent) => goals.resume(agent, params.ref))
-      case 'goal.complete':
-        return await this.mutateGoal(params, (goals, agent) => goals.complete(agent, params.ref))
-      case 'goal.clear':
-        await this.mutateGoal(params, (goals, agent) => goals.clear(agent, params.ref), true)
-        return { cleared: true }
-      case 'settings.describe':
-        return this.ctx.settingsController.describe()
-      case 'settings.openDocument':
-        return await this.ctx.settingsController.openSettingsDocument(signal)
-      case 'settings.update':
-        return await this.ctx.settingsController.update(
-          requireString(params, 'ns'), requireRecord(params, 'patch'), optionalNumber(params, 'expectedRevision'),
-        )
-      case 'settings.replace':
-        return await this.ctx.settingsController.replace(
-          requireString(params, 'ns'), requireRecord(params, 'section'), optionalNumber(params, 'expectedRevision'),
-        )
-      case 'settings.mutate':
-        return await this.ctx.settingsController.mutate(
-          requireString(params, 'ns'), requireArray(params, 'ops'), optionalNumber(params, 'expectedRevision'),
-        )
-      case 'credentials.describe':
-        return { credentials: await this.ctx.credentialsController.describe(requireStringArray(params, 'refs')) }
-      case 'credentials.set':
-        await this.ctx.credentialsController.set(requireString(params, 'ref'), requireString(params, 'value'))
-        return {}
-      case 'credentials.unset':
-        await this.ctx.credentialsController.unset(requireString(params, 'ref'))
-        return {}
-      case 'llm.providers':
-        return { providers: this.providerDirectory() }
-      case 'llm.models': {
-        const catalog = await session.modelCatalog()
-        return { groups: catalog.groups ?? [], failures: catalog.failures ?? [] }
-      }
-      case 'llm.discoverModels': {
-        const settingsNs = requireString(params, 'settingsNs')
-        const request = { ...params }
-        delete request.settingsNs
-        return { models: await this.ctx.llm.remoteDiscoverModels(settingsNs, request, signal) }
-      }
-      default:
-        throw failure('bad-request', `unsupported TUI API method "${method}"`)
-    }
+    return await callControllersV2Unary(this.ctx, method, params, signal, {
+      sessionHistory: (value, abort) => this.sessionHistory(value, abort),
+      sessionModels: (sessionId, abort) => this.sessionModels(sessionId, abort),
+      subagentHistory: (value, abort) => this.subagentHistory(value, abort),
+      hostDescription: () => this.hostDescription(),
+      workspaceBaseline: abort => this.workspaceBaseline(abort),
+      agentPresetList: () => this.agentPresetList(),
+      mutateGoal: (value, mutate, alreadyRef) => this.mutateGoal(value, mutate, alreadyRef),
+      providerDirectory: () => this.providerDirectory(),
+      resolveAgent: sessionId => this.resolveAgent(sessionId),
+      requireService: <Value>(value: Value | undefined, label: string) => this.requireService(value, label),
+    })
   }
 
   /** Opening snapshot followed by gap-free live event frames. */
@@ -810,7 +461,7 @@ export class TuiHarnessBridge implements TuiBackend {
     const selection = asOptionalRecord(catalog.default)
     const agents = this.ctx.agents.list?.() ?? this.ctx.agents.roots?.() ?? []
     return {
-      version: HARNESS_VERSION,
+      version: CONTROLLERS_V2_DSH_VERSION,
       cwd: process.cwd(),
       ...typeof selection?.provider === 'string' ? { provider: selection.provider } : {},
       ...typeof selection?.model === 'string' ? { model: selection.model } : {},
@@ -879,14 +530,14 @@ export class TuiHarnessBridge implements TuiBackend {
     return value
   }
 
-  private async workspaceBaseline(signal: AbortSignal): Promise<RecordLike> {
+  private async workspaceBaseline(signal: AbortSignal): Promise<unknown> {
     if (this.workspaceBaselineValue !== undefined) return cloneWorkspaceBaseline(this.workspaceBaselineValue)
     const opening = await this.readWorkspaceOpening(signal)
     this.workspaceBaselineValue = opening
     return cloneWorkspaceBaseline(opening)
   }
 
-  private async readWorkspaceOpening(signal: AbortSignal): Promise<{ items: WorkspaceView[]; archivedSessionIds: SessionId[] }> {
+  private async readWorkspaceOpening(signal: AbortSignal): Promise<WorkspaceBaseline> {
     const controller = new AbortController()
     const unlink = linkAbort(signal, controller)
     try {
@@ -975,20 +626,7 @@ export class TuiHarnessBridge implements TuiBackend {
 
   private updateWorkspaceCache(frame: Exclude<WorkspaceFollowFrame, { type: 'baseline' }>): void {
     if (this.workspaceBaselineValue === undefined) return
-    if (frame.type === 'upsert') {
-      const index = this.workspaceBaselineValue.items.findIndex(row => row.workspaceId === frame.workspace.workspaceId)
-      if (index < 0) this.workspaceBaselineValue.items.push(frame.workspace)
-      else this.workspaceBaselineValue.items[index] = frame.workspace
-    } else if (frame.type === 'remove') {
-      this.workspaceBaselineValue.items = this.workspaceBaselineValue.items
-        .filter(row => row.workspaceId !== frame.workspaceId)
-    } else if (frame.type === 'order') {
-      const rows = new Map(this.workspaceBaselineValue.items.map(row => [row.workspaceId, row]))
-      this.workspaceBaselineValue.items = frame.workspaceIds
-        .map(id => rows.get(id)).filter((row): row is WorkspaceView => row !== undefined)
-    } else {
-      this.workspaceBaselineValue.archivedSessionIds = [...frame.archivedSessionIds]
-    }
+    updateWorkspaceBaseline(this.workspaceBaselineValue, frame)
   }
 
   private installHostEvents(): void {
@@ -1116,269 +754,15 @@ export class TuiHarnessBridge implements TuiBackend {
   }
 }
 
+/** @deprecated Use ControllersV2Backend for new adapter-aware code. */
+export { ControllersV2Backend as TuiHarnessBridge }
+
 function followerState(): FollowerState {
   const settled = deferred<OpeningSnapshot>()
   // A detach may reject before history starts waiting; mark it observed while
   // preserving rejection for later awaiters.
   void settled.promise.catch(() => undefined)
   return { opening: settled.promise, resolve: settled.resolve, reject: settled.reject }
-}
-
-function recordsToEvents(records: readonly HistoryRecord[]): RecordLike[] {
-  const events: RecordLike[] = []
-  for (const record of records) {
-    if (record.type === 'event') {
-      events.push(record.event)
-      continue
-    }
-    const event = record.event
-    const type = typeof event.type === 'string' ? event.type.replace(/^chunkrow\//, '') : ''
-    const expanded = decodeStorageRecord({
-      type,
-      seq0: event.seq,
-      time0: event.time,
-      data: event.data,
-    })
-    events.push(...expanded as unknown as RecordLike[])
-  }
-  return events
-}
-
-function paginate(
-  events: readonly RecordLike[],
-  beforeSeq: number | undefined,
-  maxMessages: number,
-): { events: RecordLike[]; hasMore: boolean } {
-  const window = beforeSeq === undefined
-    ? [...events]
-    : events.filter(event => typeof event.seq !== 'number' || event.seq < beforeSeq)
-  let count = 0
-  let cut = 0
-  for (let index = window.length - 1; index >= 0; index -= 1) {
-    const event = window[index] as RecordLike
-    if (typeof event.type !== 'string' || !MESSAGE_TYPES.has(event.type)) continue
-    count += 1
-    let groupStart = typeof event.seq === 'number' ? event.seq : 0
-    if (Array.isArray(event.sourceEventSeqs)) {
-      for (const source of event.sourceEventSeqs) {
-        if (typeof source === 'number' && source < groupStart) groupStart = source
-      }
-    }
-    if (count >= maxMessages) {
-      cut = groupStart
-      break
-    }
-  }
-  return {
-    events: window.filter(event => typeof event.seq !== 'number' || event.seq >= cut),
-    hasMore: cut > 0,
-  }
-}
-
-function rememberToolCall(
-  calls: Map<string, { name: string; args: unknown }>,
-  event: RecordLike,
-): void {
-  if (event.type === 'turn/end') {
-    calls.clear()
-    return
-  }
-  if (event.type !== 'tool/call') return
-  try {
-    const data = asRecord(event.data)
-    calls.set(requireString(data, 'callId'), {
-      name: requireString(data, 'name'),
-      args: JSON.parse(requireString(data, 'arguments')),
-    })
-  } catch {
-    // Generic tool cards cover malformed stored arguments.
-  }
-}
-
-function backscanArgs(
-  events: readonly RecordLike[],
-  callId: string,
-): { name: string; args: unknown } | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index] as RecordLike
-    if (event.type !== 'tool/call') continue
-    try {
-      const data = asRecord(event.data)
-      if (data.callId !== callId) continue
-      return { name: requireString(data, 'name'), args: JSON.parse(requireString(data, 'arguments')) }
-    } catch {
-      return undefined
-    }
-  }
-  return undefined
-}
-
-function flattenSessionList(value: { items: RecordLike[] }): RecordLike {
-  return {
-    items: value.items.map((row) => {
-      const projections = asOptionalRecord(row.projections)
-      const values = asOptionalRecord(projections?.values)
-      const projected = values?.agentPreset
-      return {
-        ...row,
-        ...typeof projected === 'string'
-          ? { agentPreset: projected }
-          : typeof row.agentPreset === 'string' ? { agentPreset: row.agentPreset } : {},
-      }
-    }),
-  }
-}
-
-function sessionAddedFrame(summary: RecordLike): HostFrame {
-  const projections = asOptionalRecord(summary.projections)
-  const values = asOptionalRecord(projections?.values)
-  const projected = values?.agentPreset
-  return {
-    type: 'host/session-added',
-    sessionId: requireString(summary, 'sessionId') as SessionId,
-    blank: summary.blank === true,
-    ...typeof summary.parentSessionId === 'string' ? { parentSessionId: summary.parentSessionId as SessionId } : {},
-    ...summary.origin === 'subagent' ? { origin: 'subagent' as const } : {},
-    ...typeof summary.cwd === 'string' ? { cwd: summary.cwd } : {},
-    ...typeof projected === 'string' ? { agentPreset: projected } : {},
-  }
-}
-
-function cloneWorkspaceBaseline(
-  value: { items: WorkspaceView[]; archivedSessionIds: SessionId[] },
-): { items: WorkspaceView[]; archivedSessionIds: SessionId[] } {
-  return {
-    items: value.items.map(row => ({ ...row, sessionIds: [...row.sessionIds] })),
-    archivedSessionIds: [...value.archivedSessionIds],
-  }
-}
-
-function apiError(error: unknown, signal: AbortSignal): ApiError {
-  if (signal.aborted) {
-    return { code: 'cancelled', message: 'operation was cancelled', details: {} }
-  }
-  if (typeof error === 'object' && error !== null) {
-    const failureValue = (error as { failure?: unknown }).failure
-    if (isFailure(failureValue)) return failureValue
-    if (isFailure(error)) return error
-    const code = (error as { code?: unknown }).code
-    if (typeof code === 'string') {
-      return {
-        code: code.startsWith('GOAL_') ? 'internal' : code.toLowerCase().replaceAll('_', '-'),
-        message: error instanceof Error ? error.message : String(error),
-        details: code.startsWith('GOAL_') ? { goalCode: code } : {},
-      }
-    }
-  }
-  return {
-    code: 'internal',
-    message: error instanceof Error ? error.message : String(error),
-    details: {},
-  }
-}
-
-function isFailure(value: unknown): value is ApiError {
-  return typeof value === 'object'
-    && value !== null
-    && typeof (value as RecordLike).code === 'string'
-    && typeof (value as RecordLike).message === 'string'
-    && Object.hasOwn(value, 'details')
-}
-
-function failure(code: string, message: string, details: unknown = {}): { failure: ApiError } {
-  return { failure: { code, message, details } }
-}
-
-function asRecord(value: unknown): RecordLike {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw failure('bad-request', 'request payload must be an object')
-  }
-  return value as RecordLike
-}
-
-function asOptionalRecord(value: unknown): RecordLike | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as RecordLike
-    : undefined
-}
-
-function requireRecord(value: RecordLike, key: string): RecordLike {
-  try {
-    return asRecord(value[key])
-  } catch {
-    throw failure('bad-request', `${key} must be an object`)
-  }
-}
-
-function requireString(value: RecordLike, key: string): string {
-  const item = value[key]
-  if (typeof item !== 'string' || item.length === 0) {
-    throw failure('bad-request', `${key} must be a non-empty string`)
-  }
-  return item
-}
-
-function optionalString(value: RecordLike, key: string): string | undefined {
-  const item = value[key]
-  if (item === undefined) return undefined
-  if (typeof item !== 'string') throw failure('bad-request', `${key} must be a string`)
-  return item
-}
-
-function optionalNumber(value: RecordLike, key: string): number | undefined {
-  const item = value[key]
-  if (item === undefined) return undefined
-  if (typeof item !== 'number' || !Number.isSafeInteger(item)) {
-    throw failure('bad-request', `${key} must be a safe integer`)
-  }
-  return item
-}
-
-function requireArray(value: RecordLike, key: string): unknown[] {
-  const item = value[key]
-  if (!Array.isArray(item)) throw failure('bad-request', `${key} must be an array`)
-  return item
-}
-
-function requireStringArray(value: RecordLike, key: string): string[] {
-  const items = requireArray(value, key)
-  if (items.some(item => typeof item !== 'string')) {
-    throw failure('bad-request', `${key} must contain only strings`)
-  }
-  return items as string[]
-}
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : []
-}
-
-function agentId(params: RecordLike): SessionId {
-  const value = typeof params.agentId === 'string' ? params.agentId : params.sessionId
-  if (typeof value !== 'string' || value.length === 0) {
-    throw failure('bad-request', 'agentId is required')
-  }
-  return value as SessionId
-}
-
-function requireMode(params: RecordLike): 'one-shot' | 'continuable' {
-  if (params.mode === 'one-shot' || params.mode === 'continuable') return params.mode
-  throw failure('bad-request', 'mode must be one-shot or continuable')
-}
-
-function requireContinuable(params: RecordLike): 'continuable' {
-  if (params.mode === 'continuable') return params.mode
-  throw failure('bad-request', 'subagent interrupt requires continuable mode')
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value as RecordLike)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value)
 }
 
 function linkAbort(source: AbortSignal, target: AbortController): () => void {
@@ -1412,46 +796,4 @@ function deferred<Value>(): {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
-}
-
-class AsyncQueue<Value> {
-  private readonly values: Value[] = []
-  private waiter: (() => void) | undefined
-  private closed = false
-  private error: unknown
-
-  push(value: Value): void {
-    if (this.closed) return
-    this.values.push(value)
-    this.waiter?.()
-  }
-
-  close(): void {
-    if (this.closed) return
-    this.closed = true
-    this.waiter?.()
-  }
-
-  fail(error: unknown): void {
-    this.error = error
-    this.close()
-  }
-
-  async *read(signal: AbortSignal): AsyncIterable<Value> {
-    const wake = (): void => this.waiter?.()
-    signal.addEventListener('abort', wake, { once: true })
-    try {
-      while (!signal.aborted) {
-        while (this.values.length > 0) yield this.values.shift() as Value
-        if (this.closed) {
-          if (this.error !== undefined) throw this.error
-          return
-        }
-        await new Promise<void>(resolve => { this.waiter = resolve })
-        this.waiter = undefined
-      }
-    } finally {
-      signal.removeEventListener('abort', wake)
-    }
-  }
 }

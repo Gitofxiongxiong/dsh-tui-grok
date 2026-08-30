@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SessionId, type MuxFrame } from '@dsh-pager-grok/tui-protocol'
-import { TuiHarnessBridge, type TuiHarnessContext } from '../src/bridge.ts'
+import {
+  TuiHarnessBridge,
+  type TuiHarnessContext,
+} from '../src/adapters/controllers-v2/backend.ts'
 
 type RecordLike = Record<string, unknown>
 type Listener = (...args: unknown[]) => unknown
