@@ -487,13 +487,13 @@ impl SessionState {
                 .collect::<Vec<_>>(),
             None => Vec::new(),
         };
-        if let (Some(last), Some(base)) = (prefix.last(), new_base) {
-            if last.event.seq + 1 != base {
-                // The old window has a hole relative to the fresh tail. Drop the
-                // stale prefix and show the coherent page; retaining it would
-                // expose an out-of-order transcript.
-                prefix.clear();
-            }
+        if let (Some(last), Some(base)) = (prefix.last(), new_base)
+            && last.event.seq + 1 != base
+        {
+            // The old window has a hole relative to the fresh tail. Drop the
+            // stale prefix and show the coherent page; retaining it would
+            // expose an out-of-order transcript.
+            prefix.clear();
         }
         prefix.extend(page.events);
         validate_page(&prefix)?;
@@ -892,18 +892,17 @@ impl SessionState {
     }
 
     fn upsert_interaction(&mut self, interaction: PendingInteraction) -> bool {
-        if interaction.kind == InteractionKind::Approval {
-            if let Some(approval_id) = interaction.approval_id.as_deref() {
-                // approvalId is stable across mux replay; the transport
-                // request id is not guaranteed to be, so replaying an
-                // approval must not create a second answerable row.
-                if self.pending_interactions.iter().any(|existing| {
-                    existing.kind == InteractionKind::Approval
-                        && existing.approval_id.as_deref() == Some(approval_id)
-                }) {
-                    return false;
-                }
-            }
+        if interaction.kind == InteractionKind::Approval
+            && let Some(approval_id) = interaction.approval_id.as_deref()
+            && self.pending_interactions.iter().any(|existing| {
+                existing.kind == InteractionKind::Approval
+                    && existing.approval_id.as_deref() == Some(approval_id)
+            })
+        {
+            // approvalId is stable across mux replay; the transport request id
+            // is not guaranteed to be, so replaying an approval must not create
+            // a second answerable row.
+            return false;
         }
         if interaction.request_id.is_empty() {
             if self

@@ -215,14 +215,14 @@ fn resolve_backend(
             Some(trimmed)
         }
     };
-    if program.is_none() {
-        if let Some(from_env) = tui_server {
-            let mut parts = from_env.split_whitespace();
-            if let Some(first) = parts.next() {
-                program = Some(first.to_string());
-                if program_args.is_empty() {
-                    program_args = parts.map(str::to_string).collect();
-                }
+    if program.is_none()
+        && let Some(from_env) = tui_server
+    {
+        let mut parts = from_env.split_whitespace();
+        if let Some(first) = parts.next() {
+            program = Some(first.to_string());
+            if program_args.is_empty() {
+                program_args = parts.map(str::to_string).collect();
             }
         }
     }

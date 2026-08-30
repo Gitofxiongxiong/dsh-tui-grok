@@ -800,10 +800,10 @@ impl ControlPlaneStore {
         // A cursor is meaningful only for a session that was present in the
         // retained baseline. Treat an unknown id as a cache miss instead of
         // accidentally accepting an empty iterator as a lossless resume.
-        if let Some(session_id) = session_id {
-            if !self.sessions.contains_key(session_id) {
-                return false;
-            }
+        if let Some(session_id) = session_id
+            && !self.sessions.contains_key(session_id)
+        {
+            return false;
         }
         let targets = self
             .sessions
@@ -1034,11 +1034,8 @@ impl ControlPlaneStore {
         match frame_type {
             "session/event" => {
                 duplicate = event_duplicate;
-                if !duplicate {
-                    if let Some(seq) = seq {
-                        snapshot.last_seen_seq =
-                            Some(snapshot.last_seen_seq.unwrap_or(seq).max(seq));
-                    }
+                if !duplicate && let Some(seq) = seq {
+                    snapshot.last_seen_seq = Some(snapshot.last_seen_seq.unwrap_or(seq).max(seq));
                 }
             }
             "session/subscribed" => {

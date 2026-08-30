@@ -940,13 +940,14 @@ fn api_call<T: DeserializeOwned>(
     let raw = transport.call_value(method, params)?;
     let control_value = raw.clone();
     let envelope: ApiResult<T> = serde_json::from_value(raw)?;
-    if envelope.ok && method == "workspace.list" {
-        if let Some(value) = control_value.get("value") {
-            transport
-                .control_plane_mut()
-                .store
-                .seed_workspace_list(value)?;
-        }
+    if envelope.ok
+        && method == "workspace.list"
+        && let Some(value) = control_value.get("value")
+    {
+        transport
+            .control_plane_mut()
+            .store
+            .seed_workspace_list(value)?;
     }
     envelope.into_result().map_err(PagerError::from)
 }

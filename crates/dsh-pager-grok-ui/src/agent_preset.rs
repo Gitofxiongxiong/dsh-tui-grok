@@ -15,10 +15,10 @@ pub fn builtin_agent_preset_label(id: &str) -> Option<&'static str> {
 
 /// Prefer the roster's published name, then the shipped Chinese label, then the id.
 pub fn agent_preset_label(id: &str, roster: &[AgentPresetEntry]) -> String {
-    if let Some(entry) = roster.iter().find(|entry| entry.id == id) {
-        if let Some(name) = entry.name.as_deref().filter(|name| !name.trim().is_empty()) {
-            return name.to_string();
-        }
+    if let Some(entry) = roster.iter().find(|entry| entry.id == id)
+        && let Some(name) = entry.name.as_deref().filter(|name| !name.trim().is_empty())
+    {
+        return name.to_string();
     }
     builtin_agent_preset_label(id).unwrap_or(id).to_string()
 }

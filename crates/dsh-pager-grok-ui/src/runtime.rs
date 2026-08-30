@@ -2632,6 +2632,7 @@ impl UiState {
         (hints, help_hint)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_blocking_card_shortcuts(
         &self,
         frame: &mut Frame<'_>,
@@ -6491,9 +6492,11 @@ mod tests {
 
     #[test]
     fn agent_overlay_close_click_accepts_button_and_title_corner() {
-        let mut modal = ModalWindowState::default();
-        modal.popup_area = Some(Rect::new(10, 4, 60, 20));
-        modal.close_button_rect = Some(Rect::new(63, 4, 5, 1));
+        let modal = ModalWindowState {
+            popup_area: Some(Rect::new(10, 4, 60, 20)),
+            close_button_rect: Some(Rect::new(63, 4, 5, 1)),
+            ..ModalWindowState::default()
+        };
         assert!(agent_overlay_close_click(
             &modal,
             &mouse(MouseEventKind::Down(MouseButton::Left), 65, 4)
@@ -6594,14 +6597,14 @@ mod tests {
         assert!(hints.iter().any(|hint| hint.label == "yolo"));
         assert!(!hints.iter().any(|hint| hint.label == "mode"));
         assert!(
-            ui.prompt_flags(&snapshot, &Theme::current())[0]
+            ui.prompt_flags(&snapshot, Theme::current())[0]
                 .text
                 .ends_with(" ▾")
         );
 
         ui.preset_locked_locally = true;
         assert!(
-            !ui.prompt_flags(&snapshot, &Theme::current())[0]
+            !ui.prompt_flags(&snapshot, Theme::current())[0]
                 .text
                 .ends_with(" ▾")
         );

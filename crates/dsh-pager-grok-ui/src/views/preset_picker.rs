@@ -26,7 +26,7 @@ pub enum PresetPickerOutcome {
     Unchanged,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PresetPickerState {
     picker: PickerState,
     window: crate::modal_window_state::ModalWindowState,
@@ -35,20 +35,6 @@ pub struct PresetPickerState {
     error: Option<String>,
     current: Option<String>,
     list_revision: u64,
-}
-
-impl Default for PresetPickerState {
-    fn default() -> Self {
-        Self {
-            picker: PickerState::default(),
-            window: crate::modal_window_state::ModalWindowState::new(),
-            options: Vec::new(),
-            loading: false,
-            error: None,
-            current: None,
-            list_revision: 0,
-        }
-    }
 }
 
 impl PresetPickerState {

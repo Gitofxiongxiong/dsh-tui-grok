@@ -89,14 +89,11 @@ pub fn require_node() -> io::Result<()> {
         .output()
     {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "node is required for protocol mock tests; `node -e process.exit(0)` exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        )),
+        Ok(output) => Err(io::Error::other(format!(
+            "node is required for protocol mock tests; `node -e process.exit(0)` exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ))),
         Err(error) => Err(io::Error::new(
             error.kind(),
             format!(
