@@ -171,7 +171,7 @@ export function createControllersV2Fixture(): AdapterConformanceFixture {
       select: async (_agent: unknown, id: string) => id,
     },
     goals: {
-      remoteExportCreate: () => ({ id: 'goal-1', revision: 1 }),
+      remoteExportCreate: () => ({ ref: { id: 'goal-1', revision: 1 } }),
       edit: () => ({ id: 'goal-1', revision: 2 }),
       pause: () => ({ id: 'goal-1', revision: 2 }),
       resume: () => ({ id: 'goal-1', revision: 2 }),
@@ -217,12 +217,16 @@ export function createControllersV2Fixture(): AdapterConformanceFixture {
     },
   } as unknown as TuiHarnessContext
 
+  const backend = new ControllersV2Backend(context)
   return {
-    backend: new ControllersV2Backend(context),
+    backend,
     sessionId: CONFORMANCE_SESSION_ID,
     agent,
     calls,
     setSessionFollow(frames) { sessionFollow = frames },
+    sessionFrames(signal) {
+      return backend.followSession(CONFORMANCE_SESSION_ID, signal)[Symbol.asyncIterator]()
+    },
     setControl(frames) { control = frames },
     setWorkspace(frames) { workspace = frames },
     setPromptMode(mode) { promptMode = mode },

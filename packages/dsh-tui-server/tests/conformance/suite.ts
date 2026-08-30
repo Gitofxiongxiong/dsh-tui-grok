@@ -67,7 +67,7 @@ export function registerAdapterConformance(
       }], 4)])
       const abort = new AbortController()
       f.backend.attachSession(f.sessionId)
-      const follower = f.backend.followSession(f.sessionId, abort.signal)[Symbol.asyncIterator]()
+      const follower = f.sessionFrames(abort.signal)
       try {
         await expect(follower.next()).resolves.toMatchObject({
           value: { frame: { type: 'session/subscribed', sessionId: f.sessionId, lastSeq: 4 } },
@@ -113,7 +113,7 @@ export function registerAdapterConformance(
       ])
       const abort = new AbortController()
       f.backend.attachSession(f.sessionId)
-      const follower = f.backend.followSession(f.sessionId, abort.signal)[Symbol.asyncIterator]()
+      const follower = f.sessionFrames(abort.signal)
       try {
         const history = f.backend.call('session.history', { sessionId: f.sessionId }, 'barrier', abort.signal)
         await expect(follower.next()).resolves.toMatchObject({ value: { frame: { lastSeq: 4 } } })
@@ -322,7 +322,9 @@ export function registerAdapterConformance(
         })
         await expect(f.backend.call('goal.create', {
           sessionId: f.sessionId, objective: 'Ship it',
-        }, 'goal', signal)).resolves.toEqual({ ok: true, value: { id: 'goal-1', revision: 1 } })
+        }, 'goal', signal)).resolves.toEqual({
+          ok: true, value: { ref: { id: 'goal-1', revision: 1 } },
+        })
         await expect(f.backend.call('subagent.list', {
           parentSessionId: f.sessionId,
         }, 'subagents', signal)).resolves.toEqual({
