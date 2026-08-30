@@ -9,26 +9,12 @@ import type {
   HostFrame,
   MuxFrame,
   SessionId,
+  TuiCapability,
   TuiUnaryMethod,
 } from '@dsh-pager-grok/tui-protocol'
 
 /** Product capabilities implemented by one DSH adapter. */
-export interface TuiCapabilities {
-  sessions: boolean
-  workspaces: boolean
-  settings: boolean
-  credentials: boolean
-  agentPresets: boolean
-  goals: boolean
-  subagents: boolean
-  approvals: boolean
-  questions: boolean
-  queue: boolean
-  jobs: boolean
-  skills: boolean
-  fileReferences: boolean
-  directoryPicker: boolean
-}
+export type TuiCapabilities = Record<TuiCapability, boolean>
 
 /** Stable identity and capability evidence for one backend instance. */
 export interface TuiBackendInfo {

@@ -617,4 +617,39 @@ describe('dispatchUnary', () => {
       method: 'session.list', params: { cursor: 1 }, operationId: 'operation-7',
     }])
   })
+
+  it('returns a stable business error without dispatching a disabled capability', async () => {
+    const fake = new FakeBridge()
+    const gated = new Proxy(fake, {
+      get(target, property) {
+        if (property === 'info') {
+          return {
+            ...target.info,
+            capabilities: { ...target.info.capabilities, fileReferences: false },
+          }
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as TuiBackend
+    await expect(dispatchUnary(
+      gated,
+      'fileReferences.list',
+      { sessionId, query: 'main' },
+      'operation-disabled',
+    )).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'unsupported-capability',
+        message: 'fileReferences.list requires the fileReferences capability',
+        details: {
+          method: 'fileReferences.list',
+          capability: 'fileReferences',
+          adapterFamily: 'controllers-v2',
+          dshVersion: 'test',
+        },
+      },
+    })
+    expect(fake.calls).toEqual([])
+  })
 })

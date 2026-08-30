@@ -4,7 +4,11 @@
  * @module @dsh-pager-grok/tui-server/dispatch
  */
 
-import type { ApiResult, TuiUnaryMethod } from '@dsh-pager-grok/tui-protocol'
+import {
+  capabilityForTuiUnaryMethod,
+  type ApiResult,
+  type TuiUnaryMethod,
+} from '@dsh-pager-grok/tui-protocol'
 import type { TuiBackend } from './backend.js'
 
 /** Forward one legacy unary call through the selected adapter. */
@@ -15,6 +19,22 @@ export function dispatchUnary(
   operationId: string,
   signal: AbortSignal = new AbortController().signal,
 ): Promise<ApiResult> {
+  const capability = capabilityForTuiUnaryMethod(method)
+  if (!bridge.info.capabilities[capability]) {
+    return Promise.resolve({
+      ok: false,
+      error: {
+        code: 'unsupported-capability',
+        message: `${method} requires the ${capability} capability`,
+        details: {
+          method,
+          capability,
+          adapterFamily: bridge.info.adapterFamily,
+          dshVersion: bridge.info.dshVersion,
+        },
+      },
+    })
+  }
   return bridge.call(method, params, operationId, signal)
 }
 

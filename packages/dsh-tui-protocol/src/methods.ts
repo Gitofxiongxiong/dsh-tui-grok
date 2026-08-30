@@ -71,6 +71,96 @@ export const TUI_UNARY_METHOD_SET = {
 
 export type TuiUnaryMethod = keyof typeof TUI_UNARY_METHOD_SET
 
+/** Product capability names advertised by every DSH adapter family. */
+export const TUI_CAPABILITY_SET = {
+  sessions: true,
+  workspaces: true,
+  settings: true,
+  credentials: true,
+  agentPresets: true,
+  goals: true,
+  subagents: true,
+  approvals: true,
+  questions: true,
+  queue: true,
+  jobs: true,
+  skills: true,
+  fileReferences: true,
+  directoryPicker: true,
+} as const
+
+export type TuiCapability = keyof typeof TUI_CAPABILITY_SET
+
+/**
+ * Capability required before core forwards one unary call to an adapter.
+ *
+ * TUI connection-control methods deliberately do not appear here: hello,
+ * attach, detach, subscribe, and respond remain stable transport/control
+ * operations rather than optional product features.
+ */
+export const TUI_METHOD_CAPABILITY_MAP = {
+  'session.list': 'sessions',
+  'session.search': 'sessions',
+  'session.create': 'sessions',
+  'session.history': 'sessions',
+  'session.models': 'sessions',
+  'session.selectModel': 'sessions',
+  'session.rename': 'sessions',
+  'session.fork': 'sessions',
+  'session.prompt': 'sessions',
+  'session.attachment': 'sessions',
+  'session.updateQueue': 'queue',
+  'session.cancel': 'sessions',
+  'subagent.list': 'subagents',
+  'subagent.history': 'subagents',
+  'subagent.prompt': 'subagents',
+  'subagent.interrupt': 'subagents',
+  'host.describe': 'sessions',
+  'host.pickDirectory': 'directoryPicker',
+  'host.listDirectory': 'directoryPicker',
+  'host.createDirectory': 'directoryPicker',
+  'host.openPath': 'directoryPicker',
+  'fileReferences.list': 'fileReferences',
+  'commands/list': 'sessions',
+  'commands/execute': 'sessions',
+  'workspace.list': 'workspaces',
+  'workspace.create': 'workspaces',
+  'workspace.rename': 'workspaces',
+  'workspace.delete': 'workspaces',
+  'workspace.insertBefore': 'workspaces',
+  'workspace.insertSessionBefore': 'workspaces',
+  'workspace.archiveSession': 'workspaces',
+  'skill.list': 'skills',
+  'agentPreset.list': 'agentPresets',
+  'agentPreset.select': 'agentPresets',
+  'agentPreset.read': 'agentPresets',
+  'agentPreset.copy': 'agentPresets',
+  'agentPreset.openDocument': 'agentPresets',
+  'agentPreset.remove': 'agentPresets',
+  'goal.create': 'goals',
+  'goal.edit': 'goals',
+  'goal.pause': 'goals',
+  'goal.resume': 'goals',
+  'goal.complete': 'goals',
+  'goal.clear': 'goals',
+  'settings.describe': 'settings',
+  'settings.openDocument': 'settings',
+  'settings.update': 'settings',
+  'settings.replace': 'settings',
+  'settings.mutate': 'settings',
+  'credentials.describe': 'credentials',
+  'credentials.set': 'credentials',
+  'credentials.unset': 'credentials',
+  'llm.providers': 'settings',
+  'llm.models': 'settings',
+  'llm.discoverModels': 'settings',
+} as const satisfies Record<TuiUnaryMethod, TuiCapability>
+
+/** Return the product capability that gates one unary method. */
+export function capabilityForTuiUnaryMethod(method: TuiUnaryMethod): TuiCapability {
+  return TUI_METHOD_CAPABILITY_MAP[method]
+}
+
 /** Every client-to-server TUI control request method. */
 export const TUI_REQUEST_METHOD_SET = {
   'tui.hello': true,

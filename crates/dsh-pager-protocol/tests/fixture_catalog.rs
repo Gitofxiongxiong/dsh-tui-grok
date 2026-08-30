@@ -37,6 +37,49 @@ fn canonical_catalog_matches_rust_protocol_facts() {
     }
     assert_eq!(methods.len(), 65);
 
+    let capabilities = fixture("capability-map.json");
+    let capability_unary = capabilities["unary"]
+        .as_object()
+        .expect("unary capability map");
+    let capability_control = capabilities["control"]
+        .as_object()
+        .expect("control capability map");
+    let capability_notification = capabilities["notification"]
+        .as_object()
+        .expect("notification capability map");
+    assert_eq!(
+        capability_unary.len(),
+        catalog["unary"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        capability_control.len(),
+        catalog["control"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        capability_notification.len(),
+        catalog["notification"].as_array().unwrap().len()
+    );
+    for method in catalog["unary"].as_array().unwrap() {
+        let method = method.as_str().unwrap();
+        assert!(
+            capability_unary
+                .get(method)
+                .and_then(Value::as_str)
+                .is_some(),
+            "unary method {method} must name a capability"
+        );
+    }
+    for group in ["control", "notification"] {
+        for method in catalog[group].as_array().unwrap() {
+            let method = method.as_str().unwrap();
+            assert_eq!(
+                capabilities[group].get(method),
+                Some(&Value::Null),
+                "{group} method {method} must not be capability-gated"
+            );
+        }
+    }
+
     // Every method currently emitted or consumed by crates/dsh-pager must be
     // present in the canonical catalog; Rust need not duplicate all 65 names.
     for method in [

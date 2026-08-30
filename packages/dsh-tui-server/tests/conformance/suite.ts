@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SessionId } from '@dsh-pager-grok/tui-protocol'
+import {
+  SessionId,
+  TUI_CAPABILITY_SET,
+  type TuiCapability,
+} from '@dsh-pager-grok/tui-protocol'
+import { dispatchUnary } from '../../src/core/dispatch.ts'
+import type { TuiBackend } from '../../src/core/backend.ts'
 import {
   SESSION_CREATE_GOLDEN,
   SESSION_LIST_GOLDEN,
@@ -7,6 +13,24 @@ import {
   WORKSPACE_BASELINE_GOLDEN,
 } from './goldens.ts'
 import type { AdapterConformanceFactory, RecordLike } from './types.ts'
+
+/** Successful scenario that exercises each capability advertised as true. */
+const CAPABILITY_SUCCESS_SCENARIO = {
+  sessions: 1,
+  workspaces: 7,
+  settings: 8,
+  credentials: 8,
+  agentPresets: 9,
+  goals: 9,
+  subagents: 9,
+  approvals: 6,
+  questions: 6,
+  queue: 5,
+  jobs: 5,
+  skills: 10,
+  fileReferences: 10,
+  directoryPicker: 10,
+} as const satisfies Record<TuiCapability, number>
 
 function openingSnapshot(records: readonly RecordLike[], cursor = 4): RecordLike {
   return {
@@ -385,9 +409,38 @@ export function registerAdapterConformance(
       }
     })
 
-    it.skip('12. capability-missing semantics belong to Phase 5 core enforcement', () => {
-      // controllers-v2 advertises every current capability as true. A false
-      // capability family registers this scenario when core enforcement exists.
+    it('12. enforces false capabilities before adapter dispatch', async () => {
+      const f = factory()
+      const call = vi.spyOn(f.backend, 'call')
+      const capabilities = { ...f.backend.info.capabilities, fileReferences: false }
+      const gated = new Proxy(f.backend, {
+        get(target, property) {
+          if (property === 'info') return { ...target.info, capabilities }
+          const value = Reflect.get(target, property, target) as unknown
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      }) as TuiBackend
+      try {
+        await expect(dispatchUnary(gated, 'fileReferences.list', {
+          sessionId: f.sessionId,
+          query: 'main',
+        }, 'capability-false')).resolves.toMatchObject({
+          ok: false,
+          error: {
+            code: 'unsupported-capability',
+            details: { capability: 'fileReferences', method: 'fileReferences.list' },
+          },
+        })
+        expect(call).not.toHaveBeenCalled()
+        for (const capability of Object.keys(TUI_CAPABILITY_SET) as TuiCapability[]) {
+          if (f.backend.info.capabilities[capability]) {
+            expect(CAPABILITY_SUCCESS_SCENARIO[capability]).toBeGreaterThan(0)
+          }
+        }
+      } finally {
+        call.mockRestore()
+        f.backend.dispose()
+      }
     })
   })
 }
