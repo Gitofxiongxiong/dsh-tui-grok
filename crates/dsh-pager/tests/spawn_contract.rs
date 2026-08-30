@@ -56,6 +56,14 @@ fn stderr_flood_is_drained_and_does_not_deadlock_hello() {
         "stderr pipe must be drained; hello took {:?}",
         started.elapsed()
     );
+    let tail_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < tail_deadline
+        && !transport
+            .backend_stderr_tail()
+            .contains("STDERR_FLOOD_DONE")
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let tail = transport.backend_stderr_tail();
     assert!(
         tail.contains("STDERR_FLOOD_DONE"),
