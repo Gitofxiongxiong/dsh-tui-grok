@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   PROFILE_PREFIX,
   UnsupportedDshVersionError,
@@ -10,6 +10,7 @@ import {
   hasUserBackend,
   helpText,
   needBundle,
+  prepareFamilyProfile,
   printDoctor,
   productBackendArgs,
   profileNameFor,
@@ -22,6 +23,11 @@ import {
 import { enginesSatisfied, nativeSpec } from '../lib/platform.js'
 
 const FAMILY_RUNTIME = '@dsh-pager-grok/runtime-apiproxy-v1'
+const temporaryRoots: string[] = []
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
 
 function registry(version = '1.2.3', status = 'supported') {
   return {
@@ -43,6 +49,7 @@ function registry(version = '1.2.3', status = 'supported') {
 
 function fakeDsh(version = '1.2.3') {
   const root = mkdtempSync(join(tmpdir(), 'dsh-pager-cli-dsh-'))
+  temporaryRoots.push(root)
   const binJs = join(root, 'lib', 'bin.js')
   mkdirSync(join(root, 'lib'), { recursive: true })
   writeFileSync(join(root, 'package.json'), JSON.stringify({
@@ -205,6 +212,7 @@ describe('family runtime warm skip', () => {
     expect(needBundle(missing, '0.1.0', selected)).toBe(true)
 
     const home = mkdtempSync(join(tmpdir(), 'dsh-pager-cli-'))
+    temporaryRoots.push(home)
     const profile = join(home, 'profiles', selected.profile)
     const runtime = join(profile, 'node_modules', ...FAMILY_RUNTIME.split('/'))
     mkdirSync(runtime, { recursive: true })
@@ -214,6 +222,125 @@ describe('family runtime warm skip', () => {
     writeFileSync(join(runtime, 'package.json'), JSON.stringify({ version: '0.1.0' }))
     expect(needBundle({ DSH_HOME: home }, '0.1.0', selected)).toBe(false)
     expect(needBundle({ DSH_HOME: home }, '0.1.1', selected)).toBe(true)
+  })
+})
+
+describe('family profile migration', () => {
+  it('backs up a mismatched managed profile and migrates only pager appearance settings', () => {
+    const selected = selection()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-pager-profile-migration-'))
+    temporaryRoots.push(home)
+    const profile = join(home, 'profiles', selected.profile)
+    const sessions = join(home, 'sessions', 'session.json')
+    const credentials = join(home, '.credentials.yaml')
+    const credentialStore = join(home, 'credentials', 'token.json')
+    mkdirSync(join(profile, 'projection-cache'), { recursive: true })
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    mkdirSync(join(home, 'credentials'), { recursive: true })
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-pager-grok/tui-embedded': '0.0.9' },
+      dshPagerGrok: {
+        managed: true,
+        adapterFamily: 'controllers-v2',
+        dshVersion: '0.0.9',
+        profileSchema: 2,
+        runtimeVersion: '0.0.9',
+        pagerSettings: {
+          theme: 'dark',
+          defaultView: 'dashboard',
+          reducedMotion: true,
+          apiToken: 'must-not-migrate',
+          projectionCache: { cursor: 'must-not-migrate' },
+        },
+      },
+    }))
+    writeFileSync(join(profile, 'projection-cache', 'cache.json'), '{"private":"old"}\n')
+    writeFileSync(sessions, '{"session":"untouched"}\n')
+    writeFileSync(credentials, 'api_key: untouched\n')
+    writeFileSync(credentialStore, '{"credential":"untouched"}\n')
+    const sessionBefore = readFileSync(sessions)
+    const credentialsBefore = readFileSync(credentials)
+    const credentialStoreBefore = readFileSync(credentialStore)
+    const lines: string[] = []
+
+    const result = prepareFamilyProfile('0.1.0', selected, { DSH_HOME: home }, {
+      stamp: '2026-08-30T16-31-02-000Z',
+      log: (line: string) => lines.push(line),
+    })
+
+    expect(result.action).toBe('migrated')
+    expect(result.backup).toBe(`${profile}.backup-2026-08-30T16-31-02-000Z`)
+    const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))
+    expect(manifest.dshPagerGrok).toEqual({
+      managed: true,
+      adapterFamily: 'apiproxy-v1',
+      dshVersion: '1.2.3',
+      profileSchema: 1,
+      runtimeVersion: '0.1.0',
+      pagerSettings: { theme: 'dark', defaultView: 'dashboard', reducedMotion: true },
+    })
+    expect(existsSync(join(profile, 'projection-cache'))).toBe(false)
+    expect(readFileSync(join(result.backup!, 'projection-cache', 'cache.json'), 'utf8'))
+      .toBe('{"private":"old"}\n')
+    expect(readFileSync(sessions)).toEqual(sessionBefore)
+    expect(readFileSync(credentials)).toEqual(credentialsBefore)
+    expect(readFileSync(credentialStore)).toEqual(credentialStoreBefore)
+    expect(lines.join('\n')).toContain('projection cache was not migrated')
+    expect(lines.join('\n')).toContain('sessions and credentials were not read or modified')
+  })
+
+  it('moves the legacy product profile into a backup before creating the family profile', () => {
+    const selected = selection()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-pager-legacy-profile-'))
+    temporaryRoots.push(home)
+    const legacy = join(home, 'profiles', PROFILE_PREFIX)
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'package.json'), JSON.stringify({
+      dsh: { profile: { bundles: ['@dsh-pager-grok/runtime'] } },
+      dshPagerGrok: { pagerSettings: { theme: 'light', unknown: true } },
+    }))
+
+    const result = prepareFamilyProfile('0.1.0', selected, { DSH_HOME: home }, {
+      stamp: 'legacy',
+      log: () => {},
+    })
+
+    expect(result.backup).toBe(`${legacy}.backup-legacy`)
+    expect(existsSync(result.backup!)).toBe(true)
+    expect(existsSync(legacy)).toBe(false)
+    const created = JSON.parse(readFileSync(join(home, 'profiles', selected.profile, 'package.json'), 'utf8'))
+    expect(created.dshPagerGrok.pagerSettings).toEqual({ theme: 'light' })
+  })
+
+  it('refreshes aligned ownership without a backup and refuses an unowned target', () => {
+    const selected = selection()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-pager-owned-profile-'))
+    temporaryRoots.push(home)
+    const profile = join(home, 'profiles', selected.profile)
+    mkdirSync(profile, { recursive: true })
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({
+      name: 'preserved-name',
+      dshPagerGrok: {
+        managed: true,
+        adapterFamily: selected.family,
+        dshVersion: selected.version,
+        profileSchema: selected.profileSchema,
+        runtimeVersion: '0.0.1',
+      },
+    }))
+    expect(prepareFamilyProfile('0.1.0', selected, { DSH_HOME: home }, { log: () => {} }).action)
+      .toBe('aligned')
+    expect(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')).dshPagerGrok.runtimeVersion)
+      .toBe('0.1.0')
+
+    const foreignHome = mkdtempSync(join(tmpdir(), 'dsh-pager-foreign-profile-'))
+    temporaryRoots.push(foreignHome)
+    const foreign = join(foreignHome, 'profiles', selected.profile)
+    mkdirSync(foreign, { recursive: true })
+    writeFileSync(join(foreign, 'package.json'), JSON.stringify({ name: 'user-profile' }))
+    expect(() => prepareFamilyProfile('0.1.0', selected, { DSH_HOME: foreignHome }))
+      .toThrow(/not owned/)
+    expect(existsSync(foreign)).toBe(true)
   })
 })
 

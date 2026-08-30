@@ -18,5 +18,9 @@ corepack pnpm@11.7.0 --pm-on-fail=ignore \
 The E2E runner creates a project-named profile inside a fresh `/tmp` DSH_HOME,
 executes hello/list/dashboard/load and the PTY smoke, then removes that home.
 Set `KEEP_DSH_HOME=1` only for local diagnosis; the path is printed before any
-profile mutation. The fixture imports the repository's built adapter/core by
-relative path, so `pnpm run build:ts` must succeed first.
+profile mutation. For family coexistence checks, set `DSH_COMPAT_E2E_HOME` to
+an already recorded, caller-owned sandbox; the runner creates only its
+`dsh-pager-grok-apiproxy-v1-rc2-e2e` profile and retains the home. Each created
+profile receives registry-derived `dshPagerGrok` ownership metadata. The
+fixture imports the repository's built adapter/core by relative path, so
+`pnpm run build:ts` must succeed first.

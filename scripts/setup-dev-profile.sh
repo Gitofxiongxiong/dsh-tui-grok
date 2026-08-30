@@ -17,7 +17,7 @@ usage() {
     '' \
     'Environment overrides:' \
     '  DSH_HARNESS_ROOT            DeepSeek Harness checkout' \
-    '  DSH_TUI_PROFILE             profile name (default: dsh-pager-grok-dev)' \
+    '  DSH_TUI_PROFILE             profile name (default: dsh-pager-grok-controllers-v2-dev)' \
     '  DSH_TUI_PROFILE_ALLOW_UPDATE=1' \
     '                               allow updating an existing non-project profile' \
     '  DSH_HOME                    Harness home (default: $HOME/.dsh)'

@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +14,7 @@ const packageRoot = join(here, '..')
 const require = createRequire(import.meta.url)
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
 const STARTABLE_STATUSES = new Set(['supported', 'maintenance', 'candidate', 'experimental'])
+export const PAGER_SETTING_KEYS = Object.freeze(['theme', 'defaultView', 'reducedMotion'])
 
 export class UnsupportedDshVersionError extends Error {
   constructor(message, evidence = {}) {
@@ -43,6 +44,77 @@ export function profileNameFor(family) {
 export function profileDir(env = process.env, selection) {
   if (selection === undefined) throw new Error('profileDir requires a resolved DSH selection')
   return join(dshHome(env), 'profiles', selection.profile)
+}
+
+export function prepareFamilyProfile(ownVersion, selection, env = process.env, options = {}) {
+  const target = profileDir(env, selection)
+  const legacy = join(dshHome(env), 'profiles', PROFILE_PREFIX)
+  const stamp = options.stamp ?? new Date().toISOString().replaceAll(/[:.]/g, '-')
+  const log = options.log ?? ((message) => console.error(message))
+  let source = existsSync(target) ? target : undefined
+  if (source === undefined && existsSync(legacy)) {
+    const legacyManifest = readProfileManifest(legacy)
+    if (isPagerManagedProfile(legacyManifest)) source = legacy
+  }
+
+  if (source === undefined) {
+    return { action: 'absent', profile: target, backup: null, migratedSettings: [] }
+  }
+
+  const manifest = readProfileManifest(source)
+  if (!isPagerManagedProfile(manifest)) {
+    throw new Error(
+      `profile ${source} is not owned by dsh-pager-grok; choose another DSH_HOME or profile`,
+    )
+  }
+  const metadata = manifest.dshPagerGrok
+  const aligned = source === target
+    && metadata?.managed === true
+    && metadata.adapterFamily === selection.family
+    && metadata.profileSchema === selection.profileSchema
+  const pagerSettings = copyPagerSettings(metadata?.pagerSettings)
+  if (aligned) {
+    writeOwnedProfileManifest(target, manifest, ownVersion, selection, pagerSettings)
+    return {
+      action: 'aligned',
+      profile: target,
+      backup: null,
+      migratedSettings: Object.keys(pagerSettings),
+    }
+  }
+
+  const backup = uniqueBackupPath(source, stamp)
+  renameSync(source, backup)
+  writeOwnedProfileManifest(target, {}, ownVersion, selection, pagerSettings)
+  const migrated = Object.keys(pagerSettings)
+  log(`[dsh-pager] family profile migrated: ${source} -> ${target}`)
+  log(`[dsh-pager] previous profile backup: ${backup}`)
+  log(`[dsh-pager] migrated pager settings: ${migrated.length > 0 ? migrated.join(', ') : 'none'}`)
+  log(`[dsh-pager] projection cache was not migrated; it remains only in ${backup}`)
+  log('[dsh-pager] $DSH_HOME/sessions and credentials were not read or modified')
+  return { action: 'migrated', profile: target, backup, migratedSettings: migrated }
+}
+
+export function writeProfileOwnership(ownVersion, selection, env = process.env) {
+  const target = profileDir(env, selection)
+  if (!existsSync(target)) throw new Error(`profile does not exist: ${target}`)
+  const manifest = readProfileManifest(target)
+  if (!isPagerManagedProfile(manifest)) {
+    throw new Error(`profile ${target} is not owned by dsh-pager-grok`)
+  }
+  const pagerSettings = copyPagerSettings(manifest.dshPagerGrok?.pagerSettings)
+  writeOwnedProfileManifest(target, manifest, ownVersion, selection, pagerSettings)
+}
+
+export function isPagerManagedProfile(manifest) {
+  if (!isRecord(manifest)) return false
+  if (manifest.dshPagerGrok?.managed === true) return true
+  const bundles = Array.isArray(manifest?.dsh?.profile?.bundles)
+    ? manifest.dsh.profile.bundles
+    : []
+  const dependencies = isRecord(manifest.dependencies) ? Object.keys(manifest.dependencies) : []
+  return [...bundles, ...dependencies]
+    .some(name => typeof name === 'string' && name.startsWith('@dsh-pager-grok/'))
 }
 
 export function userBackendKind(argv, env = process.env) {
@@ -315,6 +387,7 @@ export function ensureProfileBundle(ownVersion, selection, env = process.env) {
   if (needBundle(env, ownVersion, selection)) {
     throw new Error(`profile ${selection.profile} did not install ${spec}; run dsh-pager repair`)
   }
+  writeProfileOwnership(ownVersion, selection, env)
 }
 
 export function forwardExit(child) {
@@ -386,7 +459,9 @@ export function printDoctor(ownVersion, env = process.env, options = {}) {
       `${selection.status}/${selection.distribution} · ${supportStatusMessage(selection.status)}`)
     if (!selection.startable) hardFail = true
     mark(true, 'adapter', `${selection.family} runtime=${selection.runtimePackage}`)
-    mark(true, 'profile', `${profileDir(env, selection)} family=${selection.family} schema=${selection.profileSchema}`)
+    const profile = profileDoctorEvidence(selection, ownVersion, env)
+    mark(profile.ok, 'profile', profile.detail)
+    if (!profile.ok) hardFail = true
     const runtime = runtimeDoctorEvidence(selection, ownVersion, env)
     mark(runtime.ok, 'pager CLI ↔ runtime', runtime.detail)
     if (!runtime.ok) hardFail = true
@@ -416,6 +491,31 @@ export function printDoctor(ownVersion, env = process.env, options = {}) {
   }
   console.log(lines.join('\n'))
   return hardFail ? 1 : 0
+}
+
+function profileDoctorEvidence(selection, ownVersion, env) {
+  const dir = profileDir(env, selection)
+  if (!existsSync(join(dir, 'package.json'))) {
+    return {
+      ok: false,
+      detail: `missing ${dir}; expected family=${selection.family} schema=${selection.profileSchema}`,
+    }
+  }
+  try {
+    const manifest = readProfileManifest(dir)
+    const metadata = manifest.dshPagerGrok
+    const ok = metadata?.managed === true
+      && metadata.adapterFamily === selection.family
+      && metadata.dshVersion === selection.version
+      && metadata.profileSchema === selection.profileSchema
+      && metadata.runtimeVersion === ownVersion
+    return {
+      ok,
+      detail: `${dir} family=${metadata?.adapterFamily ?? '?'} dsh=${metadata?.dshVersion ?? '?'} schema=${metadata?.profileSchema ?? '?'} runtime=${metadata?.runtimeVersion ?? '?'}`,
+    }
+  } catch (error) {
+    return { ok: false, detail: firstLine(error) }
+  }
 }
 
 function runtimeDoctorEvidence(selection, ownVersion, env) {
@@ -454,12 +554,62 @@ export function repairProfile(selection, env = process.env) {
     console.error(`[dsh-pager] profile ${selection.profile} does not exist`)
     return 0
   }
+  const manifest = readProfileManifest(dir)
+  if (!isPagerManagedProfile(manifest)) {
+    throw new Error(`profile ${dir} is not owned by dsh-pager-grok; refusing to rename it`)
+  }
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, '-')
   const backup = `${dir}.${stamp}.bak`
   mkdirSync(dirname(backup), { recursive: true })
   renameSync(dir, backup)
   console.error(`[dsh-pager] renamed ${dir} -> ${backup}`)
   return 0
+}
+
+function copyPagerSettings(value) {
+  if (!isRecord(value)) return {}
+  const copied = {}
+  if (typeof value.theme === 'string') copied.theme = value.theme
+  if (typeof value.defaultView === 'string') copied.defaultView = value.defaultView
+  if (typeof value.reducedMotion === 'boolean') copied.reducedMotion = value.reducedMotion
+  return copied
+}
+
+function writeOwnedProfileManifest(dir, existing, ownVersion, selection, pagerSettings) {
+  mkdirSync(dir, { recursive: true })
+  const manifest = {
+    name: `dsh-pager-profile-${selection.family}`,
+    private: true,
+    ...existing,
+    dshPagerGrok: {
+      managed: true,
+      adapterFamily: selection.family,
+      dshVersion: selection.version,
+      profileSchema: selection.profileSchema,
+      runtimeVersion: ownVersion,
+      ...(Object.keys(pagerSettings).length > 0 ? { pagerSettings } : {}),
+    },
+  }
+  const manifestPath = join(dir, 'package.json')
+  const temporary = `${manifestPath}.dsh-pager.tmp`
+  writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temporary, manifestPath)
+}
+
+function uniqueBackupPath(source, stamp) {
+  const base = `${source}.backup-${stamp}`
+  if (!existsSync(base)) return base
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${base}-${suffix}`
+    if (!existsSync(candidate)) return candidate
+  }
+  throw new Error(`cannot allocate profile backup path for ${source}`)
+}
+
+function readProfileManifest(dir) {
+  const manifestPath = join(dir, 'package.json')
+  if (!existsSync(manifestPath)) throw new Error(`profile manifest is missing: ${manifestPath}`)
+  return readJson(manifestPath, 'DSH profile manifest')
 }
 
 function isRecord(value) {

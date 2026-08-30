@@ -13,7 +13,7 @@ dsh_tui_repo_root() {
   cd "$script_dir/.." && pwd
 }
 
-dsh_tui_default_profile="dsh-pager-grok-dev"
+dsh_tui_default_profile="dsh-pager-grok-controllers-v2-dev"
 
 # The source-only development profile is controllers-v2-specific. Resolve its
 # exact DSH version from the canonical support registry instead of maintaining
@@ -185,7 +185,8 @@ const fs = require('node:fs')
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const bundles = manifest?.dsh?.profile?.bundles ?? []
 const dependencies = Object.keys(manifest?.dependencies ?? {})
-const managed = bundles.includes('@dsh-pager-grok/tui-embedded')
+const managed = manifest?.dshPagerGrok?.managed === true
+  || bundles.includes('@dsh-pager-grok/tui-embedded')
   || dependencies.some((name) => name.startsWith('@dsh-pager-grok/tui-'))
 process.exit(managed ? 0 : 1)
 NODE
@@ -203,6 +204,7 @@ const fs = require('node:fs')
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const bundles = manifest?.dsh?.profile?.bundles ?? []
 const dependencies = manifest?.dependencies ?? {}
+const ownership = manifest?.dshPagerGrok
 const expectedDependencies = [
   '@dsh-pager-grok/tui-protocol',
   '@dsh-pager-grok/tui-server',
@@ -215,7 +217,50 @@ const expectedDependencies = [
 ]
 const ready = bundles.includes('@dsh-pager-grok/tui-embedded')
   && expectedDependencies.every((name) => Object.hasOwn(dependencies, name))
+  && ownership?.managed === true
+  && ownership?.adapterFamily === 'controllers-v2'
+  && ownership?.profileSchema === 2
 process.exit(ready ? 0 : 1)
+NODE
+}
+
+dsh_tui_prepare_family_profile() {
+  local repo_root="$1"
+  local harness_root="$2"
+  local profile="$3"
+  local mode="${4:-prepare}"
+  local node_program
+  node_program="$(dsh_tui_resolve_node)" || return
+
+  "$node_program" --input-type=module - \
+    "$repo_root/packages/dsh-pager-cli/lib/launcher.js" \
+    "$repo_root/packages/dsh-pager-cli/package.json" \
+    "$repo_root/compat/dsh-support.json" \
+    "$harness_root/apps/cli/package.json" \
+    "$profile" \
+    "$mode" <<'NODE'
+import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+
+const [, , launcherPath, cliManifestPath, registryPath, dshManifestPath, profile, mode] = process.argv
+const { prepareFamilyProfile, writeProfileOwnership } = await import(pathToFileURL(launcherPath))
+const cli = JSON.parse(fs.readFileSync(cliManifestPath, 'utf8'))
+const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'))
+const dsh = JSON.parse(fs.readFileSync(dshManifestPath, 'utf8'))
+const support = registry?.versions?.[dsh.version]
+if (support === undefined) throw new Error(`DSH ${dsh.version} is absent from the support registry`)
+if (!profile.includes(`-${support.family}`)) {
+  throw new Error(`profile name must include family ${support.family}: ${profile}`)
+}
+const selection = {
+  family: support.family,
+  version: dsh.version,
+  profileSchema: support.profileSchema,
+  profile,
+}
+if (mode === 'prepare') prepareFamilyProfile(cli.version, selection, process.env)
+else if (mode === 'stamp') writeProfileOwnership(cli.version, selection, process.env)
+else throw new Error(`unknown family profile mode: ${mode}`)
 NODE
 }
 
@@ -296,6 +341,8 @@ dsh_tui_install_local_profile() {
   manifest="$profile_dir/package.json"
   node_program="$(dsh_tui_resolve_node)" || return
 
+  dsh_tui_prepare_family_profile "$repo_root" "$harness_root" "$profile"
+
   if dsh_tui_profile_manifest_is_ready "$manifest" \
     && dsh_tui_profile_manifest_links_current_repo "$manifest" "$repo_root" "$harness_root"; then
     printf 'DSH profile %s is already linked to this checkout.\n' "$profile" >&2
@@ -335,6 +382,7 @@ dsh_tui_install_local_profile() {
     "$repo_root/packages/dsh-tui-server" \
     "$repo_root/packages/dsh-tui-embedded"
 
+  dsh_tui_prepare_family_profile "$repo_root" "$harness_root" "$profile" stamp
   dsh_tui_require_profile "$profile" "$repo_root"
   printf 'DSH profile %s is ready.\n' "$profile" >&2
 }
