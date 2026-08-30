@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SessionId, type HostFrame, type MuxFrame } from '@dsh-pager-grok/tui-protocol'
-import { ControlPlaneRouter, ControlPlaneStore } from '../src/control-plane.ts'
+import { ControlPlaneRouter, ControlPlaneStore } from '../src/core/control-plane.ts'
 
 type WorkspaceId = string
 
