@@ -225,6 +225,20 @@ def main() -> int:
         if CURSOR_QUERY in chunk:
             os.write(fd, CURSOR_REPLY)
 
+    def drain_ready() -> None:
+        """Consume output already buffered after the child has exited."""
+        while select.select([fd], [], [], 0)[0]:
+            try:
+                chunk = os.read(fd, 16384)
+            except OSError as error:
+                if error.errno in (errno.EIO, errno.EBADF):
+                    return
+                raise
+            if not chunk:
+                return
+            output.extend(chunk)
+            screen.feed(chunk)
+
     def visible() -> bytes:
         return ANSI_RE.sub(b"", bytes(output))
 
@@ -350,6 +364,7 @@ def main() -> int:
                 code = os.waitstatus_to_exitcode(status)
                 if code != 0:
                     raise RuntimeError(f"dsh-pager exited with {code}")
+                drain_ready()
                 if b"\x1b[?1049l" not in output or b"\x1b[?25h" not in output:
                     raise RuntimeError("terminal surface was not restored")
                 return 0
