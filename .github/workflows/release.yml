@@ -320,8 +320,11 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: install pnpm and ripgrep
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
           corepack enable
           command -v rg
+          rg --version
       - uses: actions/download-artifact@v4
         with:
           name: js-candidates
