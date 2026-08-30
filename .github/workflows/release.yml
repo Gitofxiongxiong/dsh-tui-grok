@@ -41,6 +41,7 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
       resume_run_id: ${{ steps.release.outputs.resume_run_id }}
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +101,7 @@ jobs:
           NODE
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "commit=${release_commit}" >> "${GITHUB_OUTPUT}"
           echo "resume_run_id=${resume_run_id}" >> "${GITHUB_OUTPUT}"
 
   pack-native:
@@ -314,6 +316,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.metadata.outputs.tag }}
+      - name: checkout reviewed release orchestration
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-orchestration
+      - name: verify candidate and orchestration sources
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ needs.metadata.outputs.commit }}
+          ORCHESTRATION_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CANDIDATE_COMMIT}"
+          test "$(git -C release-orchestration rev-parse HEAD)" = "${ORCHESTRATION_COMMIT}"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -361,7 +377,8 @@ jobs:
             -type f -name 'dsh-pager-grok-cli-*.tgz')
           test "${#cli_tarballs[@]}" -eq 1
           export DSH_RELEASE_CLI_TARBALL="${cli_tarballs[0]}"
-          bash scripts/rehearse-release-candidate.sh | tee "${RUNNER_TEMP}/registry-cold.log"
+          bash release-orchestration/scripts/rehearse-release-candidate.sh \
+            | tee "${RUNNER_TEMP}/registry-cold.log"
           evidence_root="$(sed -n 's/^release candidate root (retained): //p' \
             "${RUNNER_TEMP}/registry-cold.log" | head -n 1)"
           test -f "${evidence_root}/result.json"

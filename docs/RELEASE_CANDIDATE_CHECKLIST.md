@@ -99,6 +99,20 @@ cold-install 或文档工作。
   复跑已通过；证据目录 `/tmp/dsh-pager-release-candidate.ujT5UX` 包含 cold audit、
   doctor/hello/list/load、warm/offline 和 PTY `result.json`。正式 recovery 仍等待本批
   PR/main CI 通过后重入。
+- 第三次 recovery run `33312297700`：metadata、原始 artifacts、五平台 native
+  与 runtime integrity 全绿；cold job 已使用精确 Tag 候选工作树，但也因此
+  从 `v0.2.0@77ae309` 执行了 Tag 内旧版 rehearsal/audit，没有消费已合并到
+  main 的 native 解析修复。失败仍发生在旧 root-hoist `realpathSync`；CLI publish
+  和 final gate 继续跳过，registry 无新增副作用。
+- 后续 recovery 保留 Tag 作为 cold job 根工作树，同时把当前 workflow
+  definition 的精确 `github.workflow_sha` 检出到独立
+  `release-orchestration/`，只从后者运行已审核的 audit/rehearsal/PTY 工具。
+  该工具 checkout 不进入 build/pack，不替换任何 Tag/source run artifact。
+- 本地双来源同构演练已通过：候选树为
+  `v0.2.0@77ae309f8df2547f628b26c62414885349d7fa1c`，编排树为
+  `980d5f980c8fcf349e4ded8fa8dafd662fcc3193`，仍使用 source run 的精确 CLI
+  artifact + registry native/runtime。证据目录
+  `/tmp/dsh-pager-release-candidate.l1WAC6` 为 `passed`。
 - 恢复要求：修复 workflow 经 PR/CI 合并后，从默认分支以
   `release_tag=v0.2.0`、`resume_run_id=33309459911`、
   `confirm=publish-v0.2.0` 重入。两次 run candidates 的对比显示 Linux、macOS、runtime
