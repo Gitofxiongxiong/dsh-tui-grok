@@ -7,6 +7,9 @@
 /packages/dsh-pager-runtime/LICENSE-MIT
 /packages/dsh-pager-runtime/LICENSE-APACHE
 /packages/dsh-pager-runtime/NOTICE
+/packages/dsh-pager-runtime-apiproxy-v1/LICENSE-MIT
+/packages/dsh-pager-runtime-apiproxy-v1/LICENSE-APACHE
+/packages/dsh-pager-runtime-apiproxy-v1/NOTICE
 /packages/dsh-pager-cli/LICENSE-MIT
 /packages/dsh-pager-cli/LICENSE-APACHE
 /packages/dsh-pager-cli/NOTICE
@@ -15,6 +18,7 @@ scripts/__pycache__/
 /packages/dsh-tui-*/lib/
 /packages/dsh-tui-*/node_modules/
 /packages/dsh-pager-runtime/lib/
+/packages/dsh-pager-runtime-apiproxy-v1/lib/
 .vitest-dsh-home/
 node_modules/
 **/*.rs.bk

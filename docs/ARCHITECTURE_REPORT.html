@@ -170,7 +170,7 @@ tui-embedded ──► tui-server + tui-session-projection-recovery（+10 个官
 tui-session-projection-recovery（不依赖其他 workspace 包）</pre>
 <ul>
 <li><b>协议双端同构</b>：TS <code>tui-protocol</code> 是服务端参考定义（协议"原点"：含 codec、control-plane 基线、错误码、方法表），Rust <code>dsh-pager-protocol</code> 是客户端镜像（+自持业务 DTO）。共享同一 wire 常量（TUI_PROTOCOL_VERSION=1）、camelCase/kebab-case wire 名，以及<b>字节级相同的 hello fixtures</b>（两侧 diff 验证 identical）；Rust 客户端以 <code>embedded_hello_params</code> 走 <code>tui.hello</code> 握手并校验版本/服务名</li>
-<li><b>不对称处</b>：TS 额外拥有 control-plane 基线类型与 <code>API_PROXY_METHOD_SET</code> 方法表；Rust 额外拥有转发业务方法的客户端 DTO（SessionPromptParams、QueueAction、Subagent* 等），TS server 对这些 params 保持 <code>unknown</code> 不透明（gateway 校验）；Rust 订阅 receipt 全字段 default 兼容旧网关 <code>{}</code></li>
+<li><b>不对称处</b>：TS 额外拥有 control-plane 基线类型与 <code>TUI_UNARY_METHOD_SET</code> 方法表；Rust 额外拥有转发业务方法的客户端 DTO（SessionPromptParams、QueueAction、Subagent* 等），TS server 对这些 params 保持 <code>unknown</code> 不透明（gateway 校验）；Rust 订阅 receipt 全字段 default 兼容旧网关 <code>{}</code></li>
 <li><b>文档小瑕疵（未确认）</b>：<span class="path">crates/dsh-pager-protocol/src/lib.rs:1</span> 文档写 "shared with <code>@deepseek-ai/dsh-tui-protocol</code>"，疑似外置化前的旧官方名残留（实际包名 <code>@dsh-pager-grok/tui-protocol</code>）</li>
 </ul>
 <h3>5.3 profile 安装 / 自举机制</h3>

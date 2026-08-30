@@ -1,11 +1,9 @@
 {
   "name": "@dsh-pager-grok/runtime",
   "version": "0.1.0",
-  "description": "DeepSeek Harness profile bundle for the dsh-pager native TUI",
+  "description": "Source-only controllers-v2 development runtime for dsh-pager-grok",
+  "private": true,
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Gitofxiongxiong/dsh-tui-grok.git",
@@ -45,6 +43,11 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dshPagerGrok": {
+    "adapterFamily": "controllers-v2",
+    "profileSchema": 2,
+    "distribution": "source-only"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",

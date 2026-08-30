@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Copy built protocol/server libs into @dsh-pager-grok/runtime and
- * rewrite in-workspace grok specifiers to relative paths so the published
- * tarball does not depend on workspace:* or the development TS packages.
+ * Copy built protocol/server libs into one family runtime and rewrite
+ * in-workspace grok specifiers to relative paths. The apiproxy-v1 publish
+ * candidate deliberately excludes controllers-v2 files and alpha imports.
  */
 import { spawnSync } from 'node:child_process'
 import {
@@ -20,7 +20,27 @@ import { fileURLToPath } from 'node:url'
 import { copyPackageLicenses } from './copy-package-licenses.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const runtimeRoot = join(repoRoot, 'packages/dsh-pager-runtime')
+const variant = process.argv[2] ?? 'controllers-v2'
+const variants = {
+  'controllers-v2': {
+    runtimeDir: 'dsh-pager-runtime',
+    patch: 'packages/dsh-tui-embedded/cordis.patch.yml',
+    patchServer: '@dsh-pager-grok/tui-server',
+    runtimeServer: '@dsh-pager-grok/runtime/server',
+  },
+  'apiproxy-v1': {
+    runtimeDir: 'dsh-pager-runtime-apiproxy-v1',
+    patch: 'compat/fixtures/dsh-0.1.1-rc.2/cordis.patch.yml',
+    patchServer: '@dsh-pager-grok/compat-dsh-0.1.1-rc.2',
+    runtimeServer: '@dsh-pager-grok/runtime-apiproxy-v1/server',
+  },
+}
+const config = variants[variant]
+if (config === undefined) {
+  console.error(`assemble-runtime: unsupported variant ${JSON.stringify(variant)}`)
+  process.exit(2)
+}
+const runtimeRoot = join(repoRoot, 'packages', config.runtimeDir)
 const outLib = join(runtimeRoot, 'lib')
 
 const PACKAGES = [
@@ -92,6 +112,63 @@ function copyTree(src, dest) {
   }
 }
 
+function copyServerTree(src, dest) {
+  if (variant === 'controllers-v2') {
+    copyTree(src, dest)
+    return
+  }
+  copyTree(join(src, 'core'), join(dest, 'core'))
+  copyTree(join(src, 'adapters', 'apiproxy-v1'), join(dest, 'adapters', 'apiproxy-v1'))
+}
+
+function writeServerEntry() {
+  if (variant === 'controllers-v2') {
+    writeFileSync(join(outLib, 'server-entry.js'), "export * from './server/index.js'\n")
+    writeFileSync(join(outLib, 'server-entry.d.ts'), "export * from './server/index.js'\n")
+    return
+  }
+  writeFileSync(join(outLib, 'server-entry.js'), `import { createRequire } from 'node:module'
+import { createApiRemoteAgentResolver } from '@deepseek-ai/dsh-api-remotes'
+import { ApiProxyV1Backend, resolveApiProxyV1Runtime } from './server/adapters/apiproxy-v1/backend.js'
+import { serve } from './server/core/serve.js'
+
+export { ApiProxyV1Backend, resolveApiProxyV1Runtime }
+export { serve }
+export const name = 'tui-server-apiproxy-v1'
+export const inject = ['apiProxy', 'agents', 'sessions', 'commands']
+
+const requireFromRuntime = createRequire(import.meta.url)
+const { toFetchHandler } = resolveApiProxyV1Runtime(requireFromRuntime)
+const installedDsh = requireFromRuntime('@deepseek-ai/dsh/package.json')
+
+export function apply(ctx, config = {}) {
+  ctx.effect(() => {
+    const fileReferences = ctx.get('fileReferences')
+    const resolveAgent = createApiRemoteAgentResolver(ctx, {})
+    const backend = new ApiProxyV1Backend({
+      api: ctx.apiProxy,
+      dshVersion: process.env.DSH_PAGER_EXPECTED_DSH_VERSION ?? installedDsh.version,
+      toFetchHandler,
+      extensions: {
+        resolveAgent,
+        commands: ctx.commands,
+        ...(fileReferences === undefined ? {} : { fileReferences }),
+      },
+    })
+    return serve(backend, config.input ?? process.stdin, config.output ?? process.stdout, {
+      ...(config.maxQueuedFrames === undefined ? {} : { maxQueuedFrames: config.maxQueuedFrames }),
+    })
+  }, 'tui.serve')
+}
+`)
+  writeFileSync(join(outLib, 'server-entry.d.ts'), `export { ApiProxyV1Backend, resolveApiProxyV1Runtime } from './server/adapters/apiproxy-v1/backend.js'
+export { serve } from './server/core/serve.js'
+export declare const name = "tui-server-apiproxy-v1"
+export declare const inject: readonly ["apiProxy", "agents", "sessions", "commands"]
+export declare function apply(ctx: any, config?: { input?: NodeJS.ReadableStream; output?: NodeJS.WritableStream; maxQueuedFrames?: number }): void
+`)
+}
+
 function main() {
   run('pnpm', ['--filter', './packages/dsh-tui-*', 'run', 'build'])
   rmSync(outLib, { recursive: true, force: true })
@@ -102,7 +179,8 @@ function main() {
     if (!existsSync(src)) {
       fail(`missing ${src}`)
     }
-    copyTree(src, join(outLib, pkg.dest))
+    if (pkg.dest === 'server') copyServerTree(src, join(outLib, pkg.dest))
+    else copyTree(src, join(outLib, pkg.dest))
   }
 
   for (const file of [...walkFiles(outLib, '.js'), ...walkFiles(outLib, '.d.ts')]) {
@@ -113,27 +191,17 @@ function main() {
     }
   }
 
-  writeFileSync(
-    join(outLib, 'server-entry.js'),
-    "export * from './server/index.js'\n",
-  )
-  writeFileSync(
-    join(outLib, 'server-entry.d.ts'),
-    "export * from './server/index.js'\n",
-  )
+  writeServerEntry()
 
-  const embeddedPatch = readFileSync(
-    join(repoRoot, 'packages/dsh-tui-embedded/cordis.patch.yml'),
-    'utf8',
+  const embeddedPatch = readFileSync(join(repoRoot, config.patch), 'utf8')
+  const runtimePatch = embeddedPatch.replaceAll(
+    `name: '${config.patchServer}'`,
+    `name: '${config.runtimeServer}'`,
   )
-  const runtimePatch = embeddedPatch
-    .replaceAll(
-      "name: '@dsh-pager-grok/tui-server'",
-      "name: '@dsh-pager-grok/runtime/server'",
-    )
+  if (runtimePatch === embeddedPatch) fail(`patch did not contain ${config.patchServer}`)
   writeFileSync(join(runtimeRoot, 'cordis.patch.yml'), runtimePatch)
   copyPackageLicenses(runtimeRoot)
-  console.log('assemble-runtime: wrote', outLib)
+  console.log(`assemble-runtime: wrote ${variant}`, outLib)
 }
 
 main()

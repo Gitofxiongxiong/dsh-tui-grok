@@ -1,6 +1,6 @@
-import { decodeStorageRecord } from '@deepseek-ai/dsh-session/chunk-rows'
 import type { HistoryRecord, RecordLike } from './context.js'
 import { asRecord, requireString } from './normalize.js'
+import type { DecodeStorageRecord } from './runtime.js'
 
 export const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
@@ -13,7 +13,10 @@ export interface OpeningSnapshot {
   projections: RecordLike
 }
 
-export function recordsToEvents(records: readonly HistoryRecord[]): RecordLike[] {
+export function recordsToEvents(
+  records: readonly HistoryRecord[],
+  decodeStorageRecord: DecodeStorageRecord,
+): RecordLike[] {
   const events: RecordLike[] = []
   for (const record of records) {
     if (record.type === 'event') {

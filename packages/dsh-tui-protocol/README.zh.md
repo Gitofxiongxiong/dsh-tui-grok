@@ -25,7 +25,7 @@ DeepSeek Harness 原生 TUI 客户端的共享协议格式。本包是外置纯�
 
 `tui.hello` 要求 `protocolVersion` 为 `1`，并返回 `serverInfo.name` `deepseek-harness-tui`。`tui.subscribe` 指定 `session`、`control-plane` 或 `all` 范围；只有有界 control-plane 记录覆盖请求水位时才返回 `resume-accepted`，否则返回并通知 `baseline-required`。session history 流仍没有游标回放，因此重连时仍需重新拉取 `session.history` 作为 presentation 内容基线。`generation` 在每次 hello 时递增；携带更旧 generation 的帧视为过期。
 
-`classifyMethod` / `isApiProxyMethod` 识别同一连接上转发的 ApiProxy 一元方法（`session.history`、`session.prompt` 以及 `RpcMethodMap` 其余项）。这些参数在此保持不透明；由网关校验。
+`classifyMethod` / `isTuiUnaryMethod` 识别同一连接上转发的一元业务方法（`session.history`、`session.prompt` 以及 `RpcMethodMap` 其余项）。这些参数在此保持不透明；由网关校验。
 
 应用错误使用 JSON-RPC `error.data.kind`（`protocol-version`、`stale-generation`、`already-resolved`、`unknown-session`、`identity-mismatch`、`baseline-required`、`not-attached`、`capability-denied`）以及 `TUI_ERROR_CODES` 中的代码。
 

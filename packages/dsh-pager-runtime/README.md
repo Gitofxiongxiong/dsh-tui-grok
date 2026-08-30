@@ -1,9 +1,10 @@
-# `@dsh-pager-grok/runtime`
+# `@dsh-pager-grok/runtime` (source-only)
 
-Single DeepSeek Harness Bundle for the native pager. Install it only through
-`dsh plugin --profile dsh-pager-grok add @dsh-pager-grok/runtime` (the
-`@dsh-pager-grok/cli` launcher does this). Do not run `dsh --profile
-dsh-pager-grok` on a TTY — stdout is the JSON-RPC pipe.
+Controllers-v2 development Bundle for exact DSH `0.1.2-alpha.1`. This package
+is private/source-only because its alpha dependencies are not registry
+installable. Prepare it with `scripts/setup-dev-profile.sh`; the public CLI
+does not depend on or attempt to publish it. Do not run its DSH profile on a
+TTY — stdout is the JSON-RPC pipe.
 
 Subpath exports:
 

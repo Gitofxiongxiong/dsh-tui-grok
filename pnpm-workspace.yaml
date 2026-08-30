@@ -3,29 +3,49 @@ packages:
   - packages/dsh-tui-server
   - packages/dsh-tui-embedded
   - packages/dsh-pager-runtime
+  - packages/dsh-pager-runtime-apiproxy-v1
   - packages/dsh-pager-cli
   - packages/native/*
 overrides:
+  # controllers-v2 source graph: shared Cordis service/type identity.
   '@deepseek-ai/cordis': link:../deepseek-harness-latest/vendor/cordis
-  '@deepseek-ai/dsh': link:../deepseek-harness-latest/apps/cli
+  # controllers-v2 source runtime: agent host service and types.
   '@deepseek-ai/dsh-agent': link:../deepseek-harness-latest/packages/core/agent
+  # controllers-v2 patch: shipped preset roster.
   '@deepseek-ai/dsh-agent-presets': link:../deepseek-harness-latest/packages/preset/agent-presets
+  # controllers-v2 adapter: session controller contract.
   '@deepseek-ai/dsh-api-session-controller': link:../deepseek-harness-latest/packages/api/session-controller
+  # controllers-v2 adapter: settings/credentials controller contract.
   '@deepseek-ai/dsh-api-settings-controller': link:../deepseek-harness-latest/packages/api/settings-controller
+  # controllers-v2 adapter: workspace controller contract.
   '@deepseek-ai/dsh-api-workspace-controller': link:../deepseek-harness-latest/packages/api/workspace-controller
+  # controllers-v2 source runtime: branded ids used by linked alpha packages.
   '@deepseek-ai/dsh-brand': link:../deepseek-harness-latest/packages/util/brand
+  # controllers-v2 patch: code-mode worker.
   '@deepseek-ai/dsh-code-runtime-worker-thread': link:../deepseek-harness-latest/packages/code-runtime/code-runtime-worker-thread
+  # controllers-v2 adapter: official command service.
   '@deepseek-ai/dsh-commands': link:../deepseek-harness-latest/packages/interaction/commands
+  # controllers-v2 patch: Cordis development host runner.
   '@deepseek-ai/dsh-cordis-host-runner': link:../deepseek-harness-latest/packages/extensions/cordis-host-runner
+  # controllers-v2 patch: file-reference contract package.
   '@deepseek-ai/dsh-file-reference': link:../deepseek-harness-latest/packages/context/file-reference
+  # controllers-v2 patch: local file-reference provider.
   '@deepseek-ai/dsh-file-reference-local': link:../deepseek-harness-latest/packages/context/file-reference-local
+  # controllers-v2 adapter: goal service contract.
   '@deepseek-ai/dsh-goal': link:../deepseek-harness-latest/packages/goal/goal
+  # controllers-v2 patch: native directory browser.
   '@deepseek-ai/dsh-host-directory-picker-browse': link:../deepseek-harness-latest/packages/host/directory-picker-browse
+  # controllers-v2 invariant companions used by source packages.
   '@deepseek-ai/dsh-invariants': link:../deepseek-harness-latest/packages/runtime-diagnostics/invariants
+  # controllers-v2 adapter: model/provider service contract.
   '@deepseek-ai/dsh-llm': link:../deepseek-harness-latest/packages/llm/llm
+  # controllers-v2 runtime: profile-resolved chunk-row decoder.
   '@deepseek-ai/dsh-session': link:../deepseek-harness-latest/packages/core/session
+  # controllers-v2 adapter: subagent service contract.
   '@deepseek-ai/dsh-subagent': link:../deepseek-harness-latest/packages/subagent/subagent
+  # controllers-v2 patch: subagent model-selection settings.
   '@deepseek-ai/dsh-tool-subagent': link:../deepseek-harness-latest/packages/subagent/tool-subagent
+  # controllers-v2 patch/adapter: workspace service.
   '@deepseek-ai/dsh-workspace': link:../deepseek-harness-latest/packages/workspace/workspace
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true

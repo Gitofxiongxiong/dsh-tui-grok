@@ -30,19 +30,17 @@ export type { DecodeFailure, DecodeResult, ParseFailure, ParseResult, ParseSucce
 export type { Branded } from './brand.js'
 export { SessionId, TuiClientId } from './ids.js'
 export {
-  API_PROXY_METHOD_SET,
   TUI_CAPABILITY_SET,
   TUI_METHOD_CAPABILITY_MAP,
   TUI_NOTIFICATION_METHOD_SET,
   TUI_REQUEST_METHOD_SET,
   TUI_UNARY_METHOD_SET,
   capabilityForTuiUnaryMethod,
-  isApiProxyMethod,
   isTuiNotificationMethod,
   isTuiRequestMethod,
   isTuiUnaryMethod,
 } from './methods.js'
-export type { ApiProxyMethod, TuiCapability, TuiUnaryMethod } from './methods.js'
+export type { TuiCapability, TuiUnaryMethod } from './methods.js'
 export type {
   ConnectionGeneration,
   ApiError,

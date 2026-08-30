@@ -202,12 +202,3 @@ export function isTuiRequestMethod(method: string): method is TuiRequestMethod {
 export function isTuiNotificationMethod(method: string): method is TuiNotificationMethod {
   return Object.hasOwn(TUI_NOTIFICATION_METHOD_SET, method)
 }
-
-/** @deprecated Use {@link TUI_UNARY_METHOD_SET} instead. */
-export const API_PROXY_METHOD_SET = TUI_UNARY_METHOD_SET
-
-/** @deprecated Use {@link TuiUnaryMethod} instead. */
-export type ApiProxyMethod = TuiUnaryMethod
-
-/** @deprecated Use {@link isTuiUnaryMethod} instead. */
-export const isApiProxyMethod = isTuiUnaryMethod

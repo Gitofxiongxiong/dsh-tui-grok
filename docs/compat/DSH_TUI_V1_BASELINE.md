@@ -14,7 +14,7 @@
 TypeScript runtime catalog 位于
 `packages/dsh-tui-protocol/src/methods.ts:14-88`。当前总数是 **65**：55 个 unary
 业务方法、5 个 TUI 控制请求、5 个 server notification。catalog 使用 `as const`
-冻结；`ApiProxyMethod` 命名仍是待 Phase 2 处理的兼容名称，method 字符串不得改变。
+冻结；统一类型名为 `TuiUnaryMethod`，method 字符串保持基线不变。
 
 ### Unary（55）
 

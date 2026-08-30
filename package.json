@@ -14,9 +14,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "build:ts": "pnpm --filter './packages/dsh-tui-*' run build && pnpm --filter @dsh-pager-grok/runtime run build",
+    "build:ts": "pnpm --filter './packages/dsh-tui-*' run build && pnpm --filter @dsh-pager-grok/runtime run build && pnpm --filter @dsh-pager-grok/runtime-apiproxy-v1 run build",
     "typecheck:ts": "pnpm --filter './packages/dsh-tui-*' run typecheck",
-    "test:ts": "pnpm --filter './packages/dsh-tui-*' run test && pnpm --filter @dsh-pager-grok/runtime test && pnpm --filter @dsh-pager-grok/cli test",
+    "test:ts": "pnpm --filter './packages/dsh-tui-*' run test && pnpm --filter @dsh-pager-grok/runtime test && pnpm --filter @dsh-pager-grok/runtime-apiproxy-v1 test && pnpm --filter @dsh-pager-grok/cli test",
     "verify:ts": "pnpm run build:ts && pnpm run typecheck:ts && pnpm run test:ts && node scripts/verify-runtime-pack.mjs && node scripts/verify-cli-pack.mjs && node scripts/verify-native-matrix.mjs"
   },
   "devDependencies": {
