@@ -1,15 +1,15 @@
 /**
- * Thin TUI dispatch entry over the Harness 0.1.2 bridge.
+ * Thin TUI dispatch entry over the selected DSH backend.
  *
  * @module @dsh-pager-grok/tui-server/dispatch
  */
 
 import type { ApiResult } from '@dsh-pager-grok/tui-protocol'
-import type { TuiHarnessBridge } from './bridge.js'
+import type { TuiBackend } from './backend.js'
 
-/** Forward one legacy unary call through the unique Harness adapter. */
+/** Forward one legacy unary call through the selected adapter. */
 export function dispatchUnary(
-  bridge: TuiHarnessBridge,
+  bridge: TuiBackend,
   method: string,
   params: unknown,
   operationId: string,
@@ -20,7 +20,7 @@ export function dispatchUnary(
 
 /** Resolve one pending approval/question waterfall request. */
 export function dispatchRespond(
-  bridge: TuiHarnessBridge,
+  bridge: TuiBackend,
   requestId: string,
   value: unknown,
 ): Promise<unknown> {

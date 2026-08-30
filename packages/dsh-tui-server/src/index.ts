@@ -16,6 +16,12 @@ import { TuiHarnessBridge, type TuiHarnessContext } from './bridge.js'
 export { TuiGateway, TUI_SERVER_VERSION } from './gateway.js'
 export { TuiHarnessBridge } from './bridge.js'
 export type { TuiHarnessContext } from './bridge.js'
+export type {
+  TuiBackend,
+  TuiBackendInfo,
+  TuiCapabilities,
+  TuiMuxEnvelope,
+} from './backend.js'
 export {
   ControlPlaneRouter,
   ControlPlaneStore,
