@@ -1,17 +1,80 @@
-# Builds stripped pager binaries and npm-packs native packages as artifacts.
-# Does not npm publish. Publish order (native → runtime → CLI) and OIDC
-# stay a later, explicit job. Runner SKUs match scripts/pager-platform-matrix.json.
-name: release-native
+# Two-stage release workflow.
+#
+# A v* tag push only rebuilds and retains immutable candidate artifacts. Actual
+# npm publication requires a second, explicit workflow_dispatch from that tag
+# with confirm=publish-<tag>. Published packages remain on release-candidate
+# until the maintainer completes registry verification and moves latest.
+name: release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type publish-vX.Y.Z while dispatching from the matching vX.Y.Z tag"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  pack:
-    name: pack ${{ matrix.id }}
+  metadata:
+    name: release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate immutable tag and package versions
+        id: release
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF_TYPE}" = tag
+          tag="${GITHUB_REF_NAME}"
+          [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
+          version="${tag#v}"
+          if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+            test "${CONFIRM}" = "publish-${tag}"
+          fi
+          node --input-type=module - "${version}" <<'NODE'
+          import fs from 'node:fs'
+          const expected = process.argv[2]
+          const manifests = [
+            'package.json',
+            'packages/dsh-pager-runtime-apiproxy-v1/package.json',
+            'packages/dsh-pager-cli/package.json',
+            'packages/native/linux-x64-gnu/package.json',
+            'packages/native/linux-arm64-gnu/package.json',
+            'packages/native/darwin-x64/package.json',
+            'packages/native/darwin-arm64/package.json',
+            'packages/native/win32-x64/package.json',
+          ]
+          for (const path of manifests) {
+            const actual = JSON.parse(fs.readFileSync(path, 'utf8')).version
+            if (actual !== expected) throw new Error(`${path}: ${actual} != tag ${expected}`)
+          }
+          NODE
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+  pack-native:
+    name: native ${{ matrix.id }}
+    needs: metadata
     runs-on: ${{ matrix.runner }}
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -19,23 +82,18 @@ jobs:
           - id: linux-x64-gnu
             runner: ubuntu-24.04
             rust_target: x86_64-unknown-linux-gnu
-            cross: false
           - id: linux-arm64-gnu
             runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
-            cross: false
           - id: darwin-arm64
             runner: macos-14
             rust_target: aarch64-apple-darwin
-            cross: false
           - id: darwin-x64
             runner: macos-14
             rust_target: x86_64-apple-darwin
-            cross: true
           - id: win32-x64
             runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
-            cross: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -45,12 +103,250 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: use audited npm CLI
+        if: github.event_name == 'workflow_dispatch'
+        run: npm install --global npm@11.13.0
       - name: pack native tarball
         shell: bash
         run: node scripts/pack-native.mjs --id ${{ matrix.id }}
-      - name: upload tarball
+      - name: publish native via OIDC
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarballs=("${GITHUB_WORKSPACE}"/*.tgz)
+          test -f "${tarballs[0]}"
+          test "${#tarballs[@]}" -eq 1
+          npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+      - name: upload native candidate
         uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.id }}
           path: "*.tgz"
           if-no-files-found: error
+
+  pack-js:
+    name: runtime and CLI candidates
+    needs: metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: use audited npm CLI and pnpm
+        run: |
+          npm install --global npm@11.13.0
+          corepack enable
+      - name: checkout exact DSH alpha build graph
+        run: |
+          set -euo pipefail
+          IFS=$'\t' read -r DSH_VERSION DSH_FAMILY DSH_REF DSH_COMMIT \
+            DSH_PACKAGE_MANAGER DSH_CHECKOUT_ENV DSH_CHECKOUT_DIR DSH_SOURCE \
+            DSH_FIXTURE DSH_LABEL \
+            < <(node scripts/dsh-matrix-config.mjs --source-only-tsv)
+          git clone --branch "${DSH_REF}" --depth 1 \
+            https://github.com/deepseek-ai/deepseek-harness.git \
+            "../${DSH_CHECKOUT_DIR}"
+          test "$(git -C "../${DSH_CHECKOUT_DIR}" rev-parse HEAD)" = "${DSH_COMMIT}"
+          {
+            echo "DSH_SOURCE_PACKAGE_MANAGER=${DSH_PACKAGE_MANAGER}"
+            echo "DSH_SOURCE_CHECKOUT_DIR=${DSH_CHECKOUT_DIR}"
+          } >> "${GITHUB_ENV}"
+      - name: build exact DSH alpha libraries
+        run: |
+          corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
+            --dir "../${DSH_SOURCE_CHECKOUT_DIR}" install --frozen-lockfile
+          corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
+            --dir "../${DSH_SOURCE_CHECKOUT_DIR}" run build:lib:host
+          corepack "${DSH_SOURCE_PACKAGE_MANAGER}" --pm-on-fail=ignore \
+            --dir "../${DSH_SOURCE_CHECKOUT_DIR}" run build:lib:client
+      - name: build and pack runtime and CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm@11.20.0 --pm-on-fail=ignore install --frozen-lockfile
+          corepack pnpm@11.20.0 --pm-on-fail=ignore run build:ts
+          mkdir -p "${RUNNER_TEMP}/js-candidates"
+          npm pack --pack-destination "${RUNNER_TEMP}/js-candidates" \
+            ./packages/dsh-pager-runtime-apiproxy-v1
+          npm pack --pack-destination "${RUNNER_TEMP}/js-candidates" \
+            ./packages/dsh-pager-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js-candidates
+          path: ${{ runner.temp }}/js-candidates/*.tgz
+          if-no-files-found: error
+
+  publish-runtime:
+    name: publish or verify runtime
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, pack-native, pack-js]
+    runs-on: ubuntu-24.04
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-candidates
+          path: ${{ runner.temp }}/js-candidates
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install --global npm@11.13.0
+      - name: publish through OIDC or verify one-time bootstrap
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          package='@dsh-pager-grok/runtime-apiproxy-v1'
+          mapfile -t tarballs < <(find "${RUNNER_TEMP}/js-candidates" -maxdepth 1 \
+            -type f -name 'dsh-pager-grok-runtime-apiproxy-v1-*.tgz')
+          test "${#tarballs[@]}" -eq 1
+          lookup_log="${RUNNER_TEMP}/runtime-view.log"
+          if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
+            local_integrity="$(node --input-type=module - "${tarballs[0]}" <<'NODE'
+            import fs from 'node:fs'
+            import crypto from 'node:crypto'
+            const bytes = fs.readFileSync(process.argv[2])
+            process.stdout.write(`sha512-${crypto.createHash('sha512').update(bytes).digest('base64')}`)
+            NODE
+            )"
+            test "${local_integrity}" = "${registry_integrity}"
+            echo "verified bootstrap ${package}@${VERSION} integrity=${registry_integrity}"
+          else
+            if ! grep -q 'E404' "${lookup_log}"; then
+              cat "${lookup_log}" >&2
+              exit 1
+            fi
+            npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+          fi
+
+  registry-cold:
+    name: registry cold install and PTY
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, publish-runtime, pack-js]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: install pnpm and ripgrep
+        run: |
+          corepack enable
+          command -v rg
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-candidates
+          path: ${{ runner.temp }}/js-candidates
+      - name: wait for registry replication
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          packages=(
+            '@dsh-pager-grok/native-linux-x64-gnu'
+            '@dsh-pager-grok/runtime-apiproxy-v1'
+          )
+          for package in "${packages[@]}"; do
+            for attempt in {1..12}; do
+              if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
+                break
+              fi
+              if [ "${attempt}" -eq 12 ]; then
+                echo "${package}@${VERSION} did not replicate" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+          done
+      - name: cold doctor, smoke, warm/offline and PTY
+        shell: bash
+        env:
+          DSH_RELEASE_REGISTRY_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t cli_tarballs < <(find "${RUNNER_TEMP}/js-candidates" -maxdepth 1 \
+            -type f -name 'dsh-pager-grok-cli-*.tgz')
+          test "${#cli_tarballs[@]}" -eq 1
+          export DSH_RELEASE_CLI_TARBALL="${cli_tarballs[0]}"
+          bash scripts/rehearse-release-candidate.sh | tee "${RUNNER_TEMP}/registry-cold.log"
+          evidence_root="$(sed -n 's/^release candidate root (retained): //p' \
+            "${RUNNER_TEMP}/registry-cold.log" | head -n 1)"
+          test -f "${evidence_root}/result.json"
+          cp -R "${evidence_root}" "${RUNNER_TEMP}/registry-cold-evidence"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-cold-evidence
+          path: ${{ runner.temp }}/registry-cold-evidence
+          if-no-files-found: error
+
+  publish-cli:
+    name: publish CLI
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, registry-cold, pack-js]
+    runs-on: ubuntu-24.04
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-candidates
+          path: ${{ runner.temp }}/js-candidates
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install --global npm@11.13.0
+      - name: publish CLI via OIDC
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t tarballs < <(find "${RUNNER_TEMP}/js-candidates" -maxdepth 1 \
+            -type f -name 'dsh-pager-grok-cli-*.tgz')
+          test "${#tarballs[@]}" -eq 1
+          npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+
+  verify-registry:
+    name: verify registry publication
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, publish-cli]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: verify exact versions, staging tags and provenance
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          packages=(
+            '@dsh-pager-grok/native-linux-x64-gnu'
+            '@dsh-pager-grok/native-linux-arm64-gnu'
+            '@dsh-pager-grok/native-darwin-x64'
+            '@dsh-pager-grok/native-darwin-arm64'
+            '@dsh-pager-grok/native-win32-x64'
+            '@dsh-pager-grok/runtime-apiproxy-v1'
+            '@dsh-pager-grok/cli'
+          )
+          for package in "${packages[@]}"; do
+            test "$(npm view "${package}@${VERSION}" version)" = "${VERSION}"
+            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
+            if [ "${package}" != '@dsh-pager-grok/runtime-apiproxy-v1' ]; then
+              test -n "$(npm view "${package}@${VERSION}" dist.attestations.url)"
+            fi
+          done

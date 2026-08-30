@@ -1,6 +1,7 @@
 # dsh-pager-grok 0.2.0 发布候选 Checklist
 
-> 状态：本地候选演练；未 publish、未移动 dist-tag、未 push Tag、未创建 Release。
+> 状态：发布已获维护者授权；正式 workflow PR/CI、Tag、publish、dist-tag 与 Release
+> 仍按本表顺序留证据，未执行项不得提前勾选。
 > 单一 DSH 支持真源：[`compat/dsh-support.json`](../compat/dsh-support.json)
 
 ## 候选范围与发布边界
@@ -27,17 +28,21 @@
 
 ## 维护者人工发布顺序
 
-以下步骤是明确授权发布之后的人工操作；本次 agent 演练不得执行。
+以下步骤只在明确授权发布之后执行。`release.yml` 的 Tag push 只生成候选；实际发布
+必须从同一 Tag 手动 dispatch 并输入 `publish-v0.2.0`。
 
 1. 审批 `0.2.0`、目标 commit、stable/prerelease 与目标 dist-tag；确认 PR/main CI
    三平台 Rust + 三 DSH 版本矩阵全绿。
 2. push 已审批分支/PR，合并后从同一 main commit 创建并 push `v0.2.0` Tag。
-3. 在各自 runner 从该 Tag 构建并发布五个 `@dsh-pager-grok/native-*@0.2.0`；验证
-   executable bit、provenance 与平台 metadata。
-4. 发布 `@dsh-pager-grok/runtime-apiproxy-v1@0.2.0`。
-5. 用 registry 上的 native/runtime 再跑一次 clean-prefix cold install；不得用本地
-   tarball冒充已发布包。
-6. 最后发布 `@dsh-pager-grok/cli@0.2.0`。
+3. 等待 Tag artifact run 全绿；从该 run 下载 runtime 候选并对新 package 做一次
+   `release-candidate` bootstrap，随后立即绑定 `release.yml` Trusted Publisher。
+4. 从 `v0.2.0` dispatch 正式 workflow；各 runner 先构建/发布五个
+   `@dsh-pager-grok/native-*@0.2.0`，验证 executable bit、provenance 与平台 metadata；
+   workflow 再核对 bootstrap runtime 与同 Tag 候选的 SHA-512 integrity。
+5. workflow 用 registry 上的 native/runtime + 同 Tag CLI 候选跑 clean-prefix
+   cold/warm/offline、doctor/hello/list/load 与 PTY；不得用本地 native/runtime tarball
+   冒充已发布包。
+6. 上一步通过后，由 workflow 最后发布 `@dsh-pager-grok/cli@0.2.0`。
 7. 验证 npm version/provenance/install 后再移动约定 dist-tag；最后创建 GitHub
    Release 并附支持表、已知限制和回滚说明。
 
@@ -54,7 +59,7 @@
 
 ## 发布前最后人工确认
 
-- [ ] 维护者审批版本、commit、dist-tag、包列表和副作用。
+- [x] 维护者审批 `0.2.0` stable、`latest`、公开包列表和发布副作用。
 - [ ] push 分支/合并 PR/创建并 push 单一 `v0.2.0` Tag。
 - [ ] Trusted Publishing 按 native → runtime → registry cold → CLI 执行。
 - [ ] 移动 npm dist-tag。

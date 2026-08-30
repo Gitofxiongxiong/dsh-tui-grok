@@ -12,25 +12,45 @@ mkdir -p "$artifacts" "$install_root" "$cold_home" "$logs" "$release_root/pnpm-s
 printf 'release candidate root (retained): %s\n' "$release_root"
 printf 'No cleanup trap is installed; this isolated evidence directory is retained.\n'
 
-corepack pnpm@11.20.0 --pm-on-fail=ignore --dir "$repo_root" run build:ts \
-  >"$logs/build-ts.log" 2>&1
-node "$repo_root/scripts/pack-release-candidates.mjs" "$artifacts" \
-  >"$logs/pack-candidates.log" 2>&1
+registry_version="${DSH_RELEASE_REGISTRY_VERSION:-}"
+registry_cli_tarball="${DSH_RELEASE_CLI_TARBALL:-}"
+if [[ -n "$registry_version" || -n "$registry_cli_tarball" ]]; then
+  if [[ ! "$registry_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+    printf 'DSH_RELEASE_REGISTRY_VERSION must be an exact semver\n' >&2
+    exit 1
+  fi
+  if [[ ! -f "$registry_cli_tarball" ]]; then
+    printf 'DSH_RELEASE_CLI_TARBALL does not exist: %s\n' "$registry_cli_tarball" >&2
+    exit 1
+  fi
+  registry_cli_tarball="$(readlink -f "$registry_cli_tarball")"
+  publish_tarballs=(
+    "$registry_cli_tarball"
+    "@dsh-pager-grok/runtime-apiproxy-v1@$registry_version"
+  )
+  runtime_spec="@dsh-pager-grok/runtime-apiproxy-v1@$registry_version"
+  printf 'registry mode: version=%s cli=%s\n' "$registry_version" "$registry_cli_tarball"
+else
+  corepack pnpm@11.20.0 --pm-on-fail=ignore --dir "$repo_root" run build:ts \
+    >"$logs/build-ts.log" 2>&1
+  node "$repo_root/scripts/pack-release-candidates.mjs" "$artifacts" \
+    >"$logs/pack-candidates.log" 2>&1
 
-mapfile -t publish_tarballs < <(node --input-type=module - "$artifacts/release-candidates.json" <<'NODE'
+  mapfile -t publish_tarballs < <(node --input-type=module - "$artifacts/release-candidates.json" <<'NODE'
 import fs from 'node:fs'
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 for (const artifact of manifest.artifacts) if (artifact.publish) console.log(artifact.tarball)
 NODE
-)
-runtime_tarball="$(node --input-type=module - "$artifacts/release-candidates.json" <<'NODE'
+  )
+  runtime_spec="$(node --input-type=module - "$artifacts/release-candidates.json" <<'NODE'
 import fs from 'node:fs'
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const runtime = manifest.artifacts.find(item => item.id === 'runtime-apiproxy-v1')
 if (!runtime) process.exit(2)
 process.stdout.write(runtime.tarball)
 NODE
-)"
+  )"
+fi
 
 cd "$install_root"
 npm init --yes >"$logs/npm-init.log" 2>&1
@@ -72,9 +92,10 @@ export DSH_HOME="$cold_home"
 export DSH_PAGER_DEV_MODE=1
 export npm_config_store_dir="$release_root/pnpm-store"
 
-# The runtime is not in the registry before the authorized publish step. Prepare
-# the cold family profile explicitly from its tarball, using the CLI's canonical
-# policy/ownership helpers, then exercise the normal warm launcher path.
+# Prepare the cold family profile explicitly from the selected runtime spec,
+# using the CLI's canonical policy/ownership helpers, then exercise the normal
+# warm launcher path. Registry mode resolves runtime and native packages from
+# npm while keeping the not-yet-published CLI as the audited Tag tarball.
 export PATH="$install_root/node_modules/.bin:$PATH"
 node "$dsh_entry" plugin --profile "$profile" list >"$logs/profile-init.log" 2>&1
 node --input-type=module - \
@@ -84,7 +105,7 @@ import { pathToFileURL } from 'node:url'
 const launcher = await import(pathToFileURL(process.argv[2]))
 launcher.ensureProfileBuildPolicy({ profile: process.argv[3] }, process.env)
 NODE
-node "$dsh_entry" plugin --profile "$profile" add "$runtime_tarball" \
+node "$dsh_entry" plugin --profile "$profile" add "$runtime_spec" \
   >"$logs/profile-runtime-install.log" 2>&1
 node --input-type=module - \
   "$install_root/node_modules/@dsh-pager-grok/cli/lib/launcher.js" \
@@ -141,8 +162,11 @@ const result = {
   schemaVersion: 1,
   result: 'passed',
   releaseRoot: root,
+  installSource: process.env.DSH_RELEASE_REGISTRY_VERSION
+    ? 'registry-native-runtime'
+    : 'local-tarballs',
   checks: [
-    'pack',
+    process.env.DSH_RELEASE_REGISTRY_VERSION ? 'tag-cli-tarball' : 'pack',
     'cold-install',
     'dependency-graph',
     'doctor-release',
