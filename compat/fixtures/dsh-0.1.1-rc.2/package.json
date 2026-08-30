@@ -1,0 +1,40 @@
+{
+  "name": "@dsh-pager-grok/compat-dsh-0.1.1-rc.2",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "node ./check-build.mjs",
+    "e2e": "bash ./run-e2e.sh"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-agent-presets": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-commands": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-cordis-host-runner": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-file-reference": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-file-reference-local": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session-projection-cache": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage-json": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-workspace": "0.1.1-rc.2"
+  }
+}
