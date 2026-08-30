@@ -4,7 +4,7 @@
  * @module @dsh-pager-grok/tui-protocol/ids
  */
 
-import { SessionId } from '@deepseek-ai/dsh-session/types'
+import { SessionId } from './brand.js'
 import type { TuiClientId } from './types.js'
 
 export { SessionId }

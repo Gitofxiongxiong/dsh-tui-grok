@@ -27,14 +27,19 @@ export {
   tuiError,
 } from './codec.js'
 export type { DecodeFailure, DecodeResult, ParseFailure, ParseResult, ParseSuccess } from './codec.js'
+export type { Branded } from './brand.js'
 export { SessionId, TuiClientId } from './ids.js'
 export {
   API_PROXY_METHOD_SET,
+  TUI_NOTIFICATION_METHOD_SET,
+  TUI_REQUEST_METHOD_SET,
+  TUI_UNARY_METHOD_SET,
   isApiProxyMethod,
   isTuiNotificationMethod,
   isTuiRequestMethod,
+  isTuiUnaryMethod,
 } from './methods.js'
-export type { ApiProxyMethod } from './methods.js'
+export type { ApiProxyMethod, TuiUnaryMethod } from './methods.js'
 export type {
   ConnectionGeneration,
   ApiError,
@@ -79,6 +84,7 @@ export type {
   TuiControlPlaneRecord,
   TuiSessionControlSnapshot,
   TuiSessionProjection,
+  TuiSessionEvent,
   TuiStampedMuxFrame,
   TuiStampedHostFrame,
   TuiSubscribeScope,

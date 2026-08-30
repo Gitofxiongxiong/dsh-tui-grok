@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  API_PROXY_METHOD_SET,
+  TUI_UNARY_METHOD_SET,
   TUI_ERROR_CODES,
   TUI_PROTOCOL_VERSION,
   TUI_SERVER_INFO_NAME,
@@ -17,7 +17,7 @@ import {
   decodeJsonRpcMessage,
   decodeRespondParams,
   decodeSubscribeParams,
-  isApiProxyMethod,
+  isTuiUnaryMethod,
   isTuiNotificationMethod,
   isTuiRequestMethod,
   parseJsonRpcLine,
@@ -213,12 +213,12 @@ describe('classifyMethod', () => {
     expect(isTuiRequestMethod('tui.setSessionMode')).toBe(false)
     expect(classifyMethod('tui.setSessionMode')).toBe('unknown')
     expect(isTuiNotificationMethod('tui.serverDraining')).toBe(true)
-    expect(isApiProxyMethod('llm.models')).toBe(true)
-    expect(isApiProxyMethod('fileReferences.list')).toBe(true)
-    expect(isApiProxyMethod('commands/list')).toBe(true)
-    expect(isApiProxyMethod('commands/execute')).toBe(true)
-    expect(isApiProxyMethod('tui.hello')).toBe(false)
-    expect(Object.keys(API_PROXY_METHOD_SET).length).toBeGreaterThan(20)
+    expect(isTuiUnaryMethod('llm.models')).toBe(true)
+    expect(isTuiUnaryMethod('fileReferences.list')).toBe(true)
+    expect(isTuiUnaryMethod('commands/list')).toBe(true)
+    expect(isTuiUnaryMethod('commands/execute')).toBe(true)
+    expect(isTuiUnaryMethod('tui.hello')).toBe(false)
+    expect(Object.keys(TUI_UNARY_METHOD_SET).length).toBeGreaterThan(20)
   })
 })
 

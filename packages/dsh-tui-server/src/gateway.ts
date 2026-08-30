@@ -18,6 +18,7 @@ import {
   decodeHelloParams,
   decodeRespondParams,
   decodeSubscribeParams,
+  isTuiUnaryMethod,
   TuiClientId,
   type ConnectionGeneration,
   type HostFrame,
@@ -128,6 +129,7 @@ export class TuiGateway {
     }
     if (kind === 'tui-request') return await this.handleControl(method, params)
     if (kind === 'api') {
+      if (!isTuiUnaryMethod(method)) throw new TuiMethodNotFoundError(method)
       const result = await dispatchUnary(
         this.bridge,
         method,

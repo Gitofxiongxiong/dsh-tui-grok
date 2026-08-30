@@ -1,14 +1,13 @@
 /**
- * JSON-RPC 2.0 line codec plus TUI control-payload decoders. ApiProxy method
+ * JSON-RPC 2.0 line codec plus TUI control-payload decoders. Unary method
  * params are left opaque: the gateway validates them.
  *
  * @module @dsh-pager-grok/tui-protocol/codec
  */
 
-import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { TUI_ERROR_CODES, TUI_PROTOCOL_VERSION, TUI_SERVER_INFO_NAME } from './constants.js'
-import { TuiClientId } from './ids.js'
-import { isApiProxyMethod, isTuiNotificationMethod, isTuiRequestMethod } from './methods.js'
+import { SessionId, TuiClientId } from './ids.js'
+import { isTuiNotificationMethod, isTuiRequestMethod, isTuiUnaryMethod } from './methods.js'
 import type {
   ConnectionGeneration,
   JsonRpcErrorObject,
@@ -212,7 +211,7 @@ export function tuiError(
 export function classifyMethod(method: string): 'tui-request' | 'tui-notification' | 'api' | 'unknown' {
   if (isTuiRequestMethod(method)) return 'tui-request'
   if (isTuiNotificationMethod(method)) return 'tui-notification'
-  if (isApiProxyMethod(method)) return 'api'
+  if (isTuiUnaryMethod(method)) return 'api'
   return 'unknown'
 }
 

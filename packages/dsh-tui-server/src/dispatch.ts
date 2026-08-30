@@ -4,13 +4,13 @@
  * @module @dsh-pager-grok/tui-server/dispatch
  */
 
-import type { ApiResult } from '@dsh-pager-grok/tui-protocol'
+import type { ApiResult, TuiUnaryMethod } from '@dsh-pager-grok/tui-protocol'
 import type { TuiBackend } from './backend.js'
 
 /** Forward one legacy unary call through the selected adapter. */
 export function dispatchUnary(
   bridge: TuiBackend,
-  method: string,
+  method: TuiUnaryMethod,
   params: unknown,
   operationId: string,
   signal: AbortSignal = new AbortController().signal,

@@ -4,10 +4,9 @@
  * @module @dsh-pager-grok/tui-protocol/types
  */
 
-import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
+import type { Branded, SessionId } from './brand.js'
 
-export type { SessionId }
+export type { SessionId } from './brand.js'
 
 /** Stable business error carried inside a successful JSON-RPC response. */
 export interface ApiError {
@@ -57,12 +56,19 @@ export interface WorkspaceView {
 }
 
 /**
+ * Minimal session-event projection carried transparently on the TUI wire.
+ * The Rust reducer is the source of truth for discriminating concrete event
+ * types; the TypeScript carrier deliberately performs no runtime validation.
+ */
+export type TuiSessionEvent = { type: string; seq: number } & Record<string, unknown>
+
+/**
  * Stable mux vocabulary consumed by the Rust pager. Harness 0.1.2 emits
  * follow/control/waterfall surfaces; the server bridge translates those
  * surfaces back to this union.
  */
 export type MuxFrame =
-  | { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView }
+  | { type: 'session/event'; sessionId: SessionId; event: TuiSessionEvent; view?: ToolEventView }
   | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
   | {
     type: 'approval/requested'

@@ -9,6 +9,7 @@ import type {
   HostFrame,
   MuxFrame,
   SessionId,
+  TuiUnaryMethod,
 } from '@dsh-pager-grok/tui-protocol'
 
 /** Product capabilities implemented by one DSH adapter. */
@@ -51,7 +52,7 @@ export interface TuiBackend {
   readonly info: TuiBackendInfo
 
   call(
-    method: string,
+    method: TuiUnaryMethod,
     params: unknown,
     operationId: string,
     signal: AbortSignal,
