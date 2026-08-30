@@ -798,6 +798,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn modal_uses_grok_resume_title_and_geometry() {
         let mut picker = ResumePickerState::default();
         let revision = picker.open("a", "/work/current/repo");
