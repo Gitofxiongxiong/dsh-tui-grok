@@ -15,6 +15,7 @@ use dsh_pager_protocol::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -843,7 +844,10 @@ fn choose_session(
                     !item.blank
                         && item.parent_session_id.is_none()
                         && item.origin.is_none()
-                        && item.cwd.as_deref() == Some(cwd)
+                        && item
+                            .cwd
+                            .as_deref()
+                            .is_some_and(|session_cwd| same_directory(session_cwd, cwd))
                 })
                 .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at));
             recent.map(|item| item.session_id.clone()).ok_or_else(|| {
@@ -852,6 +856,20 @@ fn choose_session(
                 ))
             })
         }
+    }
+}
+
+fn same_directory(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (
+        Path::new(left).canonicalize(),
+        Path::new(right).canonicalize(),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -988,4 +1006,26 @@ fn api_call<T: DeserializeOwned>(
             .seed_workspace_list(value)?;
     }
     envelope.into_result().map_err(PagerError::from)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::same_directory;
+
+    #[test]
+    fn directory_match_accepts_exact_and_canonical_aliases() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let cwd = cwd.to_str().expect("UTF-8 current directory");
+
+        assert!(same_directory(cwd, cwd));
+        assert!(same_directory(".", cwd));
+    }
+
+    #[test]
+    fn directory_match_does_not_guess_for_missing_paths() {
+        assert!(!same_directory(
+            "dsh-pager-missing-directory-left",
+            "dsh-pager-missing-directory-right",
+        ));
+    }
 }
