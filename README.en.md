@@ -53,13 +53,15 @@ dsh-pager --new
 
 On first launch, the CLI prepares an isolated family profile such as
 `dsh-pager-grok-apiproxy-v1`. You do not need to copy or modify a DeepSeek Harness
-checkout. Before launching public version `0.1.0`,
+checkout. Before launching public version `0.2.0`,
 provide an API key through the DeepSeek Harness credential layer—for example with
 `DEEPSEEK_API_KEY` or an existing `$DSH_HOME/.credentials.yaml`.
 
 > [!IMPORTANT]
-> npm `0.1.0` does not yet include `/login`, `/model`, agent presets, or `--resume` from
-> the current source. The explicit `--new` above works consistently in both versions.
+> npm `0.2.0` still keeps the old no-argument behavior that resumes recent history. The
+> explicit `--new` above is its deterministic new-session entry point. Current source
+> fixes no-argument startup to create a new conversation; history requires explicit
+> `--resume`/`--continue` or `/resume` in the TUI, effective in the next patch release.
 
 You can also run a preflight check that never prints secret values:
 
@@ -79,7 +81,7 @@ dsh-pager doctor
 
 ## Everyday commands
 
-### npm 0.1.0
+### npm 0.2.0
 
 | Command | Purpose |
 |---|---|

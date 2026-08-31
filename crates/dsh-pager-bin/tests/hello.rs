@@ -32,7 +32,7 @@ fn hello_against_mock_server_exits_zero() {
 }
 
 #[test]
-fn load_barrier_against_mock_server_exits_zero() {
+fn default_start_creates_a_new_session() {
     let mock = mock_server_arg();
     let output = Command::new(pager_bin())
         .args(["--load-only", "--backend", "node", "--backend-arg", &mock])
@@ -42,8 +42,89 @@ fn load_barrier_against_mock_server_exits_zero() {
     assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
     assert!(stderr.contains("tui.hello ok"), "{stderr}");
     assert!(
+        stderr.contains("SessionLoaded sessionId=session-created events=0 seq=-..-"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn explicit_resume_id_loads_existing_history() {
+    let mock = mock_server_arg();
+    let output = Command::new(pager_bin())
+        .args([
+            "--load-only",
+            "--resume",
+            "session-mock",
+            "--backend",
+            "node",
+            "--backend-arg",
+            &mock,
+        ])
+        .output()
+        .expect("spawn dsh-pager");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
         stderr.contains("SessionLoaded sessionId=session-mock events=4 seq=0..3"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn resume_without_id_loads_the_current_directorys_recent_session() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    let mock = mock_server_arg();
+    command
+        .env(
+            "DSH_PAGER_MOCK_SESSION_CWD",
+            utf8_path_arg(sandbox.workspace()),
+        )
+        .args([
+            "--load-only",
+            "--resume",
+            "--backend",
+            "node",
+            "--backend-arg",
+            &mock,
+        ]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("resume recent");
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert!(
+        output
+            .stderr
+            .contains("SessionLoaded sessionId=session-mock events=4 seq=0..3"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn resume_without_history_is_strict_and_does_not_create() {
+    let sandbox = TestSandbox::new().expect("sandbox");
+    let mut command = sandbox.command(pager_bin());
+    let mock = mock_server_arg();
+    command.args([
+        "--load-only",
+        "--resume",
+        "--backend",
+        "node",
+        "--backend-arg",
+        &mock,
+    ]);
+    let output = run_with_timeout(&mut command, Duration::from_secs(5)).expect("strict resume");
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output
+            .stderr
+            .contains("no resumable top-level session found for current directory"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("session-created"),
+        "{}",
+        output.stderr
     );
 }
 
@@ -53,6 +134,8 @@ fn prompt_approval_question_round_trip_against_mock_server_exits_zero() {
     let output = Command::new(pager_bin())
         .args([
             "--smoke-interactions",
+            "--resume",
+            "session-mock",
             "--backend",
             "node",
             "--backend-arg",
@@ -89,7 +172,15 @@ fn session_search_selects_the_host_returned_match() {
 fn queue_mutations_converge_on_authoritative_snapshots() {
     let mock = mock_server_arg();
     let output = Command::new(pager_bin())
-        .args(["--smoke-queue", "--backend", "node", "--backend-arg", &mock])
+        .args([
+            "--smoke-queue",
+            "--resume",
+            "session-mock",
+            "--backend",
+            "node",
+            "--backend-arg",
+            &mock,
+        ])
         .output()
         .expect("spawn dsh-pager");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -103,6 +194,8 @@ fn session_lifecycle_smoke_round_trips_rename_and_fork() {
     let output = Command::new(pager_bin())
         .args([
             "--smoke-lifecycle",
+            "--resume",
+            "session-mock",
             "--backend",
             "node",
             "--backend-arg",

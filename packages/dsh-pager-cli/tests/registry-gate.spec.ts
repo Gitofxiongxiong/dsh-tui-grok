@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { collectRegistryDependencies, runRegistryDependencyGate } from '../lib/registry-gate.js'
+import {
+  collectRegistryDependencies,
+  normalizeNpmViewVersion,
+  runRegistryDependencyGate,
+} from '../lib/registry-gate.js'
 
 const roots: string[] = []
 
@@ -20,6 +24,12 @@ function manifest(value: object) {
 }
 
 describe('registry dependency gate', () => {
+  it('normalizes npm 11 scalar and npm 12 singleton-array version output', () => {
+    expect(normalizeNpmViewVersion('"1.2.3"\n')).toBe('1.2.3')
+    expect(normalizeNpmViewVersion('["1.2.3"]\n')).toBe('1.2.3')
+    expect(normalizeNpmViewVersion('["1.2.3", "1.2.4"]\n')).toEqual(['1.2.3', '1.2.4'])
+  })
+
   it('collects dependencies and required peers but excludes optional declarations', () => {
     const path = manifest({
       name: '@dsh-pager-grok/candidate',

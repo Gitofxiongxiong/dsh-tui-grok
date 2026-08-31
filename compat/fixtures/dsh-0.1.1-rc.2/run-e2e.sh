@@ -104,11 +104,11 @@ run_pager() {
 run_pager --hello
 run_pager --list-sessions
 run_pager --dashboard
-run_pager --load-only --new
+run_pager --load-only
 
-DSH_HOME="$DSH_HOME" python3 "$repo_root/scripts/pty-smoke.py" \
+env -u DEEPSEEK_API_KEY DSH_HOME="$DSH_HOME" \
+  python3 "$repo_root/scripts/pty-smoke.py" \
   --binary "$binary" \
-  --pager-arg=--new \
   --backend "$node_program" \
   "--backend-arg=$dsh_entry" \
   "--backend-arg=--profile" \

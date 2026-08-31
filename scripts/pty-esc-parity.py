@@ -41,6 +41,8 @@ def main() -> int:
             str(args.binary),
             [
                 str(args.binary),
+                "--resume",
+                "session-mock",
                 "--backend",
                 "node",
                 "--backend-arg",

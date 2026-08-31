@@ -67,14 +67,22 @@ function npmView(name, version, options) {
   if (result.status !== 0) {
     return { ok: false, detail: firstLine(result.stderr || result.stdout || `npm view exited ${result.status ?? 1}`) }
   }
-  let actual
-  try {
-    actual = JSON.parse(result.stdout)
-  } catch {
-    actual = result.stdout.trim().replace(/^"|"$/g, '')
-  }
+  const actual = normalizeNpmViewVersion(result.stdout)
   const ok = actual === version
   return { ok, detail: ok ? `registry returned ${actual}` : `registry returned ${JSON.stringify(actual)}` }
+}
+
+export function normalizeNpmViewVersion(stdout) {
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return stdout.trim().replace(/^"|"$/g, '')
+  }
+  if (Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === 'string') {
+    return parsed[0]
+  }
+  return parsed
 }
 
 function isRecord(value) {

@@ -676,7 +676,7 @@ flowchart LR
 产品 argv（启动器组装，注意 `--backend-arg` 值可以以 `--` 开头，rust `parse_args` 已按「flag 后下一个 token 为值」处理）。**仅当** `argv.slice(2)` 不含 `--backend`（v1 不支持 `--backend=`）**且** `DSH_TUI_SERVER` 未设时才追加：
 
 ```text
-<cached-bin> [--new|--session <id>|…用户转发的 pager 旗标] \
+<cached-bin> [--resume [<id>]|--continue|--new|--session <id>|…用户转发的 pager 旗标] \
   --backend <process.execPath> \
   --backend-arg <absolute @deepseek-ai/dsh/lib/bin.js> \
   --backend-arg --profile \
@@ -800,15 +800,23 @@ Commands:
 
 Pager flags (forwarded to the native binary):
   --hello | --load-only | --list-sessions | --dashboard
-  --new | --session <id> | --session-search <query>
+  --resume [id] | --continue | --new | --session <id> | --session-search <query>
   --smoke-interactions | --smoke-queue | --smoke-lifecycle
   --backend <program> | --backend-arg <arg>   (repeatable; values may start with --)
+
+Session startup:
+  No session flag starts a new conversation. Use --resume/-r (or /resume in the TUI)
+  to open history; --new, --session and --session-search remain compatibility flags.
 
 Default product backend (injected unless argv already has --backend or DSH_TUI_SERVER is set):
   --backend <node> --backend-arg <dsh lib/bin.js> --backend-arg --profile --backend-arg dsh-pager-grok
 ```
 
-`dsh-pager --new`：argv[2] 是 `--new`，走转发。`dsh-pager --help`：启动器 help。`dsh-pager --hello --help`：转交给 rust，rust 在任意位置遇到 `--help` 会打印 rust help 并 exit 0（现有 `parse_args` 行为）。
+`dsh-pager` 无会话旗标时默认新建会话；`dsh-pager --resume`、
+`dsh-pager --resume <id>` 和 `dsh-pager --continue` 才显式恢复历史。
+`dsh-pager --new` 继续走原样转发，作为兼容旗标。`dsh-pager --help`：启动器
+help。`dsh-pager --hello --help`：转交给 rust，rust 在任意位置遇到 `--help`
+会打印 rust help 并 exit 0（现有 `parse_args` 行为）。
 
 v1 子命令不再解析额外产品旗标（`update`/`doctor`/`uninstall` 忽略多余参数并以非零退出，避免 silently swallow）。
 
@@ -953,6 +961,9 @@ workspace 内开发可继续 `workspace:*`，由 `pnpm pack`/`publish` 改写；
 | TS | 一次 `plugin add` 四个源码 `link:` | `plugin add tui-embedded@semver`（拉齐三依赖） |
 | 二进制 | `DSH_PAGER_BIN` 或脚本编出的 `target/debug/dsh-pager` | `resolvePagerBinary` 缓存 |
 | Backend | `DSH_TUI_SERVER` 指向 harness `lib/bin.js --profile dsh-pager-grok-dev` | 启动器注入 `--backend <node> --backend-arg <dsh lib/bin.js> --backend-arg --profile --backend-arg dsh-pager-grok`（用户已传 `--backend` 则不注入） |
+
+Dev 和 Product 的会话启动语义一致：不传会话旗标即新对话，只有显式
+`--resume/-r`、`--continue/-c`、兼容 `--session` 或 TUI 内 `/resume` 才打开历史。
 
 ### 用户可见 CLI
 

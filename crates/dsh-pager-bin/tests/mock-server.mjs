@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline'
 import { appendFileSync } from 'node:fs'
 
 const sessionId = 'session-mock'
+const sessionCwd = process.env.DSH_PAGER_MOCK_SESSION_CWD ?? '/work'
 let sessionTitle = 'Mock session'
 const PERMISSION_PRESETS = ['workspace-write', 'danger-full-access']
 let planActive = false
@@ -510,7 +511,7 @@ rl.on('line', (line) => {
       updatedAt: 4,
       running: false,
       blank: false,
-      cwd: '/work',
+      cwd: sessionCwd,
       projections: { asOfSeq: 3, values: { title: sessionTitle } },
     }] })
     return

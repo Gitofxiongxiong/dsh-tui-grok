@@ -106,6 +106,6 @@ printf 'Starting a new conversation with profile %s. Press Ctrl+C to exit.\n' \
 # parent preference collapse the running rail gradient into a static line.
 # TERM and COLORTERM remain untouched so crossterm still sees the real terminal.
 if (( use_env_backend == 1 )); then
-  exec env -u NO_COLOR "$pager" --new
+  exec env -u NO_COLOR "$pager"
 fi
-exec env -u NO_COLOR "$pager" --new "${dsh_tui_pager_backend_argv[@]}"
+exec env -u NO_COLOR "$pager" "${dsh_tui_pager_backend_argv[@]}"

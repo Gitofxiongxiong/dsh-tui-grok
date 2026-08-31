@@ -76,11 +76,10 @@ fi
 
 pager_session_args=()
 if [[ -n "$session_id" ]]; then
-  pager_session_args=(--session "$session_id")
+  pager_session_args=(--resume "$session_id")
   printf 'using existing session: %s\n' "$session_id"
 else
-  pager_session_args=(--new)
-  printf 'using an isolated new session (set REAL_E2E_SESSION for read-only attach)\n'
+  printf 'using the default isolated new session (set REAL_E2E_SESSION for read-only attach)\n'
 fi
 if (( use_env_backend == 1 )); then
   run_pager --load-only "${pager_session_args[@]}"
@@ -128,9 +127,9 @@ if (( use_env_backend == 0 )); then
   done < <(find "$source_profile_dir" -type l -print0)
 fi
 
-DSH_HOME="$pty_dsh_home" python3 scripts/pty-smoke.py \
+env -u DEEPSEEK_API_KEY DSH_HOME="$pty_dsh_home" \
+  python3 scripts/pty-smoke.py \
   --binary "$binary" \
-  --pager-arg=--new \
   "${pty_backend_argv[@]}" \
   --timeout "$timeout_seconds"
 
