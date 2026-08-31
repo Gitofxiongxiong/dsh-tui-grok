@@ -1,8 +1,7 @@
 # dsh-pager-grok 0.2.0 发布候选 Checklist
 
-> 状态：七个公开包的 `0.2.0` 已发布，正式 recovery workflow 与 registry cold/PTY/final
-> gate 已全绿；默认 `latest` 只完成部分移动。维护者于 2026-08-30 决定暂停剩余网页认证，
-> 后续严格按本文“延期 TODO”逐包串行完成；未执行项不得提前勾选。
+> 状态：`v0.2.0` 发布已完成。七个公开包的 `0.2.0` 均为 `latest`，正式 recovery
+> workflow 与最终 registry cold/PTY smoke 全绿，GitHub Release 已于 2026-08-31 发布。
 > 单一 DSH 支持真源：[`compat/dsh-support.json`](../compat/dsh-support.json)
 
 ## 候选范围与发布边界
@@ -25,7 +24,7 @@
 - [x] 独立临时目录从本地 tarball + registry rc.2 cold install，无 Harness checkout。
 - [x] cold doctor、hello、list、load、warm/offline hello 与真实 DSH PTY dogfood 通过。
 - [x] 维护者批准后，按下述顺序执行 Trusted Publishing/OIDC。
-- [ ] 所有 npm 包实际可见后再移动 dist-tag 并创建 GitHub Release。
+- [x] 所有 npm 包实际可见后再移动 dist-tag 并创建 GitHub Release。
 
 ## 维护者人工发布顺序
 
@@ -69,8 +68,8 @@
 - [x] 维护者审批 `0.2.0` stable、`latest`、公开包列表和发布副作用。
 - [x] push 分支/合并 PR/创建并 push 单一 `v0.2.0` Tag。
 - [x] Trusted Publishing 按 native → runtime → registry cold → CLI 执行。
-- [ ] 移动 npm dist-tag。
-- [ ] 创建 GitHub Release。
+- [x] 移动 npm dist-tag。
+- [x] 创建 GitHub Release。
 
 除以上审批、push、publish、dist-tag、Release 外，不应再剩代码、依赖、fixture、
 cold-install 或文档工作。
@@ -138,8 +137,7 @@ cold-install 或文档工作。
 - `release-candidate=0.2.0` 可作为无害别名保留，不是 stable 安装或 GitHub Release 的
   阻塞项；本轮不再为删除该别名触发七次额外认证。
 
-后续由已认证维护者严格串行执行，每次只打开一个网页认证会话，并在开始下一项前先用
-`npm view` 验证当前项：
+以下是延期时登记的执行顺序，维护者已于 2026-08-31 严格串行完成；最终事实见下一节：
 
 1. 优先执行
    `npx --yes npm@11.19.0 dist-tag add '@dsh-pager-grok/cli@0.2.0' latest`，随后确认
@@ -154,3 +152,23 @@ cold-install 或文档工作。
    不迁移限制、来源/recovery run 和回退说明。
 5. 用单独的 post-release 进度记录回写最终 tag、Release URL、实际核验命令和结果，再将
    本表剩余 checkbox 勾选完成。
+
+## v0.2.0 post-release 完成事实（2026-08-31）
+
+- 维护者以 npm 用户 `leo-dai` 严格串行完成剩余三个 `latest` 移动，并在每次写操作后从
+  `https://registry.npmjs.org/` 只读核验。最终七个公开 package 均为
+  `latest=0.2.0` 且保留 `release-candidate=0.2.0`。
+- 七个 package 的 `0.2.0` 均有 `dist.integrity`；五个平台 native 与 CLI 均有
+  `dist.attestations.url`。runtime 继续使用本表批准的一次性 bootstrap provenance 例外，
+  registry SHA-512 与来源候选一致。
+- 默认 `latest` CLI 从官方 registry 打包后，在隔离目录以正式 workflow 同版
+  `npm@11.13.0` 完成 cold install、24-package dependency graph、17 个精确非 optional
+  dependency gate、doctor、hello/list/load、warm/offline hello 和真实 DSH PTY；结果为
+  `release candidate rehearsal passed`，证据目录为
+  `/tmp/dsh-pager-release-candidate.ZV349R`。
+- annotated Tag `v0.2.0` 的 peeled commit 已核验为
+  `77ae309f8df2547f628b26c62414885349d7fa1c`。GitHub Release 为公开、非 draft、
+  非 prerelease，并标记为 Latest：
+  <https://github.com/Gitofxiongxiong/dsh-tui-grok/releases/tag/v0.2.0>。
+- `release-candidate=0.2.0` 作为无害别名保留；本次未重新 publish、覆盖、unpublish
+  package，也未移动或重建版本 Tag。

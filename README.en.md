@@ -143,17 +143,19 @@ for the detailed boundary.
 
 ## Project status
 
-The current public release is `0.1.0`, published on 2026-08-26, and should be considered
-early-stage. It pins `@deepseek-ai/dsh@0.1.0-rc.8`. The repository source has since
-added `/login`, model/preset selection, and explicit resume semantics, but these changes
-have not yet shipped as a new npm release.
+The current public release is
+[`0.2.0`](https://github.com/Gitofxiongxiong/dsh-tui-grok/releases/tag/v0.2.0),
+published on 2026-08-31; all seven public npm packages resolve to `latest=0.2.0`.
+This release uses a registry-driven multi-version architecture: `0.1.1-rc.2` is the
+default supported npm family, `0.1.0-rc.8` remains in maintenance, and
+`0.1.2-alpha.1` is the experimental/source-only controllers-v2 development family.
+See the generated [support table](docs/DSH_SUPPORT.md) for exact tags, commits,
+distribution, and profile schemas. Unlisted versions fail closed before the pager starts.
 
-The repository's `0.2.0` release candidate uses a registry-driven multi-version
-architecture: rc.2 is the default supported npm family, rc.8 remains in maintenance,
-and alpha.1 is the experimental/source-only controllers-v2 development family. See the
-generated [support table](docs/DSH_SUPPORT.md) for exact tags, commits, distribution,
-and profile schemas. Unlisted versions fail closed before the pager starts. npm `0.1.0`
-remains the existing rc.8 release; `0.2.0` still requires the maintainer release steps.
+When switching a pager-managed profile across adapter families or schemas, the CLI first
+backs up the complete old profile and migrates only allowlisted pager settings. Sessions
+and credentials are not read or modified; the legacy projection cache is not migrated and
+remains only in the backup directory.
 
 ## Local development
 
