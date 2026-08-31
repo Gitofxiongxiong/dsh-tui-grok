@@ -137,15 +137,16 @@ Harness 整仓。详细边界见 [架构文档](docs/ARCHITECTURE.md) 和
 
 ## 当前状态
 
-当前公开版本是 `0.1.0`，属于早期版本，发布于 2026-08-26。npm 发布包精确钉住
-`@deepseek-ai/dsh@0.1.0-rc.8`。当前仓库源码已经继续加入 `/login`、模型/preset
-选择和显式恢复语义，但尚未发布为新的 npm 版本。
+当前公开版本是 [`0.2.0`](https://github.com/Gitofxiongxiong/dsh-tui-grok/releases/tag/v0.2.0)，
+发布于 2026-08-31；七个公开 npm package 均为 `latest=0.2.0`。该版本采用 registry
+驱动的多版本架构：`0.1.1-rc.2` 是默认 supported npm family，`0.1.0-rc.8` 保持
+maintenance，`0.1.2-alpha.1` 是 controllers-v2 的 experimental/source-only 开发
+family。精确 tag、commit、distribution 与 profile schema 见自动生成的
+[支持表](docs/DSH_SUPPORT.md)；未列版本会在启动 pager 前 fail closed。
 
-仓库中的 `0.2.0` 发布候选已经采用 registry 驱动的多版本架构：rc.2 是默认
-supported npm family，rc.8 保持 maintenance，alpha.1 是 controllers-v2 的
-experimental/source-only 开发 family。精确 tag、commit、distribution 与 profile
-schema 见自动生成的[支持表](docs/DSH_SUPPORT.md)；未列版本会在启动 pager 前
-fail closed。npm `0.1.0` 仍是既有 rc.8 公开版，`0.2.0` 尚待维护者执行发布步骤。
+从旧的 pager-managed profile 切换 family/schema 时，CLI 会先备份完整旧 profile，
+只迁移白名单内的 pager 设置。sessions 和 credentials 不会被读取或修改；旧 projection
+cache 不迁移，只保留在备份目录中。
 
 ## 本地开发
 
