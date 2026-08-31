@@ -4,8 +4,8 @@
 # npm publication requires a second, explicit workflow_dispatch with the
 # immutable release_tag and confirm=publish-<tag>. Package builds always check
 # out that Tag even when a recovery dispatch uses the fixed workflow on main.
-# Published packages remain on release-candidate until the maintainer completes
-# registry verification and moves latest.
+# Stable versions publish directly to latest and prereleases publish to next.
+# The CLI remains last, after native/runtime registry cold and PTY gates.
 name: release
 
 on:
@@ -43,6 +43,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
       resume_run_id: ${{ steps.release.outputs.resume_run_id }}
+      target_tag: ${{ steps.release.outputs.target_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,6 +67,11 @@ jobs:
           fi
           [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
           version="${tag#v}"
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            target_tag='latest'
+          else
+            target_tag='next'
+          fi
           release_commit="$(git rev-parse "refs/tags/${tag}^{commit}")"
           resume_run_id="${RESUME_RUN_ID}"
           if [ -n "${resume_run_id}" ]; then
@@ -103,6 +109,7 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "commit=${release_commit}" >> "${GITHUB_OUTPUT}"
           echo "resume_run_id=${resume_run_id}" >> "${GITHUB_OUTPUT}"
+          echo "target_tag=${target_tag}" >> "${GITHUB_OUTPUT}"
 
   pack-native:
     name: native ${{ matrix.id }}
@@ -166,6 +173,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
+          TARGET_TAG: ${{ needs.metadata.outputs.target_tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
@@ -177,14 +185,14 @@ jobs:
           if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
             local_integrity="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "${tarballs[0]}")"
             test "${local_integrity}" = "${registry_integrity}"
-            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
-            echo "verified existing ${package}@${VERSION} integrity=${registry_integrity}"
+            test "$(npm view "${package}" "dist-tags.${TARGET_TAG}")" = "${VERSION}"
+            echo "verified existing ${package}@${VERSION} tag=${TARGET_TAG} integrity=${registry_integrity}"
           else
             if ! grep -q 'E404' "${lookup_log}"; then
               cat "${lookup_log}" >&2
               exit 1
             fi
-            npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+            npm publish "${tarballs[0]}" --access public --tag "${TARGET_TAG}" --provenance
           fi
       - name: upload native candidate
         uses: actions/upload-artifact@v4
@@ -283,9 +291,10 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
       - run: npm install --global npm@11.13.0
-      - name: publish through OIDC or verify one-time bootstrap
+      - name: publish runtime via OIDC or verify exact candidate
         shell: bash
         env:
+          TARGET_TAG: ${{ needs.metadata.outputs.target_tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
@@ -297,14 +306,14 @@ jobs:
           if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
             local_integrity="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "${tarballs[0]}")"
             test "${local_integrity}" = "${registry_integrity}"
-            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
-            echo "verified bootstrap ${package}@${VERSION} integrity=${registry_integrity}"
+            test "$(npm view "${package}" "dist-tags.${TARGET_TAG}")" = "${VERSION}"
+            echo "verified existing ${package}@${VERSION} tag=${TARGET_TAG} integrity=${registry_integrity}"
           else
             if ! grep -q 'E404' "${lookup_log}"; then
               cat "${lookup_log}" >&2
               exit 1
             fi
-            npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+            npm publish "${tarballs[0]}" --access public --tag "${TARGET_TAG}" --provenance
           fi
 
   registry-cold:
@@ -411,6 +420,7 @@ jobs:
       - name: publish CLI via OIDC
         shell: bash
         env:
+          TARGET_TAG: ${{ needs.metadata.outputs.target_tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
@@ -422,14 +432,14 @@ jobs:
           if registry_integrity="$(npm view "${package}@${VERSION}" dist.integrity 2>"${lookup_log}")"; then
             local_integrity="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");process.stdout.write(`sha512-${crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64")}`)' "${tarballs[0]}")"
             test "${local_integrity}" = "${registry_integrity}"
-            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
-            echo "verified existing ${package}@${VERSION} integrity=${registry_integrity}"
+            test "$(npm view "${package}" "dist-tags.${TARGET_TAG}")" = "${VERSION}"
+            echo "verified existing ${package}@${VERSION} tag=${TARGET_TAG} integrity=${registry_integrity}"
           else
             if ! grep -q 'E404' "${lookup_log}"; then
               cat "${lookup_log}" >&2
               exit 1
             fi
-            npm publish "${tarballs[0]}" --access public --tag release-candidate --provenance
+            npm publish "${tarballs[0]}" --access public --tag "${TARGET_TAG}" --provenance
           fi
 
   verify-registry:
@@ -442,9 +452,11 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - name: verify exact versions, staging tags and provenance
+      - run: npm install --global npm@11.13.0
+      - name: verify exact versions, target tags and provenance
         shell: bash
         env:
+          TARGET_TAG: ${{ needs.metadata.outputs.target_tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
@@ -458,9 +470,165 @@ jobs:
             '@dsh-pager-grok/cli'
           )
           for package in "${packages[@]}"; do
-            test "$(npm view "${package}@${VERSION}" version)" = "${VERSION}"
-            test "$(npm view "${package}" dist-tags.release-candidate)" = "${VERSION}"
-            if [ "${package}" != '@dsh-pager-grok/runtime-apiproxy-v1' ]; then
-              test -n "$(npm view "${package}@${VERSION}" dist.attestations.url)"
-            fi
+            verified=''
+            for attempt in {1..12}; do
+              registry_version="$(npm view "${package}@${VERSION}" version 2>/dev/null || true)"
+              registry_tag="$(npm view "${package}" "dist-tags.${TARGET_TAG}" 2>/dev/null || true)"
+              attestation="$(npm view "${package}@${VERSION}" dist.attestations.url 2>/dev/null || true)"
+              if [ "${registry_version}" = "${VERSION}" ] \
+                && [ "${registry_tag}" = "${VERSION}" ] \
+                && { [ -n "${attestation}" ] \
+                  || { [ "${package}" = '@dsh-pager-grok/runtime-apiproxy-v1' ] \
+                    && [ "${VERSION}" = '0.2.0' ]; }; }; then
+                verified='yes'
+                break
+              fi
+              sleep 5
+            done
+            test "${verified}" = 'yes'
+            echo "verified ${package}@${VERSION} tag=${TARGET_TAG} provenance=${attestation:-bootstrap-exception}"
           done
+
+  registry-final:
+    name: official CLI registry rehearsal
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, verify-registry]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
+      - name: checkout reviewed release orchestration
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-orchestration
+      - name: verify candidate and orchestration sources
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ needs.metadata.outputs.commit }}
+          ORCHESTRATION_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CANDIDATE_COMMIT}"
+          test "$(git -C release-orchestration rev-parse HEAD)" = "${ORCHESTRATION_COMMIT}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: install audited npm CLI, pnpm and ripgrep
+        run: |
+          npm install --global npm@11.13.0
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+          corepack enable
+          command -v rg
+          rg --version
+      - name: wait for the official CLI and target tag
+        shell: bash
+        env:
+          TARGET_TAG: ${{ needs.metadata.outputs.target_tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          package='@dsh-pager-grok/cli'
+          verified=''
+          for attempt in {1..12}; do
+            registry_version="$(npm view "${package}@${VERSION}" version 2>/dev/null || true)"
+            registry_tag="$(npm view "${package}" "dist-tags.${TARGET_TAG}" 2>/dev/null || true)"
+            if [ "${registry_version}" = "${VERSION}" ] \
+              && [ "${registry_tag}" = "${VERSION}" ]; then
+              verified='yes'
+              break
+            fi
+            sleep 5
+          done
+          test "${verified}" = 'yes'
+      - name: download official CLI and rehearse the public graph
+        shell: bash
+        env:
+          DSH_RELEASE_REGISTRY_VERSION: ${{ needs.metadata.outputs.version }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          package='@dsh-pager-grok/cli'
+          mkdir -p "${RUNNER_TEMP}/registry-cli"
+          npm pack "${package}@${VERSION}" \
+            --pack-destination "${RUNNER_TEMP}/registry-cli"
+          mapfile -t cli_tarballs < <(find "${RUNNER_TEMP}/registry-cli" -maxdepth 1 \
+            -type f -name 'dsh-pager-grok-cli-*.tgz')
+          test "${#cli_tarballs[@]}" -eq 1
+          export DSH_RELEASE_CLI_TARBALL="${cli_tarballs[0]}"
+          bash release-orchestration/scripts/rehearse-release-candidate.sh \
+            | tee "${RUNNER_TEMP}/registry-final.log"
+          evidence_root="$(sed -n 's/^release candidate root (retained): //p' \
+            "${RUNNER_TEMP}/registry-final.log" | head -n 1)"
+          test -f "${evidence_root}/result.json"
+          test "$(node -p "require('${evidence_root}/result.json').result")" = 'passed'
+          cp -R "${evidence_root}" "${RUNNER_TEMP}/registry-final-evidence"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-final-evidence
+          path: ${{ runner.temp }}/registry-final-evidence
+          if-no-files-found: error
+
+  github-release:
+    name: create or verify GitHub Release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [metadata, registry-final]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: create or verify the immutable Tag release
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          TARGET_TAG: ${{ needs.metadata.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+          if [ "${TARGET_TAG}" = 'latest' ]; then
+            expected_prerelease='false'
+          else
+            test "${TARGET_TAG}" = 'next'
+            expected_prerelease='true'
+          fi
+
+          if ! release_state="$(gh release view "${RELEASE_TAG}" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')"; then
+            release_args=(
+              "${RELEASE_TAG}"
+              --verify-tag
+              --generate-notes
+              --title "dsh-pager-grok ${RELEASE_TAG}"
+            )
+            if [ "${TARGET_TAG}" = 'latest' ]; then
+              release_args+=(--latest)
+            else
+              release_args+=(--prerelease)
+            fi
+            gh release create "${release_args[@]}"
+            release_state="$(gh release view "${RELEASE_TAG}" \
+              --json tagName,isDraft,isPrerelease \
+              --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')"
+          fi
+
+          IFS=$'\t' read -r actual_tag is_draft is_prerelease <<<"${release_state}"
+          test "${actual_tag}" = "${RELEASE_TAG}"
+          test "${is_draft}" = 'false'
+          test "${is_prerelease}" = "${expected_prerelease}"
+          if [ "${TARGET_TAG}" = 'latest' ]; then
+            latest_verified=''
+            for attempt in {1..6}; do
+              if [ "$(gh api "repos/${GH_REPO}/releases/latest" --jq '.tag_name')" \
+                = "${RELEASE_TAG}" ]; then
+                latest_verified='yes'
+                break
+              fi
+              sleep 2
+            done
+            test "${latest_verified}" = 'yes'
+          fi

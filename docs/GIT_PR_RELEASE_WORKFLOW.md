@@ -241,7 +241,7 @@ git fetch origin --prune
 | push <code>ci/trust-smoke</code> | 默认不运行 | 不运行 | 不运行 | 无 |
 | push <code>v*</code> Tag | 不运行 | 构建并上传五平台 native 与 runtime/CLI 候选 artifact | 不运行 | 无 npm publish |
 | 每周 scheduled | core + 三版本完整矩阵 | 不运行 | 不运行 | 仅 registry/read-only npm view |
-| 从默认分支手动运行 <code>release</code>，输入不可变 <code>release_tag</code> 与精确确认值 | 不变 | checkout 指定 Tag；OIDC 发布/校验 native → runtime，registry cold/PTY 后发布/校验 CLI；恢复时可指定先前 release run 并复用确切 artifacts | 不运行 | 发布到 <code>release-candidate</code> |
+| 从默认分支手动运行 <code>release</code>，输入不可变 <code>release_tag</code> 与精确确认值 | 不变 | checkout 指定 Tag；OIDC 发布/校验 native → runtime，registry cold/PTY 后最后发布/校验 CLI；从官方源复验 CLI 后自动创建 Release；恢复时可指定先前 release run 并复用确切 artifacts | 不运行 | stable 直接发布到 <code>latest</code>，prerelease 直接发布到 <code>next</code> |
 | 手动运行 <code>publish-smoke</code> 并输入确认值 | 不变 | 不运行 | 运行 trust smoke | 发布 <code>trust-test</code> 预发布包 |
 
 必须特别注意：
@@ -259,15 +259,17 @@ git fetch origin --prune
   orchestration commit。
 - 正式链可安全重入：native、runtime 或 CLI version 已存在时，必须将 registry
   <code>dist.integrity</code> 与来源 tarball 的 SHA-512 完整比对，并确认
-  <code>release-candidate</code> 指向该精确 version；只有 E404 才执行 publish。任何
+  由 Tag version 唯一计算出的目标 tag 指向该精确 version；只有 E404 才执行 publish。任何
   integrity 或 dist-tag 不一致都立即停止，不覆盖已有 version。
 - 部分发布后的 recovery dispatch 还必须提供 <code>resume_run_id</code>。metadata 会核对
   来源 run 的 <code>head_sha</code>、Tag、workflow path、event 与完成状态；native 与 JS
   jobs 从该 run 下载当次实际使用并保留的 artifacts，不以新的 native rebuild 冒充已发布
   制品。正常首次发布不填写该 input，仍从指定 Tag 重新构建。
-- 正式链先把包放在隔离的 <code>release-candidate</code> dist-tag，完成精确 version、
-  provenance、registry cold/warm/offline 与 PTY 验收后才结束。OIDC 不承担最终
-  <code>latest</code> 移动；该动作仍由已认证维护者在全绿后显式执行。
+- 正式链不再依赖发布后的人工 <code>npm dist-tag</code>：严格 stable
+  <code>X.Y.Z</code> 自动使用 <code>latest</code>，带 suffix 的 prerelease 自动使用
+  <code>next</code>。native/runtime 先发布，CLI 使用精确依赖并保持最后发布，因此旧
+  CLI 不会引用半发布的内部包。CLI 发布后 workflow 从官方 registry 重新下载 tarball，
+  再跑一次 cold/warm/offline、迁移与 PTY；只有该门禁通过才创建 GitHub Release。
 - <code>publish.yml</code> 只保留手动 <code>workflow_dispatch</code>；必须输入
   <code>publish-trust-test</code> 才会继续。它会发布
   <code>@dsh-pager-grok/tui-protocol@0.1.1-trust.&lt;run_id&gt;.&lt;run_attempt&gt;</code>
@@ -299,8 +301,9 @@ gh run list --workflow publish.yml --limit 5
 - CI 全绿；
 - 更新 changelog 但未创建版本 Tag。
 
-一次发布需要明确：版本号、stable/prerelease、npm dist-tag、待发布包、发布 commit
-以及发布人/批准人。
+一次发布需要明确：版本号、stable/prerelease、待发布包、发布 commit 以及发布人/批准人。
+npm dist-tag 不由 dispatch 自由输入，而由不可变版本自动确定：stable 为
+<code>latest</code>，prerelease 为 <code>next</code>。
 
 ### 7.2 版本号
 
@@ -308,8 +311,8 @@ gh run list --workflow publish.yml --limit 5
 - <code>MINOR</code>：向后兼容的新功能，例如 <code>0.1.1</code> → <code>0.2.0</code>。
 - <code>MAJOR</code>：不兼容的公开接口、安装或协议变更。
 - 预发布：<code>v0.2.0-alpha.1</code>、<code>v0.2.0-beta.1</code> 或
-  <code>v0.2.0-rc.1</code>，npm 使用 <code>next</code> 等非
-  <code>latest</code> dist-tag。
+  <code>v0.2.0-rc.1</code>，npm 固定使用 <code>next</code>，不移动
+  <code>latest</code>。
 
 同一产品版本的 Cargo workspace、根 <code>package.json</code> 以及计划发布的
 <code>packages/**/package.json</code> 必须保持版本契约一致。
@@ -380,10 +383,18 @@ git push origin refs/tags/vX.Y.Z
 1. 从同一 Tag/commit 构建、strip 并测试各平台原生程序；
 2. 发布 <code>@dsh-pager-grok/native-*</code> 平台包；
 3. 发布 <code>@dsh-pager-grok/runtime-apiproxy-v1</code>；
-4. 在干净 npm prefix 中完成 cold/warm/offline 安装与运行验收；
+4. 使用官方 native/runtime 与 CLI candidate，在干净 npm prefix 中完成
+   cold/warm/offline 安装与运行验收；
 5. 最后发布 <code>@dsh-pager-grok/cli</code>；
-6. 验证 npm dist-tag、provenance 和实际安装；
-7. 创建 GitHub Release 作为发布记录和人工镜像。
+6. 验证 npm 目标 tag、provenance，并从官方 registry 下载已发布 CLI 重跑完整
+   cold/warm/offline、迁移与 PTY；
+7. workflow 自动创建或幂等核验 GitHub Release；stable 标记 Latest，prerelease
+   标记 prerelease。
+
+所有 publish 仍使用现有 Trusted Publishing/OIDC。workflow 不保存
+<code>NPM_TOKEN</code>，也不调用 OIDC 不支持的 <code>npm dist-tag</code>。正常发布不需要
+逐包打开 npm 网页；只有新增 package 的首次 bootstrap 或事故后的人工 tag 回退仍可能
+需要维护者 2FA。
 
 正式 dispatch 示例（workflow definition 取已审核的默认分支，package source 由
 <code>release_tag</code> 锁定到已 push 的不可变 Tag）：
@@ -405,21 +416,25 @@ gh workflow run release.yml --ref main \
 ~~~
 
 新 npm package 在首次创建前无法配置 Trusted Publishing。只允许该新包从最终 Tag
-候选 tarball 进行一次已认证 bootstrap publish，并使用
-<code>release-candidate</code>；随后立即把该 package 的 trusted publisher 绑定到
-<code>release.yml</code>、准确仓库与 <code>npm-release</code> environment。正式 workflow
+候选 tarball 进行一次已认证 bootstrap publish，并使用与该版本一致的目标 tag
+（stable 为 <code>latest</code>，prerelease 为 <code>next</code>）；随后立即把该 package
+的 trusted publisher 绑定到 <code>release.yml</code>、准确仓库与
+<code>npm-release</code> environment。正式 workflow
 会把 registry tarball 的 SHA-512 integrity 与候选逐字节核对；正常 run 使用同 Tag
 重建候选，recovery run 使用经过 metadata 身份核验的来源 release run 确切 artifact。
 不一致时停止 CLI 发布。已有 package 和后续版本不得走 bootstrap 例外。
 
-创建 GitHub Release 的命令示例：
+GitHub Release 由最终官方 registry rehearsal 后的独立 job 创建。以下命令只用于
+只读核验或获授权的事故恢复，不再是正常发布必需步骤：
 
 ~~~bash
-gh release create vX.Y.Z --verify-tag --generate-notes
+gh release view vX.Y.Z
 ~~~
 
 <code>release.yml</code> 实现版本/Tag 一致性、精确人工确认、OIDC、顺序依赖、
-registry cold/warm/offline/PTY 和 provenance 门禁；任一步失败时，后续 job 不运行。
+两轮 registry cold/warm/offline/PTY、provenance 和 Release 门禁；任一步失败时，后续
+job 不运行。只有 GitHub Release job 具有 <code>contents: write</code>，npm publish job
+只具有 <code>contents: read</code> 与 OIDC 所需的 <code>id-token: write</code>。
 
 ### 7.6 发布后检查
 
@@ -441,6 +456,9 @@ npm view @dsh-pager-grok/runtime-apiproxy-v1 version dist-tags --json
 - npm 某个 version 已公开：不覆盖、不复用同版本号。纯编排故障可以在来源 run
   artifacts 与 registry integrity 完全一致时安全重入；package/Tag 内容有缺陷时必须
   通过新的 patch 版本修复。
+- native/runtime 已发布而 CLI 尚未发布：内部目标 tag 可能已前移，但旧 CLI 仍使用旧版
+  精确依赖；修复纯编排故障后从同一 artifacts 恢复。CLI 已发布但最终官方源 rehearsal
+  失败时 workflow 不创建 Release，维护者评估显式回退 CLI tag 或发布新 patch。
 - 有问题的包可在审批后使用 <code>npm deprecate</code> 或调整 dist-tag；不在普通
   修复流程自动 unpublish。
 - 发布失败不回滚 <code>main</code> 上已审核的功能历史；单独修复发布链或发布新版本。
