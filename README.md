@@ -37,7 +37,7 @@ pager 负责紧凑的终端呈现，并复用 Grok Build 的交互与视觉语�
 | **Grok 风格交互** | 复用其 prompt、picker、modal、状态栏、滚动和快捷键设计。 |
 | **DSH 是唯一真源** | 会话、事件、权限和副作用都来自 DeepSeek Harness，不在 UI 中伪造状态。 |
 | **一条命令安装** | npm CLI 自带精确版本的 DSH、pnpm runtime 和当前平台预编译程序。 |
-| **会话管理** | 原生会话选择器、搜索与稳定会话身份；当前源码还提供显式 `--resume`。 |
+| **会话管理** | 默认新建对话；通过原生选择器、搜索或显式 `--resume` 恢复稳定会话。 |
 
 ## 快速开始
 
@@ -45,17 +45,16 @@ pager 负责紧凑的终端呈现，并复用 Grok Build 的交互与视觉语�
 
 ```bash
 npm install -g @dsh-pager-grok/cli
-dsh-pager --new
+dsh-pager
 ```
 
 首次启动会在独立的 family profile（例如 `dsh-pager-grok-apiproxy-v1`）中准备所需 runtime，不会要求你
-手工复制 Harness 仓库。公开版 `0.2.0` 启动前需要由 DeepSeek Harness 的凭据层
+手工复制 Harness 仓库。公开版 `0.2.1` 启动前需要由 DeepSeek Harness 的凭据层
 提供 API Key，例如设置 `DEEPSEEK_API_KEY` 或使用已有的 `$DSH_HOME/.credentials.yaml`。
 
 > [!IMPORTANT]
-> npm `0.2.0` 仍保留“无参数恢复最近会话”的旧行为；上面的 `--new` 是该已发布
-> 版本的确定性新会话入口。当前源码已修复为无参数默认新建，历史会话必须显式使用
-> `--resume`/`--continue` 或 TUI 内 `/resume`，将在下一个 patch release 生效。
+> 从 npm `0.2.1` 开始，无参数启动默认新建对话。恢复历史必须显式使用
+> `--resume`/`--continue` 或 TUI 内 `/resume`；`--new` 继续作为兼容旗标。
 
 建议安装后先做一次不显示密钥值的环境检查：
 
@@ -67,7 +66,7 @@ dsh-pager doctor
 
 - **结构化对话**：Markdown、思考过程、工具调用、结果、diff 与时间信息各自呈现。
 - **会话管理**：新建、搜索和恢复历史会话；支持 `/resume` 会话选择器。
-- **模型与模式（当前源码）**：在 TUI 内使用 `/model` 切换模型，使用 `Shift+Tab` 切换 preset。
+- **模型与模式**：在 TUI 内使用 `/model` 切换模型，使用 `Shift+Tab` 切换 preset。
 - **后台工作**：Tasks pane 汇总后台命令、monitor、subagent 与运行状态。
 - **安全交互**：approval/question 由带身份的 Host 请求驱动，避免 UI 假成功。
 - **终端体验**：流式滚动、快捷键、鼠标命中、选择复制、OSC52 fallback 和窗口缩放。
@@ -75,12 +74,15 @@ dsh-pager doctor
 
 ## 常用操作
 
-### npm 0.2.0
+### npm 0.2.1
 
 | 命令 | 作用 |
 |---|---|
-| `dsh-pager` | 打开最近的顶层会话；没有历史时创建会话 |
-| `dsh-pager --new` | 显式创建新会话 |
+| `dsh-pager` | 默认创建新对话 |
+| `dsh-pager --resume` | 恢复当前目录最近的顶层会话；没有历史时明确失败 |
+| `dsh-pager --resume <session-id>` | 恢复指定会话 |
+| `dsh-pager --continue` | `--resume` 的无 id 别名 |
+| `dsh-pager --new` | 显式创建新会话的兼容旗标 |
 | `dsh-pager --session <session-id>` | 打开指定会话 |
 | `dsh-pager --session-search <query>` | 搜索并打开历史会话 |
 | `dsh-pager doctor` | 检查 Node、平台包、DSH profile 与 runtime |
@@ -90,14 +92,12 @@ dsh-pager doctor
 
 公开版 TUI 还提供 `/resume` 会话选择器、`/timestamps` 和 `Ctrl+G` Tasks pane。
 
-### 当前源码（下一次发布候选）
+### TUI 快捷操作
 
 | 操作 | 作用 |
 |---|---|
 | `/login` | 保存或替换 DeepSeek API Key |
 | `/new` | 开始空白会话并选择 agent preset |
-| `dsh-pager` | 默认开始新对话 |
-| `dsh-pager --resume [session-id]` | 恢复最近或指定会话 |
 | `/resume` | 打开历史会话选择器 |
 | `/model` | 选择当前模型与 effort |
 | `Shift+Tab` | 切换 agent preset |

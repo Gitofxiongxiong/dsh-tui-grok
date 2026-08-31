@@ -72,19 +72,19 @@ importers:
         version: 3.2.7(@types/node@22.20.1)(tsx@4.23.12)(yaml@2.9.0)
     optionalDependencies:
       '@dsh-pager-grok/native-darwin-arm64':
-        specifier: 0.2.0
+        specifier: 0.2.1
         version: link:../native/darwin-arm64
       '@dsh-pager-grok/native-darwin-x64':
-        specifier: 0.2.0
+        specifier: 0.2.1
         version: link:../native/darwin-x64
       '@dsh-pager-grok/native-linux-arm64-gnu':
-        specifier: 0.2.0
+        specifier: 0.2.1
         version: link:../native/linux-arm64-gnu
       '@dsh-pager-grok/native-linux-x64-gnu':
-        specifier: 0.2.0
+        specifier: 0.2.1
         version: link:../native/linux-x64-gnu
       '@dsh-pager-grok/native-win32-x64':
-        specifier: 0.2.0
+        specifier: 0.2.1
         version: link:../native/win32-x64
 
   packages/dsh-pager-runtime:

@@ -40,7 +40,7 @@ interactive questions through one consistent TUI.
 | **Grok-style interaction** | Reuses its prompt, picker, modal, status, scrollback, and shortcut designs. |
 | **DSH stays authoritative** | Sessions, events, permissions, and effects come from DeepSeek Harness—not invented UI state. |
 | **One-command install** | The npm CLI carries pinned DSH and pnpm runtimes plus a prebuilt binary for your platform. |
-| **Session management** | Native picker, search, and stable session identity; current source also provides explicit `--resume`. |
+| **Session management** | Starts new by default; resume stable sessions through the native picker, search, or explicit `--resume`. |
 
 ## Quick start
 
@@ -48,20 +48,19 @@ Requirements: Node.js `^22.19.0` or `>=24.0.0`, plus a DeepSeek API key.
 
 ```bash
 npm install -g @dsh-pager-grok/cli
-dsh-pager --new
+dsh-pager
 ```
 
 On first launch, the CLI prepares an isolated family profile such as
 `dsh-pager-grok-apiproxy-v1`. You do not need to copy or modify a DeepSeek Harness
-checkout. Before launching public version `0.2.0`,
+checkout. Before launching public version `0.2.1`,
 provide an API key through the DeepSeek Harness credential layer—for example with
 `DEEPSEEK_API_KEY` or an existing `$DSH_HOME/.credentials.yaml`.
 
 > [!IMPORTANT]
-> npm `0.2.0` still keeps the old no-argument behavior that resumes recent history. The
-> explicit `--new` above is its deterministic new-session entry point. Current source
-> fixes no-argument startup to create a new conversation; history requires explicit
-> `--resume`/`--continue` or `/resume` in the TUI, effective in the next patch release.
+> Starting with npm `0.2.1`, launching without a session flag creates a new conversation.
+> History requires explicit `--resume`/`--continue` or `/resume` in the TUI; `--new`
+> remains as a compatibility flag.
 
 You can also run a preflight check that never prints secret values:
 
@@ -73,7 +72,7 @@ dsh-pager doctor
 
 - **Structured conversations:** distinct Markdown, reasoning, tool, result, diff, and timestamp surfaces.
 - **Session management:** create, search, and resume conversations with a native `/resume` picker.
-- **Models and presets (current source):** use `/model` in the TUI and switch agent presets with `Shift+Tab`.
+- **Models and presets:** use `/model` in the TUI and switch agent presets with `Shift+Tab`.
 - **Background work:** a Tasks pane collects commands, monitors, subagents, and live status.
 - **Safe interactions:** approvals and questions are backed by identified Host requests, not optimistic UI fiction.
 - **Terminal ergonomics:** streaming scroll, shortcuts, mouse hit-testing, selection, copy, OSC52 fallback, and resize support.
@@ -81,12 +80,15 @@ dsh-pager doctor
 
 ## Everyday commands
 
-### npm 0.2.0
+### npm 0.2.1
 
 | Command | Purpose |
 |---|---|
-| `dsh-pager` | Open the latest top-level session, or create one when none exists |
-| `dsh-pager --new` | Explicitly create a new session |
+| `dsh-pager` | Start a new conversation by default |
+| `dsh-pager --resume` | Resume the latest top-level session in the current directory; fail clearly if none exists |
+| `dsh-pager --resume <session-id>` | Resume a specific session |
+| `dsh-pager --continue` | Alias for `--resume` without an ID |
+| `dsh-pager --new` | Compatibility flag for explicitly creating a new session |
 | `dsh-pager --session <session-id>` | Open a specific session |
 | `dsh-pager --session-search <query>` | Search and open session history |
 | `dsh-pager doctor` | Check Node, native package, DSH profile, and runtime |
@@ -96,14 +98,12 @@ dsh-pager doctor
 
 The public TUI also includes a `/resume` session picker, `/timestamps`, and the `Ctrl+G` Tasks pane.
 
-### Current source (next-release candidate)
+### TUI shortcuts
 
 | Action | Purpose |
 |---|---|
 | `/login` | Store or replace the DeepSeek API key |
 | `/new` | Start a blank session and choose an agent preset |
-| `dsh-pager` | Start a new conversation by default |
-| `dsh-pager --resume [session-id]` | Resume the latest or a specific session |
 | `/resume` | Open the session history picker |
 | `/model` | Select the active model and effort |
 | `Shift+Tab` | Switch agent presets |
