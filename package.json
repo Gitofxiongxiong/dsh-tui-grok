@@ -18,7 +18,7 @@
     "typecheck:ts": "pnpm --filter './packages/dsh-tui-*' run typecheck",
     "test:ts": "pnpm --filter './packages/dsh-tui-*' run test && pnpm --filter @dsh-pager-grok/runtime test && pnpm --filter @dsh-pager-grok/runtime-apiproxy-v1 test && pnpm --filter @dsh-pager-grok/cli test",
     "verify:ts": "pnpm run build:ts && pnpm run typecheck:ts && pnpm run test:ts && pnpm run test:release-tools && node scripts/verify-runtime-pack.mjs && node scripts/verify-cli-pack.mjs && node scripts/verify-native-matrix.mjs",
-    "test:release-tools": "node --test scripts/audit-cold-install.test.mjs",
+    "test:release-tools": "node --test scripts/audit-cold-install.test.mjs scripts/release-workflow.test.mjs",
     "check:registry-deps": "node scripts/check-registry-dependencies.mjs",
     "compat:matrix": "bash scripts/run-dsh-compat-matrix.sh"
   },
