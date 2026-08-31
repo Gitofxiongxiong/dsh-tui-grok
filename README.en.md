@@ -53,7 +53,7 @@ dsh-pager
 
 On first launch, the CLI prepares an isolated family profile such as
 `dsh-pager-grok-apiproxy-v1`. You do not need to copy or modify a DeepSeek Harness
-checkout. Before launching public version `0.2.1`,
+checkout. Before launching public version `0.2.2`,
 provide an API key through the DeepSeek Harness credential layer—for example with
 `DEEPSEEK_API_KEY` or an existing `$DSH_HOME/.credentials.yaml`.
 
@@ -80,7 +80,7 @@ dsh-pager doctor
 
 ## Everyday commands
 
-### npm 0.2.1
+### npm 0.2.2
 
 | Command | Purpose |
 |---|---|

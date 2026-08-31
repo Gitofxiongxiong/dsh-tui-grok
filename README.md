@@ -49,7 +49,7 @@ dsh-pager
 ```
 
 首次启动会在独立的 family profile（例如 `dsh-pager-grok-apiproxy-v1`）中准备所需 runtime，不会要求你
-手工复制 Harness 仓库。公开版 `0.2.1` 启动前需要由 DeepSeek Harness 的凭据层
+手工复制 Harness 仓库。公开版 `0.2.2` 启动前需要由 DeepSeek Harness 的凭据层
 提供 API Key，例如设置 `DEEPSEEK_API_KEY` 或使用已有的 `$DSH_HOME/.credentials.yaml`。
 
 > [!IMPORTANT]
@@ -74,7 +74,7 @@ dsh-pager doctor
 
 ## 常用操作
 
-### npm 0.2.1
+### npm 0.2.2
 
 | 命令 | 作用 |
 |---|---|
