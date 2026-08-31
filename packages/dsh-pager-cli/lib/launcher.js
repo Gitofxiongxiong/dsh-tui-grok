@@ -9,6 +9,7 @@ import { runRegistryDependencyGate } from './registry-gate.js'
 
 export const PACKAGE = '@dsh-pager-grok/cli'
 export const PROFILE_PREFIX = 'dsh-pager-grok'
+export const PROFILE_BASE_BUNDLE = '@deepseek-ai/dsh-base'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = join(here, '..')
@@ -18,6 +19,10 @@ const STARTABLE_STATUSES = new Set(['supported', 'maintenance', 'candidate', 'ex
 export const PAGER_SETTING_KEYS = Object.freeze(['theme', 'defaultView', 'reducedMotion'])
 export const PROFILE_BUILD_POLICY = `packages:
   - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': false
@@ -85,13 +90,16 @@ export function prepareFamilyProfile(ownVersion, selection, env = process.env, o
     )
   }
   const metadata = manifest.dshPagerGrok
+  const layout = profileLayoutEvidence(source, manifest)
   const aligned = source === target
     && metadata?.managed === true
     && metadata.adapterFamily === selection.family
     && metadata.profileSchema === selection.profileSchema
+    && layout.ok
   const pagerSettings = copyPagerSettings(metadata?.pagerSettings)
   if (aligned) {
     writeOwnedProfileManifest(target, manifest, ownVersion, selection, pagerSettings)
+    ensureProfileBuildPolicy(selection, env)
     return {
       action: 'aligned',
       profile: target,
@@ -103,6 +111,7 @@ export function prepareFamilyProfile(ownVersion, selection, env = process.env, o
   const backup = uniqueBackupPath(source, stamp)
   renameSync(source, backup)
   writeOwnedProfileManifest(target, {}, ownVersion, selection, pagerSettings)
+  ensureProfileBuildPolicy(selection, env)
   const migrated = Object.keys(pagerSettings)
   log(`[dsh-pager] family profile migrated: ${source} -> ${target}`)
   log(`[dsh-pager] previous profile backup: ${backup}`)
@@ -315,9 +324,13 @@ Commands:
 
 Pager flags (forwarded to the native binary):
   --hello | --load-only | --list-sessions | --dashboard
-  --new | --session <id> | --session-search <query>
+  --resume [id] | --continue | --new | --session <id> | --session-search <query>
   --smoke-interactions | --smoke-queue | --smoke-lifecycle
   --backend <program> | --backend-arg <arg>   (repeatable; values may start with --)
+
+Session startup:
+  No session flag starts a new conversation. Use --resume/-r (or /resume in the TUI)
+  to open history; --new, --session and --session-search remain compatibility flags.
 
 Default product backend (unless argv has --backend or DSH_TUI_SERVER is set):
   exact DSH package version -> compat/dsh-support.json -> family runtime/profile -> native pager
@@ -448,6 +461,8 @@ export function ensureProfileBuildPolicy(selection, env = process.env) {
       next = next.replace(/^allowBuilds:\s*$/m, `allowBuilds:\n${missing.join('\n')}`)
     }
   }
+  next = setTopLevelPolicyValue(next, 'nodeLinker', 'hoisted')
+  next = setTopLevelPolicyValue(next, 'autoInstallPeers', 'false')
   if (next === original) return { path, created: false, updated: false }
   writeFileSync(path, next)
   return { path, created: false, updated: true }
@@ -583,14 +598,16 @@ function profileDoctorEvidence(selection, ownVersion, env) {
   try {
     const manifest = readProfileManifest(dir)
     const metadata = manifest.dshPagerGrok
+    const layout = profileLayoutEvidence(dir, manifest)
     const ok = metadata?.managed === true
       && metadata.adapterFamily === selection.family
       && metadata.dshVersion === selection.version
       && metadata.profileSchema === selection.profileSchema
       && metadata.runtimeVersion === ownVersion
+      && layout.ok
     return {
       ok,
-      detail: `${dir} family=${metadata?.adapterFamily ?? '?'} dsh=${metadata?.dshVersion ?? '?'} schema=${metadata?.profileSchema ?? '?'} runtime=${metadata?.runtimeVersion ?? '?'}`,
+      detail: `${dir} family=${metadata?.adapterFamily ?? '?'} dsh=${metadata?.dshVersion ?? '?'} schema=${metadata?.profileSchema ?? '?'} runtime=${metadata?.runtimeVersion ?? '?'} layout=${layout.ok ? 'ready' : layout.reason}`,
     }
   } catch (error) {
     return { ok: false, detail: firstLine(error) }
@@ -660,10 +677,23 @@ function copyPagerSettings(value) {
 
 function writeOwnedProfileManifest(dir, existing, ownVersion, selection, pagerSettings) {
   mkdirSync(dir, { recursive: true })
+  const existingDsh = isRecord(existing.dsh) ? existing.dsh : {}
+  const existingProfile = isRecord(existingDsh.profile) ? existingDsh.profile : {}
+  const existingBundles = Array.isArray(existingProfile.bundles)
+    ? existingProfile.bundles.filter(bundle => typeof bundle === 'string')
+    : []
+  const bundles = [...new Set([PROFILE_BASE_BUNDLE, ...existingBundles])]
   const manifest = {
     name: `dsh-pager-profile-${selection.family}`,
     private: true,
     ...existing,
+    dsh: {
+      ...existingDsh,
+      profile: {
+        ...existingProfile,
+        bundles,
+      },
+    },
     dshPagerGrok: {
       managed: true,
       adapterFamily: selection.family,
@@ -677,6 +707,43 @@ function writeOwnedProfileManifest(dir, existing, ownVersion, selection, pagerSe
   const temporary = `${manifestPath}.dsh-pager.tmp`
   writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 })
   renameSync(temporary, manifestPath)
+}
+
+function profileLayoutEvidence(dir, manifest) {
+  const bundles = Array.isArray(manifest?.dsh?.profile?.bundles)
+    ? manifest.dsh.profile.bundles
+    : []
+  if (!bundles.includes(PROFILE_BASE_BUNDLE)) {
+    return { ok: false, reason: `missing ${PROFILE_BASE_BUNDLE}` }
+  }
+  const policyPath = join(dir, 'pnpm-workspace.yaml')
+  if (!existsSync(policyPath)) return { ok: false, reason: 'missing pnpm-workspace.yaml' }
+  const policy = readFileSync(policyPath, 'utf8')
+  if (!profileBuildPolicyAligned(policy)) {
+    return { ok: false, reason: 'pnpm policy mismatch' }
+  }
+  return { ok: true, reason: 'ready' }
+}
+
+function profileBuildPolicyAligned(policy) {
+  if (!/^nodeLinker:\s*hoisted\s*$/m.test(policy)) return false
+  if (!/^autoInstallPeers:\s*false\s*$/m.test(policy)) return false
+  for (const [name, allowed] of Object.entries(PROFILE_BUILD_ALLOW)) {
+    const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const key = `(?:'${escaped}'|${escaped})`
+    if (!new RegExp(`^\\s+${key}:\\s+${String(allowed)}\\s*$`, 'm').test(policy)) return false
+  }
+  return true
+}
+
+function setTopLevelPolicyValue(policy, key, value) {
+  const line = `${key}: ${value}`
+  const existing = new RegExp(`^${key}:.*$`, 'm')
+  if (existing.test(policy)) return policy.replace(existing, line)
+  if (/^allowBuilds:\s*$/m.test(policy)) {
+    return policy.replace(/^allowBuilds:\s*$/m, `${line}\n\nallowBuilds:`)
+  }
+  return `${policy.trimEnd()}\n${line}\n`
 }
 
 function uniqueBackupPath(source, stamp) {

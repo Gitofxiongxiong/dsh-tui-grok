@@ -262,10 +262,10 @@ fn parse_args_from(
     let mut smoke_lifecycle = false;
     let mut list_sessions = false;
     let mut dashboard = false;
-    let mut choice = SessionChoice::RecentOrCreate;
+    let mut choice = SessionChoice::New;
     let mut program: Option<String> = None;
     let mut program_args: Vec<String> = Vec::new();
-    let mut argv = argv.into_iter();
+    let mut argv = argv.into_iter().peekable();
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -280,6 +280,13 @@ fn parse_args_from(
             "--list-sessions" => list_sessions = true,
             "--dashboard" => dashboard = true,
             "--new" => choice = SessionChoice::New,
+            "--resume" | "-r" => {
+                choice = argv
+                    .next_if(|value| !value.starts_with('-'))
+                    .map(SessionChoice::Id)
+                    .unwrap_or(SessionChoice::Recent);
+            }
+            "--continue" | "-c" => choice = SessionChoice::Recent,
             "--session" => choice = SessionChoice::Id(required_value("--session", argv.next())?),
             "--session-search" => {
                 choice = SessionChoice::Search(required_value("--session-search", argv.next())?);
@@ -289,6 +296,16 @@ fn parse_args_from(
             }
             "--backend-arg" => {
                 program_args.push(required_value("--backend-arg", argv.next())?);
+            }
+            other if other.starts_with("--resume=") => {
+                let target = other
+                    .strip_prefix("--resume=")
+                    .expect("resume prefix was checked");
+                choice = if target.is_empty() {
+                    SessionChoice::Recent
+                } else {
+                    SessionChoice::Id(target.to_string())
+                };
             }
             other => return Err(UsageError(format!("unknown argument: {other}")).into()),
         }
@@ -327,12 +344,14 @@ fn required_value(flag: &str, value: Option<String>) -> Result<String, Box<dyn E
 fn eprint_help() {
     eprintln!(
         "dsh-pager {} — protocol version {}\n\
-         Usage: dsh-pager [--hello|--list-sessions|--dashboard|--load-only|--smoke-interactions|--smoke-queue|--smoke-lifecycle] [--new|--session <id>|--session-search <query>]\n\
+         Usage: dsh-pager [--hello|--list-sessions|--dashboard|--load-only|--smoke-interactions|--smoke-queue|--smoke-lifecycle] [--new|--resume [<id>]|--continue|--session <id>|--session-search <query>]\n\
                           [--backend <program>] [--backend-arg <arg>]...\n\
          Default backend (debug cargo-run or DSH_PAGER_DEV_MODE=1): dsh --profile dsh-pager-grok.\n\
          Release/product: --backend <node> --backend-arg <absolute bin.js> --backend-arg --profile --backend-arg <profile>.\n\
-         Without --hello, loads the most recent non-subagent session (or creates one)\n\
-         and enters the pager. DSH_TUI_SERVER overrides the default program and args via\n\
+         Without a session-selection flag, creates a new conversation and enters the pager.\n\
+         --resume/-r without an id (or --continue/-c) resumes the most recent top-level\n\
+         session for the current directory; --resume <id> resumes that exact session.\n\
+         DSH_TUI_SERVER overrides the default program and args via\n\
          whitespace split; empty/whitespace-only values exit 2; paths must not contain whitespace.",
         env!("CARGO_PKG_VERSION"),
         TUI_PROTOCOL_VERSION,
@@ -547,6 +566,50 @@ mod tests {
         assert_eq!(args.program, "dsh");
         assert_eq!(args.program_args, ["--profile", "dsh-pager-grok"]);
         assert!(!args.hello_only);
+        assert_eq!(args.choice, SessionChoice::New);
+    }
+
+    #[test]
+    fn parse_args_resume_without_id_selects_recent_session() {
+        let args = parse_args_from(["--resume".into(), "--backend".into(), "node".into()], None)
+            .expect("parse");
+        assert_eq!(args.choice, SessionChoice::Recent);
+        assert_eq!(args.program, "node");
+    }
+
+    #[test]
+    fn parse_args_resume_with_id_selects_that_session() {
+        let args = parse_args_from(
+            [
+                "--resume".into(),
+                "session-history".into(),
+                "--backend".into(),
+                "node".into(),
+            ],
+            None,
+        )
+        .expect("parse");
+        assert_eq!(
+            args.choice,
+            SessionChoice::Id("session-history".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_args_continue_and_empty_resume_alias_select_recent_session() {
+        let continued = parse_args_from(
+            ["--continue".into(), "--backend".into(), "node".into()],
+            None,
+        )
+        .expect("continue");
+        assert_eq!(continued.choice, SessionChoice::Recent);
+
+        let resumed = parse_args_from(
+            ["--resume=".into(), "--backend".into(), "node".into()],
+            None,
+        )
+        .expect("resume");
+        assert_eq!(resumed.choice, SessionChoice::Recent);
     }
 
     #[test]

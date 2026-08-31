@@ -31,8 +31,8 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// How the first session is chosen after hello.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionChoice {
-    RecentOrCreate,
     New,
+    Recent,
     Id(String),
     Search(String),
 }
@@ -834,25 +834,23 @@ fn choose_session(
                 .map(|item| item.session_id.clone())
                 .ok_or_else(|| PagerError::new(format!("no session matched query {query:?}")))
         }
-        SessionChoice::RecentOrCreate => {
+        SessionChoice::Recent => {
             let list = list_sessions(transport)?;
             let recent = list
                 .items
                 .iter()
                 .filter(|item| {
-                    !item.blank && item.parent_session_id.is_none() && item.origin.is_none()
+                    !item.blank
+                        && item.parent_session_id.is_none()
+                        && item.origin.is_none()
+                        && item.cwd.as_deref() == Some(cwd)
                 })
-                .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at))
-                .or_else(|| {
-                    list.items
-                        .iter()
-                        .filter(|item| !item.blank)
-                        .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at))
-                });
-            match recent {
-                Some(item) => Ok(item.session_id.clone()),
-                None => create_session(transport, cwd, None),
-            }
+                .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at));
+            recent.map(|item| item.session_id.clone()).ok_or_else(|| {
+                PagerError::new(format!(
+                    "no resumable top-level session found for current directory {cwd:?}"
+                ))
+            })
         }
     }
 }

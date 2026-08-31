@@ -172,6 +172,13 @@ pack、cold/warm/offline、doctor 与真实 DSH PTY 演练；脚本会保留并�
 bash scripts/rehearse-release-candidate.sh
 ```
 
+本地 tarball 模式会把 CLI 的 host native 精确 override 到同批候选，避免同版本
+已发布 native 被 pnpm 解析进隔离图。演练还会断言打包后二进制无会话旗标时创建
+新会话，并从 legacy profile 备份迁移到 rc.2 family profile，补齐
+`@deepseek-ai/dsh-base`、hoisted linker 与关闭 peer 自动安装，同时按字节确认
+sessions/credentials sentinel 未变。PTY 凭据用例会移除调用者环境中的
+`DEEPSEEK_API_KEY`，只在隔离 `DSH_HOME` 写入测试占位值。
+
 DSH 多版本测试矩阵及 CI/发布门禁规格见
 [多版本兼容方案 §16–§17](DSH_MULTI_VERSION_COMPATIBILITY_PLAN.md#16-测试架构)，
 当前生成的支持表见 [DSH_SUPPORT.md](DSH_SUPPORT.md)。

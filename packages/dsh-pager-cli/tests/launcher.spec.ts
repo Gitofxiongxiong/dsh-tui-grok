@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   PROFILE_PREFIX,
+  PROFILE_BASE_BUNDLE,
   UnsupportedDshVersionError,
   commandName,
   extraArgsError,
@@ -74,6 +75,7 @@ describe('cli argv', () => {
   it('classifies launcher commands from argv[2]', () => {
     expect(commandName([])).toBe('run')
     expect(commandName(['--new'])).toBe('run')
+    expect(commandName(['--resume'])).toBe('run')
     expect(commandName(['doctor'])).toBe('doctor')
     expect(commandName(['--help'])).toBe('help')
     expect(commandName(['-v'])).toBe('version')
@@ -143,6 +145,7 @@ describe('cli argv', () => {
     const runtime = join(selectedProfile, 'node_modules', ...FAMILY_RUNTIME.split('/'))
     mkdirSync(runtime, { recursive: true })
     writeFileSync(join(selectedProfile, 'package.json'), JSON.stringify({
+      dsh: { profile: { bundles: [PROFILE_BASE_BUNDLE, FAMILY_RUNTIME] } },
       dshPagerGrok: {
         managed: true,
         adapterFamily: 'apiproxy-v1',
@@ -151,6 +154,10 @@ describe('cli argv', () => {
         runtimeVersion: '0.1.0',
       },
     }))
+    ensureProfileBuildPolicy(resolveDshSelection({}, {
+      entry: { node: process.execPath, binJs: dsh.binJs, source: 'test', custom: true },
+      registry: registry(),
+    }), { DSH_HOME: home })
     writeFileSync(join(runtime, 'package.json'), JSON.stringify({
       name: FAMILY_RUNTIME,
       version: '0.1.0',
@@ -201,6 +208,8 @@ describe('cli argv', () => {
     const text = helpText()
     expect(text).toContain('doctor [--release]')
     expect(text).toContain('compat/dsh-support.json')
+    expect(text).toContain('--resume [id]')
+    expect(text).toContain('No session flag starts a new conversation')
     expect(text).toContain('--backend-arg')
   })
 })
@@ -287,11 +296,16 @@ describe('family runtime warm skip', () => {
     temporaryRoots.push(home)
     const first = ensureProfileBuildPolicy(selected, { DSH_HOME: home })
     expect(first.created).toBe(true)
+    expect(readFileSync(first.path, 'utf8')).toContain('nodeLinker: hoisted')
+    expect(readFileSync(first.path, 'utf8')).toContain('autoInstallPeers: false')
     expect(readFileSync(first.path, 'utf8')).toContain("'@deepseek-ai/dsh-subprocess-local': true")
-    writeFileSync(first.path, 'packages:\n  - user-owned\n')
+    writeFileSync(first.path, 'packages:\n  - user-owned\nnodeLinker: isolated\nautoInstallPeers: true\n')
     const merged = ensureProfileBuildPolicy(selected, { DSH_HOME: home })
     expect(merged).toMatchObject({ created: false, updated: true })
-    expect(readFileSync(first.path, 'utf8')).toContain('  - user-owned\nallowBuilds:')
+    expect(readFileSync(first.path, 'utf8')).toContain('  - user-owned')
+    expect(readFileSync(first.path, 'utf8')).toContain('allowBuilds:')
+    expect(readFileSync(first.path, 'utf8')).toContain('nodeLinker: hoisted')
+    expect(readFileSync(first.path, 'utf8')).toContain('autoInstallPeers: false')
 
     writeFileSync(first.path, `packages:\n  - .\nallowBuilds:\n  node-pty: set this to true or false\n  koffi: false\n`)
     ensureProfileBuildPolicy(selected, { DSH_HOME: home })
@@ -356,6 +370,10 @@ describe('family profile migration', () => {
       runtimeVersion: '0.1.0',
       pagerSettings: { theme: 'dark', defaultView: 'dashboard', reducedMotion: true },
     })
+    expect(manifest.dsh.profile.bundles).toEqual([PROFILE_BASE_BUNDLE])
+    const migratedPolicy = readFileSync(join(profile, 'pnpm-workspace.yaml'), 'utf8')
+    expect(migratedPolicy).toContain('nodeLinker: hoisted')
+    expect(migratedPolicy).toContain('autoInstallPeers: false')
     expect(existsSync(join(profile, 'projection-cache'))).toBe(false)
     expect(readFileSync(join(result.backup!, 'projection-cache', 'cache.json'), 'utf8'))
       .toBe('{"private":"old"}\n')
@@ -387,6 +405,45 @@ describe('family profile migration', () => {
     expect(existsSync(legacy)).toBe(false)
     const created = JSON.parse(readFileSync(join(home, 'profiles', selected.profile, 'package.json'), 'utf8'))
     expect(created.dshPagerGrok.pagerSettings).toEqual({ theme: 'light' })
+    expect(created.dsh.profile.bundles).toEqual([PROFILE_BASE_BUNDLE])
+    expect(readFileSync(join(home, 'profiles', selected.profile, 'pnpm-workspace.yaml'), 'utf8'))
+      .toContain('nodeLinker: hoisted')
+  })
+
+  it('backs up an owned profile whose metadata is aligned but runtime layout is incomplete', () => {
+    const selected = selection()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-pager-incomplete-layout-'))
+    temporaryRoots.push(home)
+    const profile = join(home, 'profiles', selected.profile)
+    mkdirSync(profile, { recursive: true })
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({
+      dependencies: { [FAMILY_RUNTIME]: '0.1.0' },
+      dsh: { profile: { bundles: [FAMILY_RUNTIME] } },
+      dshPagerGrok: {
+        managed: true,
+        adapterFamily: selected.family,
+        dshVersion: selected.version,
+        profileSchema: selected.profileSchema,
+        runtimeVersion: '0.1.0',
+      },
+    }))
+    writeFileSync(join(profile, 'pnpm-workspace.yaml'), 'packages:\n  - .\nallowBuilds:\n  node-pty: true\n')
+
+    const result = prepareFamilyProfile('0.1.0', selected, { DSH_HOME: home }, {
+      stamp: 'layout',
+      log: () => {},
+    })
+
+    expect(result.action).toBe('migrated')
+    expect(result.backup).toBe(`${profile}.backup-layout`)
+    expect(existsSync(join(result.backup!, 'node_modules'))).toBe(false)
+    const rebuilt = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))
+    expect(rebuilt.dsh.profile.bundles).toEqual([PROFILE_BASE_BUNDLE])
+    expect(rebuilt.dependencies).toBeUndefined()
+    expect(needBundle({ DSH_HOME: home }, '0.1.0', selected)).toBe(true)
+    const policy = readFileSync(join(profile, 'pnpm-workspace.yaml'), 'utf8')
+    expect(policy).toContain('nodeLinker: hoisted')
+    expect(policy).toContain('autoInstallPeers: false')
   })
 
   it('refreshes aligned ownership without a backup and refuses an unowned target', () => {
@@ -397,6 +454,7 @@ describe('family profile migration', () => {
     mkdirSync(profile, { recursive: true })
     writeFileSync(join(profile, 'package.json'), JSON.stringify({
       name: 'preserved-name',
+      dsh: { profile: { bundles: [PROFILE_BASE_BUNDLE] } },
       dshPagerGrok: {
         managed: true,
         adapterFamily: selected.family,
@@ -405,6 +463,7 @@ describe('family profile migration', () => {
         runtimeVersion: '0.0.1',
       },
     }))
+    ensureProfileBuildPolicy(selected, { DSH_HOME: home })
     expect(prepareFamilyProfile('0.1.0', selected, { DSH_HOME: home }, { log: () => {} }).action)
       .toBe('aligned')
     expect(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')).dshPagerGrok.runtimeVersion)

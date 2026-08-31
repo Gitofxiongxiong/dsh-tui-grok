@@ -49,12 +49,13 @@ dsh-pager --new
 ```
 
 首次启动会在独立的 family profile（例如 `dsh-pager-grok-apiproxy-v1`）中准备所需 runtime，不会要求你
-手工复制 Harness 仓库。公开版 `0.1.0` 启动前需要由 DeepSeek Harness 的凭据层
+手工复制 Harness 仓库。公开版 `0.2.0` 启动前需要由 DeepSeek Harness 的凭据层
 提供 API Key，例如设置 `DEEPSEEK_API_KEY` 或使用已有的 `$DSH_HOME/.credentials.yaml`。
 
 > [!IMPORTANT]
-> npm `0.1.0` 还没有当前源码中的 `/login`、`/model`、agent preset 和
-> `--resume` 命令。上面的 `--new` 是公开版与当前源码都支持的确定性启动方式。
+> npm `0.2.0` 仍保留“无参数恢复最近会话”的旧行为；上面的 `--new` 是该已发布
+> 版本的确定性新会话入口。当前源码已修复为无参数默认新建，历史会话必须显式使用
+> `--resume`/`--continue` 或 TUI 内 `/resume`，将在下一个 patch release 生效。
 
 建议安装后先做一次不显示密钥值的环境检查：
 
@@ -74,7 +75,7 @@ dsh-pager doctor
 
 ## 常用操作
 
-### npm 0.1.0
+### npm 0.2.0
 
 | 命令 | 作用 |
 |---|---|

@@ -6,14 +6,17 @@ release_root="$(mktemp -d "${TMPDIR:-/tmp}/dsh-pager-release-candidate.XXXXXX")"
 artifacts="$release_root/artifacts"
 install_root="$release_root/cold-install"
 cold_home="$release_root/dsh-home"
+upgrade_home="$release_root/dsh-upgrade-home"
 logs="$release_root/logs"
-mkdir -p "$artifacts" "$install_root" "$cold_home" "$logs" "$release_root/pnpm-store"
+mkdir -p "$artifacts" "$install_root" "$cold_home" "$upgrade_home" "$logs" "$release_root/pnpm-store"
 
 printf 'release candidate root (retained): %s\n' "$release_root"
 printf 'No cleanup trap is installed; this isolated evidence directory is retained.\n'
 
 registry_version="${DSH_RELEASE_REGISTRY_VERSION:-}"
 registry_cli_tarball="${DSH_RELEASE_CLI_TARBALL:-}"
+candidate_native_name=""
+candidate_native_spec=""
 if [[ -n "$registry_version" || -n "$registry_cli_tarball" ]]; then
   if [[ ! "$registry_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
     printf 'DSH_RELEASE_REGISTRY_VERSION must be an exact semver\n' >&2
@@ -50,20 +53,30 @@ if (!runtime) process.exit(2)
 process.stdout.write(runtime.tarball)
 NODE
   )"
+  IFS=$'\t' read -r candidate_native_name candidate_native_spec \
+    < <(node --input-type=module - "$artifacts/release-candidates.json" <<'NODE'
+import fs from 'node:fs'
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const native = manifest.artifacts.find(item => item.id === 'native-host')
+if (!native) process.exit(2)
+process.stdout.write(`${native.name}\t${native.tarball}\n`)
+NODE
+  )
 fi
 
 cd "$install_root"
 npm init --yes >"$logs/npm-init.log" 2>&1
-cat >"$install_root/pnpm-workspace.yaml" <<'YAML'
-packages:
-  - .
-allowBuilds:
-  '@deepseek-ai/dsh-subprocess-local': true
-  '@google/genai': false
-  koffi: true
-  node-pty: true
-  protobufjs: false
-YAML
+node --input-type=module - \
+  "$install_root/pnpm-workspace.yaml" \
+  "$candidate_native_name" \
+  "$candidate_native_spec" <<'NODE'
+import fs from 'node:fs'
+const [, , policyPath, nativeName, nativeSpec] = process.argv
+const override = nativeName
+  ? `overrides:\n  ${JSON.stringify(nativeName)}: ${JSON.stringify(`file:${nativeSpec}`)}\n`
+  : ''
+fs.writeFileSync(policyPath, `packages:\n  - .\n${override}allowBuilds:\n  '@deepseek-ai/dsh-subprocess-local': true\n  '@google/genai': false\n  koffi: true\n  node-pty: true\n  protobufjs: false\n`)
+NODE
 corepack pnpm@11.20.0 --pm-on-fail=ignore --dir "$install_root" add --save-exact \
   --store-dir "$release_root/pnpm-store" \
   "${publish_tarballs[@]}" >"$logs/pnpm-install.log" 2>&1
@@ -143,15 +156,79 @@ NODE
 
 "$cli" --hello 2>&1 | tee "$logs/hello.log"
 "$cli" --list-sessions 2>&1 | tee "$logs/list.log"
-"$cli" --load-only --new 2>&1 | tee "$logs/load.log"
+"$cli" --load-only 2>&1 | tee "$logs/load.log"
 "$cli" doctor --release 2>&1 | tee "$logs/doctor-release.log"
 "$cli" --hello 2>&1 | tee "$logs/warm-hello.log"
 env npm_config_offline=true npm_config_registry=http://127.0.0.1:9 \
   "$cli" --hello 2>&1 | tee "$logs/offline-hello.log"
 
-DSH_HOME="$cold_home" python3 "$repo_root/scripts/pty-smoke.py" \
+"$native" --load-only \
+  --backend "$(command -v node)" \
+  --backend-arg "$repo_root/crates/dsh-pager-bin/tests/mock-server.mjs" \
+  2>&1 | tee "$logs/default-new-packaged.log"
+if ! rg -F 'SessionLoaded sessionId=session-created events=0 seq=-..-' \
+  "$logs/default-new-packaged.log" >/dev/null; then
+  printf 'packaged native pager did not use the default-new session path\n' >&2
+  exit 1
+fi
+
+node --input-type=module - "$upgrade_home" <<'NODE'
+import fs from 'node:fs'
+import path from 'node:path'
+const home = process.argv[2]
+const legacy = path.join(home, 'profiles', 'dsh-pager-grok')
+fs.mkdirSync(legacy, { recursive: true })
+fs.mkdirSync(path.join(home, 'sessions'), { recursive: true })
+fs.mkdirSync(path.join(home, 'credentials'), { recursive: true })
+fs.writeFileSync(path.join(legacy, 'package.json'), `${JSON.stringify({
+  name: 'dsh-pager-profile-legacy',
+  private: true,
+  dsh: { profile: { bundles: ['@dsh-pager-grok/runtime'] } },
+  dshPagerGrok: { pagerSettings: { theme: 'dark' } },
+}, null, 2)}\n`)
+fs.writeFileSync(path.join(legacy, 'pnpm-workspace.yaml'), `packages:\n  - .\nallowBuilds:\n  node-pty: true\n`)
+fs.writeFileSync(path.join(home, 'sessions', '.migration-sentinel'), 'sessions-untouched\n')
+fs.writeFileSync(path.join(home, 'credentials', '.migration-sentinel'), 'credentials-untouched\n')
+NODE
+
+DSH_HOME="$upgrade_home" \
+  DSH_PAGER_DEV_MODE=1 \
+  DSH_PAGER_RUNTIME_SPEC="$runtime_spec" \
+  DEEPSEEK_API_KEY=release-upgrade-smoke \
+  "$cli" update 2>&1 | tee "$logs/upgrade-profile.log"
+
+node --input-type=module - "$upgrade_home" <<'NODE'
+import fs from 'node:fs'
+import path from 'node:path'
+const home = process.argv[2]
+const profiles = path.join(home, 'profiles')
+const backups = fs.readdirSync(profiles).filter(name => name.startsWith('dsh-pager-grok.backup-'))
+if (backups.length !== 1) throw new Error(`expected one legacy profile backup, found ${backups.join(', ')}`)
+const profile = path.join(profiles, 'dsh-pager-grok-apiproxy-v1')
+const manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'))
+const bundles = manifest?.dsh?.profile?.bundles ?? []
+for (const required of ['@deepseek-ai/dsh-base', '@dsh-pager-grok/runtime-apiproxy-v1']) {
+  if (!bundles.includes(required)) throw new Error(`upgraded profile is missing bundle ${required}`)
+}
+const policy = fs.readFileSync(path.join(profile, 'pnpm-workspace.yaml'), 'utf8')
+if (!/^nodeLinker:\s*hoisted\s*$/m.test(policy)) throw new Error('upgraded profile is not hoisted')
+if (!/^autoInstallPeers:\s*false\s*$/m.test(policy)) throw new Error('upgraded profile auto-installs peers')
+if (fs.readFileSync(path.join(home, 'sessions', '.migration-sentinel'), 'utf8') !== 'sessions-untouched\n') {
+  throw new Error('sessions sentinel changed during profile migration')
+}
+if (fs.readFileSync(path.join(home, 'credentials', '.migration-sentinel'), 'utf8') !== 'credentials-untouched\n') {
+  throw new Error('credentials sentinel changed during profile migration')
+}
+NODE
+
+DSH_HOME="$upgrade_home" DEEPSEEK_API_KEY=release-upgrade-smoke \
+  "$cli" doctor 2>&1 | tee "$logs/upgrade-doctor.log"
+DSH_HOME="$upgrade_home" DEEPSEEK_API_KEY=release-upgrade-smoke \
+  "$cli" --hello 2>&1 | tee "$logs/upgrade-hello.log"
+
+env -u DEEPSEEK_API_KEY DSH_HOME="$cold_home" \
+  python3 "$repo_root/scripts/pty-smoke.py" \
   --binary "$native" \
-  --pager-arg=--new \
   --backend "$(command -v node)" \
   "--backend-arg=$dsh_entry" \
   "--backend-arg=--profile" \
@@ -186,6 +263,8 @@ const result = {
     'load',
     'warm-hello',
     'offline-hello',
+    'default-new-packaged',
+    'upgrade-migration',
     'pty',
   ],
 }
