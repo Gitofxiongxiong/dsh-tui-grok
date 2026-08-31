@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pager-grok/native-linux-arm64-gnu",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Prebuilt dsh-pager binary for linux arm64 glibc",
   "license": "MIT",
   "publishConfig": {

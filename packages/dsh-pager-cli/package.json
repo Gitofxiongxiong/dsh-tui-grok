@@ -1,6 +1,6 @@
 {
   "name": "@dsh-pager-grok/cli",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Product launcher for the dsh-pager native TUI",
   "license": "MIT",
   "publishConfig": {
@@ -39,10 +39,10 @@
     "pnpm": "11.20.0"
   },
   "optionalDependencies": {
-    "@dsh-pager-grok/native-darwin-arm64": "0.2.1",
-    "@dsh-pager-grok/native-darwin-x64": "0.2.1",
-    "@dsh-pager-grok/native-linux-arm64-gnu": "0.2.1",
-    "@dsh-pager-grok/native-linux-x64-gnu": "0.2.1",
-    "@dsh-pager-grok/native-win32-x64": "0.2.1"
+    "@dsh-pager-grok/native-darwin-arm64": "0.2.2",
+    "@dsh-pager-grok/native-darwin-x64": "0.2.2",
+    "@dsh-pager-grok/native-linux-arm64-gnu": "0.2.2",
+    "@dsh-pager-grok/native-linux-x64-gnu": "0.2.2",
+    "@dsh-pager-grok/native-win32-x64": "0.2.2"
   }
 }
