@@ -8,7 +8,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Gitofxiongxiong/dsh-tui-grok/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/Gitofxiongxiong/dsh-tui-grok/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40dsh-pager-grok%2Fcli?style=flat-square&logo=npm&label=npm)](https://www.npmjs.com/package/@dsh-pager-grok/cli) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-4f6ef7?style=flat-square) [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#许可证与来源)
 
-[快速开始](#快速开始) · [功能亮点](#功能亮点) · [常用操作](#常用操作) · [参与项目](#参与项目)
+[快速开始](#快速开始) · [功能亮点](#功能亮点) · [常用操作](#常用操作) · [Star 趋势](#star-趋势) · [参与项目](#参与项目)
 
 </div>
 
@@ -148,6 +148,20 @@ family。精确 tag、commit、distribution 与 profile schema 见自动生成�
 从旧的 pager-managed profile 切换 family/schema 时，CLI 会先备份完整旧 profile，
 只迁移白名单内的 pager 设置。sessions 和 credentials 不会被读取或修改；旧 projection
 cache 不迁移，只保留在备份目录中。
+
+## Star 趋势
+
+<p align="center">
+  <a href="https://github.com/Gitofxiongxiong/dsh-tui-grok/stargazers">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/star-history-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/readme/star-history.svg">
+      <img alt="dsh-tui-grok GitHub Star 数量增长趋势" src="docs/assets/readme/star-history.svg" width="900">
+    </picture>
+  </a>
+</p>
+
+<p align="center"><sub>累计 Star 数，由 GitHub Actions 在新增 Star 时触发，并每日自动校准。</sub></p>
 
 ## 本地开发
 

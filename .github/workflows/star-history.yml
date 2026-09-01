@@ -1,0 +1,154 @@
+name: star-history
+
+on:
+  schedule:
+    - cron: "37 4 * * *"
+  watch:
+    types: [started]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: star-history-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: update chart
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Generate candidate charts outside the worktree
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/generate-star-history.mjs \
+            --repo "${GITHUB_REPOSITORY}" \
+            --out-light "${RUNNER_TEMP}/star-history.svg" \
+            --out-dark "${RUNNER_TEMP}/star-history-dark.svg"
+
+      - name: Audit and commit changed charts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          light_path='docs/assets/readme/star-history.svg'
+          dark_path='docs/assets/readme/star-history-dark.svg'
+          if cmp -s "${RUNNER_TEMP}/star-history.svg" "${light_path}" && \
+             cmp -s "${RUNNER_TEMP}/star-history-dark.svg" "${dark_path}"; then
+            echo 'Star history is unchanged; no commit required.'
+            exit 0
+          fi
+
+          record_stamp="$(TZ=Asia/Shanghai date '+%Y-%m-%d_%H-%M-%S')"
+          record_time="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %z')"
+          record_path="docs/开发进度记录/${record_stamp}_自动更新Star趋势图.md"
+          export RECORD_PATH="${record_path}"
+          export RECORD_TIME="${record_time}"
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'
+
+          const content = `# 自动更新 Star 趋势图
+
+          > 记录时间：${process.env.RECORD_TIME}
+          > 操作者/agent：github-actions[bot]
+          > 状态：in-progress
+
+          ## 目标与背景
+
+          根据当前 GitHub stargazer 时间线更新 README 引用的明暗两版 Star 趋势图。
+
+          ## 设计契约和复用依据
+
+          - 对应长期计划章节：§2.8 变更前进度记录契约、§2.9 Git 提交契约。
+          - Grok source path、commit、SOURCE_REV：不适用。
+          - 复用等级：C；仅更新仓库统计文档资产。
+          - 图表只保存按日期累计的 Star 数，不保存 stargazer 身份。
+
+          ## 计划修改范围
+
+          - 文件：\`docs/assets/readme/star-history.svg\`
+          - 文件：\`docs/assets/readme/star-history-dark.svg\`
+          - 文件：\`${process.env.RECORD_PATH}\`
+          - 预期行为：更新折线、坐标轴与当前 Star 总数。
+          - 不在范围内：不修改 README 结构、TUI 或发布逻辑。
+
+          ## 风险、回滚和依赖
+
+          - 依赖 GitHub GraphQL API 和仓库自带的 \`GITHUB_TOKEN\`。
+          - 若 API 数据不完整，生成脚本会在改动工作树前失败。
+          - 回滚方式：回退本 bot commit 即可恢复上一版 SVG。
+
+          ## 实际修改
+
+          - 待生成文件写入工作树后回写。
+
+          ## 验证结果
+
+          - 待生成文件写入工作树后回写。
+
+          ## Git 提交
+
+          - commit message：\`docs: update star history chart\`
+          - Progress-Record trailer：\`Progress-Record: ${process.env.RECORD_PATH}\`
+          - 暂存区审计：待执行。
+
+          ## 未解决问题和下一步
+
+          - 无；后续由 schedule、watch 或手动触发继续更新。
+          `
+          fs.writeFileSync(process.env.RECORD_PATH, content.replace(/^          /gm, ''))
+          NODE
+
+          install -m 0644 "${RUNNER_TEMP}/star-history.svg" "${light_path}"
+          install -m 0644 "${RUNNER_TEMP}/star-history-dark.svg" "${dark_path}"
+          test -s "${light_path}"
+          test -s "${dark_path}"
+          grep -q '<svg ' "${light_path}"
+          grep -q '<svg ' "${dark_path}"
+          grep -q '</svg>' "${light_path}"
+          grep -q '</svg>' "${dark_path}"
+
+          export LIGHT_PATH="${light_path}"
+          export DARK_PATH="${dark_path}"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'
+
+          const recordPath = process.env.RECORD_PATH
+          let content = fs.readFileSync(recordPath, 'utf8')
+          content = content
+            .replace('> 状态：in-progress', '> 状态：completed')
+            .replace(
+              '- 待生成文件写入工作树后回写。',
+              `- 文件：\`${process.env.LIGHT_PATH}\`、\`${process.env.DARK_PATH}\`\n- 摘要：更新明暗两版累计 Star 折线图。`,
+            )
+            .replace(
+              '- 待生成文件写入工作树后回写。',
+              '- 命令：\`node scripts/generate-star-history.mjs --repo "${GITHUB_REPOSITORY}" ...\`\n- 结果：生成成功，SVG 非空且包含完整 \`<svg>\` 边界。',
+            )
+            .replace('- 暂存区审计：待执行。', '- 暂存区审计：只暂存本记录与两个 SVG。')
+          fs.writeFileSync(recordPath, content)
+          NODE
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${light_path}" "${dark_path}" "${record_path}"
+          git diff --cached --check
+
+          while IFS= read -r staged_path; do
+            case "${staged_path}" in
+              "${light_path}"|"${dark_path}"|"${record_path}") ;;
+              *) echo "Unexpected staged file: ${staged_path}" >&2; exit 1 ;;
+            esac
+          done < <(git -c core.quotePath=false diff --cached --name-only)
+          git commit \
+            -m 'docs: update star history chart' \
+            -m "Progress-Record: ${record_path}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
